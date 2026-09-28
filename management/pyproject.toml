@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "krit-management"
+version = "0.1.0"
+description = "Management panel for KRiT education center bot"
+requires-python = ">=3.13"
+dependencies = [
+  "certifi>=2026.2",
+  "httpx>=0.28,<1",
+  "pyside6-essentials>=6.10,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.4,<9", "ruff>=0.12,<1"]
+
+[project.gui-scripts]
+krit-management = "krit_management.main:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/krit_management"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+

@@ -1,0 +1,679 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import secrets
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from typing import Annotated, Any
+
+import jwt
+import structlog
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.responses import PlainTextResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pwdlib import PasswordHash
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+
+from .config import Settings
+from .db import (
+    AccessAttempt,
+    AdminUser,
+    BotState,
+    Person,
+    PersonRole,
+    StudentGuardian,
+    build_engine,
+    build_session_factory,
+    ensure_schema,
+    normalize_phone,
+    utcnow,
+)
+from .handler import EchoHandler
+from .max_api import MaxApiClient
+from .polling import run_polling
+from .syndication import (
+    SyndicationWorker,
+    VkApiClient,
+    VkLongPollWorker,
+    register_vk_event,
+)
+
+log = structlog.get_logger()
+bearer = HTTPBearer(auto_error=False)
+ROLES = {"student", "parent", "teacher"}
+password_hash = PasswordHash.recommended()
+
+
+class LoginPayload(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class TokenView(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class PersonPayload(BaseModel):
+    full_name: str = Field(min_length=3, max_length=250)
+    phone: str = Field(min_length=10, max_length=32)
+    roles: list[str] = Field(default_factory=list, min_length=1)
+    active: bool = True
+
+
+class RelatedPersonView(BaseModel):
+    id: int
+    full_name: str
+    phone: str
+    max_user_id: int | None
+    active: bool
+
+
+class PersonView(BaseModel):
+    id: int
+    full_name: str
+    phone: str
+    roles: list[str]
+    active: bool
+    max_user_id: int | None
+    archived_at: datetime | None
+    guardians: list[RelatedPersonView]
+    students: list[RelatedPersonView]
+
+
+class AccessAttemptView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    max_user_id: int
+    display_name: str | None
+    username: str | None
+    attempts: int
+    last_seen_at: Any
+
+
+class ManagementSnapshot(BaseModel):
+    status: str
+    people: list[PersonView]
+    archived_people: list[PersonView]
+    access_attempts: list[AccessAttemptView]
+
+
+def as_related(person: Person) -> RelatedPersonView:
+    return RelatedPersonView.model_validate(
+        {
+            "id": person.id,
+            "full_name": person.full_name,
+            "phone": person.phone,
+            "max_user_id": person.max_user_id,
+            "active": person.active,
+        }
+    )
+
+
+def as_person_view(person: Person) -> PersonView:
+    return PersonView(
+        id=person.id,
+        full_name=person.full_name,
+        phone=person.phone,
+        roles=sorted(link.role for link in person.role_links),
+        active=person.active,
+        max_user_id=person.max_user_id,
+        archived_at=person.archived_at,
+        guardians=[as_related(link.guardian) for link in person.guardian_links],
+        students=[as_related(link.student) for link in person.student_links],
+    )
+
+
+def normalized_person_data(payload: PersonPayload) -> tuple[list[str], str]:
+    roles = sorted(set(payload.roles))
+    if not roles or not set(roles).issubset(ROLES):
+        raise HTTPException(status_code=422, detail="Unknown role")
+    try:
+        phone = normalize_phone(payload.phone)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid phone") from exc
+    return roles, phone
+
+
+def create_app(settings: Settings) -> FastAPI:
+    engine = build_engine(settings.database_url)
+    sessions = build_session_factory(engine)
+    api = MaxApiClient(
+        token=settings.max_bot_token.get_secret_value(),  # type: ignore[union-attr]
+        base_url=settings.max_api_base_url,
+    )
+    handler = EchoHandler(sessions=sessions, api=api)
+    polling_task: asyncio.Task[None] | None = None
+    syndication_task: asyncio.Task[None] | None = None
+    vk_long_poll_task: asyncio.Task[None] | None = None
+    syndication_worker: SyndicationWorker | None = None
+    invalid_password_hash = password_hash.hash("invalid-password")
+
+    async def require_management_token(
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    ) -> None:
+        configured = settings.jwt_secret
+        if configured is None or credentials is None or credentials.scheme.lower() != "bearer":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        try:
+            payload = jwt.decode(
+                credentials.credentials,
+                configured.get_secret_value(),
+                algorithms=["HS256"],
+                issuer="krit-bot",
+                options={"require": ["exp", "sub", "iss"]},
+            )
+            admin_id = int(payload["sub"])
+        except (jwt.PyJWTError, ValueError, KeyError) as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED) from exc
+        async with sessions() as session:
+            admin = await session.get(AdminUser, admin_id)
+        if admin is None or not admin.active:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+
+    async def ensure_bootstrap_admin() -> None:
+        async with sessions() as session:
+            if await session.scalar(select(AdminUser.id).limit(1)) is not None:
+                return
+            session.add(
+                AdminUser(
+                    username=settings.bootstrap_admin_username,
+                    password_hash=password_hash.hash(
+                        settings.bootstrap_admin_password.get_secret_value()
+                    ),
+                    active=True,
+                )
+            )
+            await session.commit()
+
+    def issue_token(admin: AdminUser) -> TokenView:
+        configured = settings.jwt_secret
+        if configured is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+        lifetime = timedelta(hours=8)
+        now = datetime.now(UTC)
+        encoded = jwt.encode(
+            {"sub": str(admin.id), "iss": "krit-bot", "iat": now, "exp": now + lifetime},
+            configured.get_secret_value(),
+            algorithm="HS256",
+        )
+        return TokenView(access_token=encoded, expires_in=int(lifetime.total_seconds()))
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        nonlocal polling_task, syndication_task, vk_long_poll_task, syndication_worker
+        await ensure_schema(engine)
+        await ensure_bootstrap_admin()
+        if settings.bot_mode == "polling":
+            me = await api.get_me()
+            log.info("bot_started", bot_id=me.get("user_id"), username=me.get("username"))
+            polling_task = asyncio.create_task(
+                run_polling(
+                    api=api,
+                    handler=handler,
+                    sessions=sessions,
+                    poll_timeout=settings.polling_timeout_seconds,
+                ),
+                name="max-long-polling",
+            )
+        if settings.vk_syndication_enabled:
+            required = {
+                "VK_ACCESS_TOKEN": settings.vk_access_token,
+                "VK_COMMUNITY_ID": settings.vk_community_id,
+                "MAX_CHANNEL_ID": settings.max_channel_id,
+            }
+            missing = [name for name, value in required.items() if value is None]
+            if missing:
+                raise RuntimeError(
+                    "VK syndication is enabled but settings are missing: " + ", ".join(missing)
+                )
+            chat = await api.get_chat(chat_id=settings.max_channel_id)  # type: ignore[arg-type]
+            membership = await api.get_membership(
+                chat_id=settings.max_channel_id  # type: ignore[arg-type]
+            )
+            if chat.get("type") != "channel" or chat.get("status") != "active":
+                raise RuntimeError("Configured MAX destination is not an active channel")
+            if not membership.get("is_admin") or "write" not in (
+                membership.get("permissions") or []
+            ):
+                raise RuntimeError("MAX bot does not have channel write permission")
+            vk_api = VkApiClient(
+                token=settings.vk_access_token.get_secret_value(),  # type: ignore[union-attr]
+                base_url=settings.vk_api_base_url,
+                version=settings.vk_api_version,
+            )
+            syndication_worker = SyndicationWorker(
+                sessions=sessions,
+                vk=vk_api,
+                max_api=api,
+                poll_seconds=settings.syndication_poll_seconds,
+                max_attempts=settings.syndication_max_attempts,
+                download_limit_bytes=settings.syndication_download_limit_bytes,
+            )
+            syndication_task = asyncio.create_task(
+                syndication_worker.run(), name="vk-to-max-syndication"
+            )
+            vk_long_poll_task = asyncio.create_task(
+                VkLongPollWorker(
+                    sessions=sessions,
+                    vk=vk_api,
+                    community_id=settings.vk_community_id,  # type: ignore[arg-type]
+                    max_chat_id=settings.max_channel_id,  # type: ignore[arg-type]
+                    wait_seconds=settings.vk_long_poll_wait_seconds,
+                ).run(),
+                name="vk-bots-long-poll",
+            )
+            log.info(
+                "syndication_started",
+                community_id=settings.vk_community_id,
+                max_chat_id=settings.max_channel_id,
+            )
+        yield
+        if vk_long_poll_task is not None:
+            vk_long_poll_task.cancel()
+            await asyncio.gather(vk_long_poll_task, return_exceptions=True)
+        if syndication_task is not None:
+            syndication_task.cancel()
+            await asyncio.gather(syndication_task, return_exceptions=True)
+        if syndication_worker is not None:
+            await syndication_worker.close()
+        if polling_task is not None:
+            polling_task.cancel()
+            await asyncio.gather(polling_task, return_exceptions=True)
+        await api.close()
+        await engine.dispose()
+
+    app = FastAPI(title="KRiT MAX Bot", lifespan=lifespan, docs_url=None, redoc_url=None)
+
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.post("/api/v1/auth/login", response_model=TokenView)
+    async def login(payload: LoginPayload) -> TokenView:
+        async with sessions() as session:
+            admin = await session.scalar(
+                select(AdminUser).where(AdminUser.username == payload.username)
+            )
+        comparison_hash = admin.password_hash if admin is not None else invalid_password_hash
+        password_valid = password_hash.verify(payload.password, comparison_hash)
+        if admin is None or not admin.active or not password_valid:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        return issue_token(admin)
+
+    @app.get("/api/v1/status", dependencies=[Depends(require_management_token)])
+    async def management_status() -> dict[str, str]:
+        return {"status": "ok", "bot_mode": settings.bot_mode}
+
+    @app.get(
+        "/api/v1/snapshot",
+        response_model=ManagementSnapshot,
+        dependencies=[Depends(require_management_token)],
+    )
+    async def management_snapshot() -> dict[str, Any]:
+        async with sessions() as session:
+            people = list(
+                (
+                    await session.scalars(
+                        select(Person)
+                        .where(Person.archived_at.is_(None))
+                        .order_by(Person.full_name)
+                    )
+                ).all()
+            )
+            archived_people = list(
+                (
+                    await session.scalars(
+                        select(Person)
+                        .where(Person.archived_at.is_not(None))
+                        .order_by(Person.archived_at.desc(), Person.full_name)
+                    )
+                ).all()
+            )
+            known_ids = select(Person.max_user_id).where(
+                Person.max_user_id.is_not(None), Person.archived_at.is_(None)
+            )
+            attempts = list(
+                (
+                    await session.scalars(
+                        select(AccessAttempt)
+                        .where(~AccessAttempt.max_user_id.in_(known_ids))
+                        .order_by(AccessAttempt.last_seen_at.desc())
+                        .limit(100)
+                    )
+                ).all()
+            )
+        return {
+            "status": "ok",
+            "people": [as_person_view(person) for person in people],
+            "archived_people": [as_person_view(person) for person in archived_people],
+            "access_attempts": attempts,
+        }
+
+    @app.get(
+        "/api/v1/people",
+        response_model=list[PersonView],
+        dependencies=[Depends(require_management_token)],
+    )
+    async def list_people() -> list[PersonView]:
+        async with sessions() as session:
+            people = list(
+                (
+                    await session.scalars(
+                        select(Person)
+                        .where(Person.archived_at.is_(None))
+                        .order_by(Person.full_name)
+                    )
+                ).all()
+            )
+            return [as_person_view(person) for person in people]
+
+    @app.get(
+        "/api/v1/people-archive",
+        response_model=list[PersonView],
+        dependencies=[Depends(require_management_token)],
+    )
+    async def list_archived_people() -> list[PersonView]:
+        async with sessions() as session:
+            people = list(
+                (
+                    await session.scalars(
+                        select(Person)
+                        .where(Person.archived_at.is_not(None))
+                        .order_by(Person.archived_at.desc(), Person.full_name)
+                    )
+                ).all()
+            )
+            return [as_person_view(person) for person in people]
+
+    @app.post(
+        "/api/v1/people",
+        response_model=PersonView,
+        status_code=status.HTTP_201_CREATED,
+        dependencies=[Depends(require_management_token)],
+    )
+    async def create_person(payload: PersonPayload) -> PersonView:
+        roles, phone = normalized_person_data(payload)
+        async with sessions() as session:
+            person = Person(
+                full_name=" ".join(payload.full_name.split()),
+                phone=phone,
+                active=payload.active,
+            )
+            current_roles = {link.role: link for link in person.role_links}
+            for role, link in current_roles.items():
+                if role not in roles:
+                    await session.delete(link)
+            for role in roles:
+                if role not in current_roles:
+                    person.role_links.append(PersonRole(role=role))
+            session.add(person)
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                raise HTTPException(
+                    status_code=409, detail="Карточка с таким телефоном уже существует"
+                ) from exc
+            await session.refresh(person)
+            return as_person_view(person)
+
+    @app.post(
+        "/api/v1/people/{student_id}/guardians/{guardian_id}",
+        response_model=PersonView,
+        dependencies=[Depends(require_management_token)],
+    )
+    async def link_student_guardian(student_id: int, guardian_id: int) -> PersonView:
+        if student_id == guardian_id:
+            raise HTTPException(status_code=422, detail="Нельзя связать карточку с самой собой")
+        async with sessions() as session:
+            student = await session.get(Person, student_id)
+            guardian = await session.get(Person, guardian_id)
+            if (
+                student is None
+                or guardian is None
+                or student.archived_at is not None
+                or guardian.archived_at is not None
+            ):
+                raise HTTPException(status_code=404)
+            if "student" not in {link.role for link in student.role_links}:
+                raise HTTPException(status_code=422, detail="Первая карточка не является учеником")
+            if "parent" not in {link.role for link in guardian.role_links}:
+                raise HTTPException(status_code=422, detail="Вторая карточка не является родителем")
+            link = await session.get(StudentGuardian, (student_id, guardian_id))
+            if link is None:
+                student.guardian_links.append(StudentGuardian(guardian=guardian))
+                await session.commit()
+                await session.refresh(student)
+            return as_person_view(student)
+
+    @app.delete(
+        "/api/v1/people/{student_id}/guardians/{guardian_id}",
+        dependencies=[Depends(require_management_token)],
+    )
+    async def unlink_student_guardian(student_id: int, guardian_id: int) -> dict[str, bool]:
+        async with sessions() as session:
+            link = await session.get(StudentGuardian, (student_id, guardian_id))
+            if link is None:
+                raise HTTPException(status_code=404)
+            await session.delete(link)
+            await session.commit()
+            return {"deleted": True}
+
+    @app.put(
+        "/api/v1/people/{person_id}",
+        response_model=PersonView,
+        dependencies=[Depends(require_management_token)],
+    )
+    async def update_person(person_id: int, payload: PersonPayload) -> PersonView:
+        roles, phone = normalized_person_data(payload)
+        async with sessions() as session:
+            person = await session.get(Person, person_id)
+            if person is None or person.archived_at is not None:
+                raise HTTPException(status_code=404)
+            person.full_name = " ".join(payload.full_name.split())
+            if person.phone != phone:
+                person.max_user_id = None
+            person.phone = phone
+            if person.guardian_links and "student" not in roles:
+                raise HTTPException(status_code=409, detail="У клиента есть связанные родители")
+            if person.student_links and "parent" not in roles:
+                raise HTTPException(status_code=409, detail="У клиента есть связанные ученики")
+            current_roles = {link.role: link for link in person.role_links}
+            for role, link in current_roles.items():
+                if role not in roles:
+                    await session.delete(link)
+            for role in roles:
+                if role not in current_roles:
+                    person.role_links.append(PersonRole(role=role))
+            person.active = payload.active
+            person.updated_at = utcnow()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                raise HTTPException(
+                    status_code=409, detail="Карточка с таким телефоном уже существует"
+                ) from exc
+            await session.refresh(person)
+            return as_person_view(person)
+
+    @app.post(
+        "/api/v1/people/{person_id}/archive",
+        response_model=PersonView,
+        dependencies=[Depends(require_management_token)],
+    )
+    async def archive_person(person_id: int) -> PersonView:
+        async with sessions() as session:
+            person = await session.get(Person, person_id)
+            if person is None or person.archived_at is not None:
+                raise HTTPException(status_code=404)
+            person.archived_at = utcnow()
+            person.updated_at = utcnow()
+            await session.commit()
+            await session.refresh(person)
+            return as_person_view(person)
+
+    @app.post(
+        "/api/v1/people/{person_id}/restore",
+        response_model=PersonView,
+        dependencies=[Depends(require_management_token)],
+    )
+    async def restore_person(person_id: int) -> PersonView:
+        async with sessions() as session:
+            person = await session.get(Person, person_id)
+            if person is None or person.archived_at is None:
+                raise HTTPException(status_code=404)
+            person.archived_at = None
+            person.updated_at = utcnow()
+            await session.commit()
+            await session.refresh(person)
+            return as_person_view(person)
+
+    @app.delete(
+        "/api/v1/people/{person_id}",
+        dependencies=[Depends(require_management_token)],
+    )
+    async def delete_person(person_id: int) -> dict[str, bool]:
+        async with sessions() as session:
+            person = await session.get(Person, person_id)
+            if person is None or person.archived_at is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Перед удалением перенесите клиента в архив",
+                )
+            await session.delete(person)
+            await session.commit()
+            return {"deleted": True}
+
+    @app.get(
+        "/api/v1/access-attempts",
+        response_model=list[AccessAttemptView],
+        dependencies=[Depends(require_management_token)],
+    )
+    async def list_access_attempts() -> list[AccessAttempt]:
+        async with sessions() as session:
+            known_ids = select(Person.max_user_id).where(
+                Person.max_user_id.is_not(None), Person.archived_at.is_(None)
+            )
+            return list(
+                (
+                    await session.scalars(
+                        select(AccessAttempt)
+                        .where(~AccessAttempt.max_user_id.in_(known_ids))
+                        .order_by(AccessAttempt.last_seen_at.desc())
+                        .limit(100)
+                    )
+                ).all()
+            )
+
+    @app.post("/webhooks/max", status_code=status.HTTP_200_OK)
+    async def max_webhook(
+        request: Request,
+        provided_secret: str | None = Header(default=None, alias="X-Max-Bot-Api-Secret"),
+    ) -> dict[str, bool]:
+        expected = settings.max_webhook_secret
+        if (
+            expected is None
+            or provided_secret is None
+            or not secrets.compare_digest(provided_secret, expected.get_secret_value())
+        ):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        update: dict[str, Any] = await request.json()
+        chat = update.get("chat") if isinstance(update.get("chat"), dict) else {}
+        message = update.get("message") if isinstance(update.get("message"), dict) else {}
+        recipient = (
+            message.get("recipient") if isinstance(message.get("recipient"), dict) else {}
+        )
+        candidate_id = update.get("chat_id") or chat.get("chat_id") or recipient.get("chat_id")
+        if isinstance(candidate_id, int):
+            details = {
+                "update_type": update.get("update_type"),
+                "type": chat.get("type") or recipient.get("chat_type"),
+                "title": chat.get("title") or recipient.get("title"),
+                "link": chat.get("link"),
+            }
+            async with sessions() as session:
+                key = f"max_chat_candidate:{candidate_id}"
+                state = await session.get(BotState, key)
+                if state is None:
+                    session.add(BotState(key=key, value=json.dumps(details, ensure_ascii=False)))
+                else:
+                    state.value = json.dumps(details, ensure_ascii=False)
+                    state.updated_at = utcnow()
+                await session.commit()
+            log.info(
+                "max_chat_event",
+                chat_id=candidate_id,
+                chat_type=details["type"],
+                title=details["title"],
+                update_type=details["update_type"],
+            )
+        await handler.handle(update)
+        return {"ok": True}
+
+    @app.post("/webhooks/vk", response_class=PlainTextResponse)
+    async def vk_webhook(request: Request) -> str:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
+        expected_secret = settings.vk_callback_secret
+        expected_group = settings.vk_community_id
+        if expected_secret is None or expected_group is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        provided_secret = str(payload.get("secret") or "")
+        if not secrets.compare_digest(provided_secret, expected_secret.get_secret_value()):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        try:
+            group_id = int(payload.get("group_id"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST) from exc
+        if group_id != expected_group:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        event_type = str(payload.get("type") or "")
+        if event_type == "confirmation":
+            confirmation = settings.vk_callback_confirmation
+            if confirmation is None:
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return confirmation.get_secret_value()
+        if event_type != "wall_post_new":
+            return "ok"
+        if settings.max_channel_id is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+        event_object = payload.get("object")
+        if isinstance(event_object, dict) and isinstance(event_object.get("object"), dict):
+            event_object = event_object["object"]
+        if not isinstance(event_object, dict):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
+        try:
+            post_id = int(event_object.get("id", event_object.get("post_id")))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST) from exc
+        owner_id = event_object.get("owner_id")
+        try:
+            if owner_id is not None and int(owner_id) != -expected_group:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST) from exc
+        stored_event = dict(payload)
+        stored_event.pop("secret", None)
+        job_id, created = await register_vk_event(
+            sessions,
+            community_id=group_id,
+            post_id=post_id,
+            max_chat_id=settings.max_channel_id,
+            event_id=str(payload.get("event_id")) if payload.get("event_id") else None,
+            raw_event=stored_event,
+        )
+        log.info(
+            "vk_event_registered",
+            community_id=group_id,
+            post_id=post_id,
+            job_id=job_id,
+            duplicate=not created,
+        )
+        return "ok"
+
+    return app

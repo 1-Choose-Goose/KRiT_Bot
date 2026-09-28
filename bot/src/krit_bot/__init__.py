@@ -1,0 +1,1 @@
+"""KRiT MAX bot."""

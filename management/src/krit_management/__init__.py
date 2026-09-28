@@ -1,0 +1,1 @@
+"""KRiT management application."""
