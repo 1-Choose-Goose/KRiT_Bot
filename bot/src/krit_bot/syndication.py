@@ -72,9 +72,7 @@ class VkApiClient:
             raise VkApiError("VK Long Poll session is incomplete", transient=True)
         return {name: str(value) for name, value in values.items()}
 
-    async def poll(
-        self, *, server: str, key: str, ts: str, wait: int = 25
-    ) -> dict[str, Any]:
+    async def poll(self, *, server: str, key: str, ts: str, wait: int = 25) -> dict[str, Any]:
         if not server.startswith("https://"):
             raise VkApiError("VK Long Poll server is not HTTPS", transient=False)
         try:
@@ -143,9 +141,7 @@ class VkLongPollWorker:
         while True:
             try:
                 if session is None:
-                    session = await self.vk.get_long_poll_server(
-                        community_id=self.community_id
-                    )
+                    session = await self.vk.get_long_poll_server(community_id=self.community_id)
                     log.info("vk_long_poll_session_started", community_id=self.community_id)
                 payload = await self.vk.poll(
                     server=session["server"],
@@ -457,7 +453,7 @@ class SyndicationWorker:
                     transient = True
                 if transient and job.attempts < self.max_attempts:
                     job.status = "retry"
-                    job.next_attempt_at = utcnow() + timedelta(seconds=min(300, 2 ** job.attempts))
+                    job.next_attempt_at = utcnow() + timedelta(seconds=min(300, 2**job.attempts))
                 else:
                     job.status = "failed"
                     job.next_attempt_at = None
@@ -475,7 +471,7 @@ class SyndicationWorker:
             except Exception as exc:
                 if job.attempts < self.max_attempts:
                     job.status = "retry"
-                    job.next_attempt_at = utcnow() + timedelta(seconds=min(300, 2 ** job.attempts))
+                    job.next_attempt_at = utcnow() + timedelta(seconds=min(300, 2**job.attempts))
                 else:
                     job.status = "failed"
                     job.next_attempt_at = None

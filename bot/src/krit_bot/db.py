@@ -15,6 +15,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
+    or_,
     select,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -128,6 +130,13 @@ class AdminUser(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class SchemaMigration(Base):
+    __tablename__ = "schema_migrations"
+
+    version: Mapped[str] = mapped_column(String(80), primary_key=True)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class SyndicationJob(Base):
     __tablename__ = "syndication_jobs"
     __table_args__ = (
@@ -169,7 +178,16 @@ def build_engine(database_url: str) -> AsyncEngine:
         raw_path = database_url.split("///", 1)[-1]
         if raw_path and raw_path != ":memory:":
             Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
-    return create_async_engine(database_url, pool_pre_ping=True)
+    engine = create_async_engine(database_url, pool_pre_ping=True)
+    if database_url.startswith("sqlite"):
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+    return engine
 
 
 def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
@@ -177,8 +195,41 @@ def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessio
 
 
 async def ensure_schema(engine: AsyncEngine) -> None:
+    from . import learning_models
+
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        version = "20260928_learning_process_v1"
+        existing = await connection.scalar(
+            select(SchemaMigration.version).where(SchemaMigration.version == version)
+        )
+        if existing is None:
+            linked_people = (
+                await connection.execute(
+                    select(Person.id, Person.phone, Person.max_user_id).where(
+                        Person.max_user_id.is_not(None)
+                    )
+                )
+            ).all()
+            existing_identity_ids = set(
+                (
+                    await connection.scalars(select(learning_models.PersonMaxIdentity.person_id))
+                ).all()
+            )
+            for person_id, phone, max_user_id in linked_people:
+                if person_id not in existing_identity_ids:
+                    await connection.execute(
+                        learning_models.PersonMaxIdentity.__table__.insert().values(
+                            person_id=person_id,
+                            verified_phone=phone,
+                            max_user_id=max_user_id,
+                            verified_at=utcnow(),
+                            updated_at=utcnow(),
+                        )
+                    )
+            await connection.execute(
+                SchemaMigration.__table__.insert().values(version=version, applied_at=utcnow())
+            )
 
 
 async def is_authorized(session: AsyncSession, max_user_id: int) -> bool:
@@ -195,13 +246,23 @@ async def is_authorized(session: AsyncSession, max_user_id: int) -> bool:
 async def bind_max_user_by_phone(
     session: AsyncSession, *, phone: str, max_user_id: int
 ) -> Literal["linked", "already_linked", "not_found", "belongs_to_another_user"]:
+    from .learning_models import PersonMaxIdentity
+
     existing = await session.scalar(select(Person).where(Person.max_user_id == max_user_id))
-    if existing is not None and existing.phone != phone:
+    existing_identity = await session.scalar(
+        select(PersonMaxIdentity).where(PersonMaxIdentity.max_user_id == max_user_id)
+    )
+    if existing_identity is not None and existing_identity.verified_phone != phone:
         return "belongs_to_another_user"
+    if existing is not None and existing_identity is None and existing.phone != phone:
+        return "belongs_to_another_user"
+    identity_person_id = await session.scalar(
+        select(PersonMaxIdentity.person_id).where(PersonMaxIdentity.verified_phone == phone)
+    )
     statement = (
         select(Person)
         .where(
-            Person.phone == phone,
+            or_(Person.id == identity_person_id, Person.phone == phone),
             Person.active.is_(True),
             Person.archived_at.is_(None),
         )
@@ -214,6 +275,22 @@ async def bind_max_user_by_phone(
         return "already_linked"
     if person.max_user_id is not None:
         return "belongs_to_another_user"
+    identity = await session.get(PersonMaxIdentity, person.id)
+    if identity is None:
+        identity = PersonMaxIdentity(
+            person_id=person.id,
+            verified_phone=phone,
+            max_user_id=max_user_id,
+            verified_at=utcnow(),
+        )
+        session.add(identity)
+    elif identity.max_user_id not in {None, max_user_id}:
+        return "belongs_to_another_user"
+    else:
+        identity.max_user_id = max_user_id
+        identity.verified_phone = phone
+        identity.verified_at = utcnow()
+        identity.updated_at = utcnow()
     person.max_user_id = max_user_id
     person.updated_at = utcnow()
     await session.flush()

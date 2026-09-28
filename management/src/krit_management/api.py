@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -69,6 +70,88 @@ class ManagementApi:
     def access_attempts(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/access-attempts")
         return data if isinstance(data, list) else []
+
+    def learning_reference_data(self) -> dict[str, Any]:
+        data = self._request("GET", "/learning/reference-data")
+        return data if isinstance(data, dict) else {}
+
+    def learning_today(self) -> dict[str, Any]:
+        data = self._request("GET", "/learning/today")
+        return data if isinstance(data, dict) else {}
+
+    def learning_lessons(self, date_from: str, date_to: str) -> list[dict[str, Any]]:
+        data = self._request(
+            "GET",
+            "/learning/lessons",
+            params={"date_from": date_from, "date_to": date_to},
+        )
+        return data if isinstance(data, list) else []
+
+    def create_learning_item(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", f"/learning/{kind}", json=payload)
+
+    def update_learning_item(
+        self, kind: str, item_id: int, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._request("PUT", f"/learning/{kind}/{item_id}", json=payload)
+
+    def create_lesson(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/learning/lessons", json=payload)
+
+    def create_lesson_series(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/learning/series", json=payload)
+
+    def update_lesson(self, lesson_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("PUT", f"/learning/lessons/{lesson_id}", json=payload)
+
+    def update_lesson_series(self, series_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("PUT", f"/learning/series/{series_id}", json=payload)
+
+    def lesson_action(
+        self, lesson_id: int, action: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return self._request("POST", f"/learning/lessons/{lesson_id}/{action}", json=payload or {})
+
+    def presence_action(self, person_id: int, action: str) -> dict[str, Any]:
+        return self._request("POST", f"/learning/presence/{person_id}/{action}")
+
+    def student_history(self, person_id: int) -> dict[str, Any]:
+        data = self._request("GET", f"/learning/history/person/{person_id}")
+        return data if isinstance(data, dict) else {}
+
+    def teacher_history(self, person_id: int) -> dict[str, Any]:
+        data = self._request("GET", f"/learning/history/teacher/{person_id}")
+        return data if isinstance(data, dict) else {}
+
+    def set_attendance(
+        self, lesson_id: int, person_id: int, attendance_status: str
+    ) -> dict[str, Any]:
+        return self._request(
+            "PUT",
+            f"/learning/lessons/{lesson_id}/participants/{person_id}/attendance",
+            json={"status": attendance_status},
+        )
+
+    def read_admin_notification(self, notification_id: int) -> dict[str, Any]:
+        return self._request("POST", f"/learning/admin-notifications/{notification_id}/read")
+
+    def group_memberships(self, group_id: int) -> list[dict[str, Any]]:
+        data = self._request("GET", f"/learning/groups/{group_id}/memberships")
+        return data if isinstance(data, list) else []
+
+    def add_group_membership(self, group_id: int, person_id: int) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/learning/groups/{group_id}/memberships",
+            json={"person_id": person_id, "start_at": datetime.now().astimezone().isoformat()},
+        )
+
+    def end_group_membership(self, group_id: int, membership_id: int) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/learning/groups/{group_id}/memberships/{membership_id}/end",
+            json={},
+        )
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         try:

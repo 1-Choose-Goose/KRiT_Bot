@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     syndication_download_limit_bytes: int = Field(
         default=50 * 1024 * 1024, ge=1024, le=250 * 1024 * 1024
     )
+    center_timezone: str = "Asia/Yekaterinburg"
     log_level: str = "INFO"
 
     @model_validator(mode="after")

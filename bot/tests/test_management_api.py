@@ -79,22 +79,16 @@ async def test_login_protects_management_api_and_allows_person_creation(tmp_path
             parent_view = next(item for item in people if item["id"] == parent_id)
             assert parent_view["students"][0]["id"] == person_id
 
-            archived = await client.post(
-                f"/api/v1/people/{person_id}/archive", headers=headers
-            )
+            archived = await client.post(f"/api/v1/people/{person_id}/archive", headers=headers)
             assert archived.status_code == 200
             assert archived.json()["archived_at"] is not None
             assert all(
                 item["id"] != person_id
                 for item in (await client.get("/api/v1/people", headers=headers)).json()
             )
-            assert len(
-                (await client.get("/api/v1/people-archive", headers=headers)).json()
-            ) == 1
+            assert len((await client.get("/api/v1/people-archive", headers=headers)).json()) == 1
 
-            restored = await client.post(
-                f"/api/v1/people/{person_id}/restore", headers=headers
-            )
+            restored = await client.post(f"/api/v1/people/{person_id}/restore", headers=headers)
             assert restored.status_code == 200
             assert restored.json()["archived_at"] is None
             assert restored.json()["guardians"][0]["id"] == parent_id
@@ -106,8 +100,6 @@ async def test_login_protects_management_api_and_allows_person_creation(tmp_path
             assert len((await client.get("/api/v1/people", headers=headers)).json()) == 2
 
             await client.post(f"/api/v1/people/{person_id}/archive", headers=headers)
-            deleted = await client.delete(
-                f"/api/v1/people/{person_id}", headers=headers
-            )
+            deleted = await client.delete(f"/api/v1/people/{person_id}", headers=headers)
             assert deleted.status_code == 200
             assert (await client.get("/api/v1/people-archive", headers=headers)).json() == []

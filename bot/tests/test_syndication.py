@@ -77,43 +77,69 @@ def test_text_post() -> None:
 
 def test_one_photo_uses_largest_size() -> None:
     prepared = prepare_post(
-        {"attachments": [{"type": "photo", "photo": {"id": 7, "sizes": [
-            {"url": "https://vk.test/s.jpg", "width": 100, "height": 100},
-            {"url": "https://vk.test/l.jpg", "width": 1000, "height": 800},
-        ]}}]}
+        {
+            "attachments": [
+                {
+                    "type": "photo",
+                    "photo": {
+                        "id": 7,
+                        "sizes": [
+                            {"url": "https://vk.test/s.jpg", "width": 100, "height": 100},
+                            {"url": "https://vk.test/l.jpg", "width": 1000, "height": 800},
+                        ],
+                    },
+                }
+            ]
+        }
     )
     assert prepared.media == [("image", "https://vk.test/l.jpg", "vk-photo-7.jpg")]
 
 
 def test_multiple_photos_keep_order() -> None:
-    prepared = prepare_post({"attachments": [
-        {"type": "photo", "photo": {
-            "id": 1, "sizes": [{"url": "https://vk/1", "width": 1, "height": 1}]
-        }},
-        {"type": "photo", "photo": {
-            "id": 2, "sizes": [{"url": "https://vk/2", "width": 1, "height": 1}]
-        }},
-    ]})
+    prepared = prepare_post(
+        {
+            "attachments": [
+                {
+                    "type": "photo",
+                    "photo": {"id": 1, "sizes": [{"url": "https://vk/1", "width": 1, "height": 1}]},
+                },
+                {
+                    "type": "photo",
+                    "photo": {"id": 2, "sizes": [{"url": "https://vk/2", "width": 1, "height": 1}]},
+                },
+            ]
+        }
+    )
     assert [item[1] for item in prepared.media] == ["https://vk/1", "https://vk/2"]
 
 
 def test_text_and_photo() -> None:
-    prepared = prepare_post({"text": "Текст", "attachments": [
-        {"type": "photo", "photo": {
-            "sizes": [{"url": "https://vk/image", "width": 1, "height": 1}]
-        }}
-    ]})
+    prepared = prepare_post(
+        {
+            "text": "Текст",
+            "attachments": [
+                {
+                    "type": "photo",
+                    "photo": {"sizes": [{"url": "https://vk/image", "width": 1, "height": 1}]},
+                }
+            ],
+        }
+    )
     assert prepared.text == "Текст"
     assert prepared.media[0][0] == "image"
 
 
 def test_document_gif_link_and_unsupported_attachment() -> None:
-    prepared = prepare_post({"attachments": [
-        {"type": "doc", "doc": {"url": "https://vk/a.gif", "ext": "gif", "title": "a.gif"}},
-        {"type": "doc", "doc": {"url": "https://vk/a.pdf", "ext": "pdf", "title": "a.pdf"}},
-        {"type": "link", "link": {"url": "https://example.test"}},
-        {"type": "poll", "poll": {"id": 1}},
-    ]})
+    prepared = prepare_post(
+        {
+            "attachments": [
+                {"type": "doc", "doc": {"url": "https://vk/a.gif", "ext": "gif", "title": "a.gif"}},
+                {"type": "doc", "doc": {"url": "https://vk/a.pdf", "ext": "pdf", "title": "a.pdf"}},
+                {"type": "link", "link": {"url": "https://example.test"}},
+                {"type": "poll", "poll": {"id": 1}},
+            ]
+        }
+    )
     assert [item[0] for item in prepared.media] == ["image", "file", "share"]
     assert prepared.unsupported == ["poll"]
 
@@ -238,12 +264,15 @@ async def test_photos_are_sent_together_with_text(sessions) -> None:
     post = {
         "text": "Текст с фотографиями",
         "attachments": [
-            {"type": "photo", "photo": {
-                "id": number,
-                "sizes": [{
-                    "url": f"https://vk.test/{number}.jpg", "width": 100, "height": 100
-                }],
-            }}
+            {
+                "type": "photo",
+                "photo": {
+                    "id": number,
+                    "sizes": [
+                        {"url": f"https://vk.test/{number}.jpg", "width": 100, "height": 100}
+                    ],
+                },
+            }
             for number in (1, 2)
         ],
     }

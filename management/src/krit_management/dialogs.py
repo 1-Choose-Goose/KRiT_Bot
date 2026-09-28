@@ -1,11 +1,24 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSizePolicy, QVBoxLayout,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
 ROLE_LABELS = {"student": "Ученик", "parent": "Родитель", "teacher": "Учитель"}
@@ -36,7 +49,9 @@ class LoginDialog(QDialog):
         form.addRow("Логин", self.username)
         form.addRow("Пароль", self.password)
         layout.addLayout(form)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Войти")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setProperty("kind", "secondary")
@@ -68,7 +83,9 @@ class PersonPickerDialog(QDialog):
         self.list = QListWidget()
         self.list.itemDoubleClicked.connect(lambda _item: self.accept())
         layout.addWidget(self.list, 1)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Выбрать")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setProperty("kind", "secondary")
@@ -94,17 +111,24 @@ class PersonPickerDialog(QDialog):
 
 
 class PersonDialog(QDialog):
-    def __init__(self, person: dict[str, Any] | None = None, parent=None, *,
-                 available_people: list[dict[str, Any]] | None = None,
-                 open_related: Callable[[dict[str, Any]], None] | None = None,
-                 allow_relations: bool = True) -> None:
+    def __init__(
+        self,
+        person: dict[str, Any] | None = None,
+        parent=None,
+        *,
+        available_people: list[dict[str, Any]] | None = None,
+        open_related: Callable[[dict[str, Any]], None] | None = None,
+        allow_relations: bool = True,
+    ) -> None:
         super().__init__(parent)
         self.person = person or {}
         self.available_people = available_people or []
         self.open_related = open_related
         self.allow_relations = allow_relations
-        self.related_people: list[dict[str, Any]] = []
-        self._loaded_relation_role: str | None = None
+        self.relation_states: dict[str, list[dict[str, Any]]] = {
+            "parent": [dict(item) for item in self.person.get("guardians", [])],
+            "student": [dict(item) for item in self.person.get("students", [])],
+        }
         self.setWindowTitle("Карточка клиента")
         self.setMinimumWidth(640)
         layout = QVBoxLayout(self)
@@ -121,12 +145,18 @@ class PersonDialog(QDialog):
         if len(digits) == 11 and digits[0] in {"7", "8"}:
             digits = digits[1:]
         self.phone.setText(digits[:10])
-        self.role = QComboBox()
-        for value, label in ROLE_LABELS.items():
-            self.role.addItem(label, value)
         roles = person_roles(self.person)
-        self.role.setCurrentIndex(max(0, self.role.findData(roles[0] if roles else "student")))
-        self.role.currentIndexChanged.connect(self._role_changed)
+        self.role_checks: dict[str, QCheckBox] = {}
+        roles_widget = QWidget()
+        roles_layout = QHBoxLayout(roles_widget)
+        roles_layout.setContentsMargins(0, 0, 0, 0)
+        for value, label in ROLE_LABELS.items():
+            check = QCheckBox(label)
+            check.setChecked(value in (roles or ["student"]))
+            check.toggled.connect(self._role_changed)
+            self.role_checks[value] = check
+            roles_layout.addWidget(check)
+        roles_layout.addStretch(1)
         max_user_id = self.person.get("max_user_id")
         self.max_user_id = QLineEdit("Отсутствует" if max_user_id is None else str(max_user_id))
         self.max_user_id.setReadOnly(True)
@@ -135,7 +165,7 @@ class PersonDialog(QDialog):
         self.active.setChecked(bool(self.person.get("active", True)))
         form.addRow("ФИО", self.full_name)
         form.addRow("Телефон", self.phone)
-        form.addRow("Категория", self.role)
+        form.addRow("Роли", roles_widget)
         form.addRow("ID в MAX", self.max_user_id)
         form.addRow("Статус MAX", self.authorization)
         form.addRow("", self.active)
@@ -143,9 +173,9 @@ class PersonDialog(QDialog):
 
         self.relation_widgets: list[Any] = []
         relation_header = QHBoxLayout()
-        self.relation_title = QLabel()
-        self.relation_title.setObjectName("sectionTitle")
-        relation_header.addWidget(self.relation_title)
+        self.relation_mode = QComboBox()
+        self.relation_mode.currentIndexChanged.connect(lambda _index: self._render_relations())
+        relation_header.addWidget(self.relation_mode)
         relation_header.addStretch(1)
         for label, kind, callback in (
             ("Добавить", "secondary", self._add_existing),
@@ -159,7 +189,7 @@ class PersonDialog(QDialog):
             button.clicked.connect(callback)
             relation_header.addWidget(button)
             self.relation_widgets.append(button)
-        self.relation_widgets.append(self.relation_title)
+        self.relation_widgets.append(self.relation_mode)
         layout.addLayout(relation_header)
         self.related_list = QListWidget()
         self.related_list.setMaximumHeight(130)
@@ -167,7 +197,9 @@ class PersonDialog(QDialog):
         layout.addWidget(self.related_list)
         self.relation_widgets.append(self.related_list)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("Сохранить")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setProperty("kind", "secondary")
@@ -177,27 +209,30 @@ class PersonDialog(QDialog):
         self._role_changed()
 
     def _target_role(self) -> str | None:
-        role = str(self.role.currentData())
-        return "parent" if role == "student" else "student" if role == "parent" else None
+        value = self.relation_mode.currentData()
+        return str(value) if value else None
 
     def _role_changed(self) -> None:
-        target = self._target_role()
-        enabled = self.allow_relations and target is not None
+        previous = self._target_role()
+        targets = []
+        if self.role_checks["student"].isChecked():
+            targets.append(("Родители", "parent"))
+        if self.role_checks["parent"].isChecked():
+            targets.append(("Ученики", "student"))
+        self.relation_mode.blockSignals(True)
+        self.relation_mode.clear()
+        for label, value in targets:
+            self.relation_mode.addItem(label, value)
+        previous_index = self.relation_mode.findData(previous)
+        if previous_index >= 0:
+            self.relation_mode.setCurrentIndex(previous_index)
+        self.relation_mode.blockSignals(False)
+        enabled = self.allow_relations and bool(targets)
         for widget in self.relation_widgets:
             widget.setVisible(enabled)
         if not enabled:
             QTimer.singleShot(0, self._resize_to_content)
             return
-        self.relation_title.setText("Родители" if target == "parent" else "Ученики")
-        if self._loaded_relation_role != target:
-            original_roles = person_roles(self.person)
-            source = (
-                self.person.get("guardians" if target == "parent" else "students", [])
-                if str(self.role.currentData()) in original_roles
-                else []
-            )
-            self.related_people = [dict(item) for item in source]
-            self._loaded_relation_role = target
         self._render_relations()
         QTimer.singleShot(0, self._resize_to_content)
 
@@ -207,23 +242,28 @@ class PersonDialog(QDialog):
 
     def _render_relations(self) -> None:
         self.related_list.clear()
-        for person in self.related_people:
+        target = self._target_role()
+        for person in self.relation_states.get(target or "", []):
             item = QListWidgetItem(f"{person.get('full_name', '')}   {person.get('phone', '')}")
             item.setData(Qt.ItemDataRole.UserRole, person)
             self.related_list.addItem(item)
 
     def _add_existing(self) -> None:
         target = self._target_role()
-        related_ids = {item.get("id") for item in self.related_people}
-        candidates = [person for person in self.available_people
-                      if target in person_roles(person)
-                      and person.get("id") != self.person.get("id")
-                      and person.get("id") not in related_ids]
+        related_people = self.relation_states.get(target or "", [])
+        related_ids = {item.get("id") for item in related_people}
+        candidates = [
+            person
+            for person in self.available_people
+            if target in person_roles(person)
+            and person.get("id") != self.person.get("id")
+            and person.get("id") not in related_ids
+        ]
         picker = PersonPickerDialog(candidates, self)
         if picker.exec():
             selected = picker.selected_person()
             if selected:
-                self.related_people.append(selected)
+                related_people.append(selected)
                 self._render_relations()
 
     def _create_related(self) -> None:
@@ -233,31 +273,52 @@ class PersonDialog(QDialog):
         dialog = PersonDialog({"roles": [target], "active": True}, self, allow_relations=False)
         if dialog.exec():
             payload = dialog.payload()
-            self.related_people.append({"full_name": payload["full_name"], "phone": payload["phone"], "_pending_payload": payload})
+            self.relation_states[target].append(
+                {
+                    "full_name": payload["full_name"],
+                    "phone": payload["phone"],
+                    "_pending_payload": payload,
+                }
+            )
             self._render_relations()
 
     def _remove_related(self) -> None:
         row = self.related_list.currentRow()
-        if row >= 0:
-            self.related_people.pop(row)
+        target = self._target_role()
+        if row >= 0 and target:
+            self.relation_states[target].pop(row)
             self._render_relations()
 
     def _open_related(self, item: QListWidgetItem) -> None:
         person = item.data(Qt.ItemDataRole.UserRole)
         if self.open_related and person.get("id"):
-            full = next((entry for entry in self.available_people if entry.get("id") == person["id"]), person)
+            full = next(
+                (entry for entry in self.available_people if entry.get("id") == person["id"]),
+                person,
+            )
             self.open_related(full)
 
     def _accept_if_valid(self) -> None:
-        if len(self.full_name.text().strip()) >= 3 and self.phone.hasAcceptableInput():
+        if (
+            len(self.full_name.text().strip()) >= 3
+            and self.phone.hasAcceptableInput()
+            and any(check.isChecked() for check in self.role_checks.values())
+        ):
             self.accept()
 
     def payload(self) -> dict[str, Any]:
         digits = "".join(c for c in self.phone.text() if c.isdigit())
-        return {"full_name": " ".join(self.full_name.text().split()), "phone": "+" + digits,
-                "roles": [self.role.currentData()], "active": self.active.isChecked()}
+        return {
+            "full_name": " ".join(self.full_name.text().split()),
+            "phone": "+" + digits,
+            "roles": [role for role, check in self.role_checks.items() if check.isChecked()],
+            "active": self.active.isChecked(),
+        }
 
-    def relation_state(self) -> tuple[list[int], list[dict[str, Any]]]:
-        existing = [int(item["id"]) for item in self.related_people if item.get("id")]
-        pending = [item["_pending_payload"] for item in self.related_people if "_pending_payload" in item]
-        return existing, pending
+    def relation_state(self) -> dict[str, tuple[list[int], list[dict[str, Any]]]]:
+        result = {}
+        for target, people in self.relation_states.items():
+            existing = [int(item["id"]) for item in people if item.get("id")]
+            pending = [item["_pending_payload"] for item in people if "_pending_payload" in item]
+            result[target] = (existing, pending)
+        return result

@@ -32,6 +32,8 @@ from .db import (
     utcnow,
 )
 from .handler import EchoHandler
+from .learning import create_learning_router
+from .learning_notifications import LearningNotificationWorker
 from .max_api import MaxApiClient
 from .polling import run_polling
 from .syndication import (
@@ -150,12 +152,13 @@ def create_app(settings: Settings) -> FastAPI:
     polling_task: asyncio.Task[None] | None = None
     syndication_task: asyncio.Task[None] | None = None
     vk_long_poll_task: asyncio.Task[None] | None = None
+    learning_notifications_task: asyncio.Task[None] | None = None
     syndication_worker: SyndicationWorker | None = None
     invalid_password_hash = password_hash.hash("invalid-password")
 
     async def require_management_token(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-    ) -> None:
+    ) -> int:
         configured = settings.jwt_secret
         if configured is None or credentials is None or credentials.scheme.lower() != "bearer":
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
@@ -174,6 +177,7 @@ def create_app(settings: Settings) -> FastAPI:
             admin = await session.get(AdminUser, admin_id)
         if admin is None or not admin.active:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        return admin_id
 
     async def ensure_bootstrap_admin() -> None:
         async with sessions() as session:
@@ -206,8 +210,13 @@ def create_app(settings: Settings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         nonlocal polling_task, syndication_task, vk_long_poll_task, syndication_worker
+        nonlocal learning_notifications_task
         await ensure_schema(engine)
         await ensure_bootstrap_admin()
+        learning_notifications_task = asyncio.create_task(
+            LearningNotificationWorker(sessions=sessions, api=api).run(),
+            name="learning-notifications",
+        )
         if settings.bot_mode == "polling":
             me = await api.get_me()
             log.info("bot_started", bot_id=me.get("user_id"), username=me.get("username"))
@@ -284,10 +293,20 @@ def create_app(settings: Settings) -> FastAPI:
         if polling_task is not None:
             polling_task.cancel()
             await asyncio.gather(polling_task, return_exceptions=True)
+        if learning_notifications_task is not None:
+            learning_notifications_task.cancel()
+            await asyncio.gather(learning_notifications_task, return_exceptions=True)
         await api.close()
         await engine.dispose()
 
     app = FastAPI(title="KRiT MAX Bot", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app.include_router(
+        create_learning_router(
+            sessions,
+            require_management_token,
+            center_timezone=settings.center_timezone,
+        )
+    )
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -475,8 +494,6 @@ def create_app(settings: Settings) -> FastAPI:
             if person is None or person.archived_at is not None:
                 raise HTTPException(status_code=404)
             person.full_name = " ".join(payload.full_name.split())
-            if person.phone != phone:
-                person.max_user_id = None
             person.phone = phone
             if person.guardian_links and "student" not in roles:
                 raise HTTPException(status_code=409, detail="У клиента есть связанные родители")
@@ -545,7 +562,17 @@ def create_app(settings: Settings) -> FastAPI:
                     detail="Перед удалением перенесите клиента в архив",
                 )
             await session.delete(person)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Клиента нельзя удалить: с ним связана история учебного процесса. "
+                        "Оставьте карточку в архиве."
+                    ),
+                ) from exc
             return {"deleted": True}
 
     @app.get(
@@ -584,9 +611,7 @@ def create_app(settings: Settings) -> FastAPI:
         update: dict[str, Any] = await request.json()
         chat = update.get("chat") if isinstance(update.get("chat"), dict) else {}
         message = update.get("message") if isinstance(update.get("message"), dict) else {}
-        recipient = (
-            message.get("recipient") if isinstance(message.get("recipient"), dict) else {}
-        )
+        recipient = message.get("recipient") if isinstance(message.get("recipient"), dict) else {}
         candidate_id = update.get("chat_id") or chat.get("chat_id") or recipient.get("chat_id")
         if isinstance(candidate_id, int):
             details = {

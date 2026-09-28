@@ -9,6 +9,7 @@ from PySide6.QtGui import QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -20,7 +21,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
-    QComboBox,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from .api import ManagementApi
 from .dialogs import ROLE_LABELS, PersonDialog, person_roles
+from .learning_page import LearningPage
 from .updates import (
     UpdateInfo,
     check_for_update,
@@ -91,7 +92,8 @@ class MainWindow(QMainWindow):
         workspace_layout.addWidget(self._workspace_header())
         self.pages = QStackedWidget()
         self.pages.addWidget(self._clients_section())
-        self.pages.addWidget(self._placeholder("Модуль учебного процесса"))
+        self.learning_page = LearningPage(self.api)
+        self.pages.addWidget(self.learning_page)
         self.pages.addWidget(self._placeholder("Модуль рассылок"))
         workspace_layout.addWidget(self.pages, 1)
         root_layout.addWidget(workspace, 1)
@@ -160,6 +162,8 @@ class MainWindow(QMainWindow):
             return
         self.pages.setCurrentIndex(index)
         self.section_title.setText(("Клиенты", "Учебный процесс", "Рассылки")[index])
+        if index == 1:
+            self.learning_page.refresh()
 
     def _clients_section(self) -> QWidget:
         section = QWidget()
@@ -202,9 +206,7 @@ class MainWindow(QMainWindow):
         actions.addStretch(1)
         actions.addWidget(add_button)
         layout.addLayout(actions)
-        table = self._table(
-            ["ФИО", "Категория", "Телефон", "Действия"]
-        )
+        table = self._table(["ФИО", "Роли", "Телефон", "Действия"])
         table.doubleClicked.connect(
             lambda _index, key=role_filter, widget=table: self.edit_selected_person(key, widget)
         )
@@ -222,9 +224,7 @@ class MainWindow(QMainWindow):
 
     def _archive_tab(self) -> QWidget:
         page, layout = self._page()
-        self.archive_table = self._table(
-            ["ФИО", "Категория", "Телефон", "Действия"]
-        )
+        self.archive_table = self._table(["ФИО", "Роли", "Телефон", "Действия"])
         layout.addWidget(self.archive_table)
         return page
 
@@ -285,17 +285,13 @@ class MainWindow(QMainWindow):
         self._refresh_running = True
         if not silent:
             self._set_connection("Обновление…", "loading")
-        worker = Worker(
-            self.api.snapshot
-        )
+        worker = Worker(self.api.snapshot)
         self._workers.add(worker)
         worker.signals.finished.connect(
             lambda result, current=worker: self._refresh_finished(current, result)
         )
         worker.signals.failed.connect(
-            lambda message, current=worker: self._refresh_worker_failed(
-                current, message, silent
-            )
+            lambda message, current=worker: self._refresh_worker_failed(current, message, silent)
         )
         self.pool.start(worker)
 
@@ -365,15 +361,29 @@ class MainWindow(QMainWindow):
             table.setRowCount(len(visible))
             for row, person in enumerate(visible):
                 roles = person_roles(person)
-                self._set_values(table, row, [
-                    person.get("full_name", ""),
-                    ", ".join(ROLE_LABELS.get(role, role) for role in roles),
-                    format_phone(person.get("phone")),
-                ])
-                table.setCellWidget(row, 3, self._actions([
+                self._set_values(
+                    table,
+                    row,
+                    [
+                        person.get("full_name", ""),
+                        ", ".join(ROLE_LABELS.get(role, role) for role in roles),
+                        format_phone(person.get("phone")),
+                    ],
+                )
+                actions = [
                     ("Изменить", "secondary", lambda item=person: self.edit_person(item)),
                     ("В архив", "warning", lambda item=person: self.archive_person(item)),
-                ]))
+                ]
+                if {"student", "teacher"}.intersection(roles):
+                    actions.insert(
+                        1,
+                        (
+                            "Журнал",
+                            "secondary",
+                            lambda item=person: self.open_person_journal(item),
+                        ),
+                    )
+                table.setCellWidget(row, 3, self._actions(actions))
 
     def _render_attempts(self) -> None:
         self.attempts_table.setRowCount(len(self.attempts))
@@ -392,7 +402,13 @@ class MainWindow(QMainWindow):
                 row,
                 4,
                 self._actions(
-                    [("Создать карточку", "secondary", lambda item=attempt: self.add_from_attempt(item))]
+                    [
+                        (
+                            "Создать карточку",
+                            "secondary",
+                            lambda item=attempt: self.add_from_attempt(item),
+                        )
+                    ]
                 ),
             )
 
@@ -413,7 +429,11 @@ class MainWindow(QMainWindow):
                 3,
                 self._actions(
                     [
-                        ("Восстановить", "secondary", lambda item=person: self.restore_person(item)),
+                        (
+                            "Восстановить",
+                            "secondary",
+                            lambda item=person: self.restore_person(item),
+                        ),
                         ("Удалить", "danger", lambda item=person: self.delete_person(item)),
                     ]
                 ),
@@ -428,8 +448,8 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         probe = QPushButton()
         button_width = max(
-            112,
-            max(probe.fontMetrics().horizontalAdvance(text) for text, _, _ in actions) + 42,
+            88,
+            max(probe.fontMetrics().horizontalAdvance(text) for text, _, _ in actions) + 32,
         )
         probe.deleteLater()
         for text, kind, callback in actions:
@@ -443,12 +463,29 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return container
 
+    def open_person_journal(self, person: dict[str, Any]) -> None:
+        self.main_nav.setCurrentRow(1)
+        self.learning_page.tabs.setCurrentIndex(3)
+        roles = person_roles(person)
+        if "student" in roles:
+            index = self.learning_page.journal_student.findData(person.get("id"))
+            if index >= 0:
+                self.learning_page.journal_student.setCurrentIndex(index)
+                self.learning_page.load_student_history()
+        elif "teacher" in roles:
+            index = self.learning_page.journal_teacher.findData(person.get("id"))
+            if index >= 0:
+                self.learning_page.journal_teacher.setCurrentIndex(index)
+                self.learning_page.load_teacher_history()
+
     def add_person(self) -> None:
-        dialog = PersonDialog(parent=self, available_people=self.people, open_related=self.edit_person)
+        dialog = PersonDialog(
+            parent=self, available_people=self.people, open_related=self.edit_person
+        )
         if dialog.exec():
-            related_ids, pending = dialog.relation_state()
+            relations = dialog.relation_state()
             self._run(
-                lambda: self._create_with_relations(dialog.payload(), related_ids, pending),
+                lambda: self._create_with_relations(dialog.payload(), relations),
                 lambda _: self.refresh(),
             )
 
@@ -476,68 +513,71 @@ class MainWindow(QMainWindow):
             open_related=self.edit_person,
         )
         if dialog.exec():
-            related_ids, pending = dialog.relation_state()
+            relations = dialog.relation_state()
             self._run(
-                lambda: self._update_with_relations(
-                    person, dialog.payload(), related_ids, pending
-                ),
+                lambda: self._update_with_relations(person, dialog.payload(), relations),
                 lambda _: self.refresh(),
             )
 
     def _create_with_relations(
-        self, payload: dict[str, Any], related_ids: list[int], pending: list[dict[str, Any]]
+        self,
+        payload: dict[str, Any],
+        relations: dict[str, tuple[list[int], list[dict[str, Any]]]],
     ) -> dict[str, Any]:
         person = self.api.create_person(payload)
-        role = payload["roles"][0]
-        for related_id in related_ids:
-            student_id, guardian_id = (
-                (int(person["id"]), related_id) if role == "student"
-                else (related_id, int(person["id"]))
-            )
-            self.api.link_guardian(student_id, guardian_id)
-        for related_payload in pending:
-            related = self.api.create_person(related_payload)
-            student_id, guardian_id = (
-                (int(person["id"]), int(related["id"])) if role == "student"
-                else (int(related["id"]), int(person["id"]))
-            )
-            self.api.link_guardian(student_id, guardian_id)
+        person_id = int(person["id"])
+        for target, (related_ids, pending) in relations.items():
+            for related_id in related_ids:
+                student_id, guardian_id = (
+                    (person_id, related_id) if target == "parent" else (related_id, person_id)
+                )
+                self.api.link_guardian(student_id, guardian_id)
+            for related_payload in pending:
+                related = self.api.create_person(related_payload)
+                related_id = int(related["id"])
+                student_id, guardian_id = (
+                    (person_id, related_id) if target == "parent" else (related_id, person_id)
+                )
+                self.api.link_guardian(student_id, guardian_id)
         return person
 
     def _update_with_relations(
-        self, original: dict[str, Any], payload: dict[str, Any], related_ids: list[int],
-        pending: list[dict[str, Any]],
+        self,
+        original: dict[str, Any],
+        payload: dict[str, Any],
+        relations: dict[str, tuple[list[int], list[dict[str, Any]]]],
     ) -> dict[str, Any]:
         person_id = int(original["id"])
         updated = self.api.update_person(person_id, payload)
-        role = payload["roles"][0]
-        original_items = original.get("guardians" if role == "student" else "students", [])
-        original_ids = {int(item["id"]) for item in original_items}
-        desired_ids = set(related_ids)
-        for related_id in original_ids - desired_ids:
-            student_id, guardian_id = (
-                (person_id, related_id) if role == "student" else (related_id, person_id)
-            )
-            self.api.unlink_guardian(student_id, guardian_id)
-        for related_id in desired_ids - original_ids:
-            student_id, guardian_id = (
-                (person_id, related_id) if role == "student" else (related_id, person_id)
-            )
-            self.api.link_guardian(student_id, guardian_id)
-        for related_payload in pending:
-            related = self.api.create_person(related_payload)
-            student_id, guardian_id = (
-                (person_id, int(related["id"])) if role == "student"
-                else (int(related["id"]), person_id)
-            )
-            self.api.link_guardian(student_id, guardian_id)
+        for target, (related_ids, pending) in relations.items():
+            source_key = "guardians" if target == "parent" else "students"
+            original_ids = {int(item["id"]) for item in original.get(source_key, [])}
+            desired_ids = set(related_ids)
+            for related_id in original_ids - desired_ids:
+                student_id, guardian_id = (
+                    (person_id, related_id) if target == "parent" else (related_id, person_id)
+                )
+                self.api.unlink_guardian(student_id, guardian_id)
+            for related_id in desired_ids - original_ids:
+                student_id, guardian_id = (
+                    (person_id, related_id) if target == "parent" else (related_id, person_id)
+                )
+                self.api.link_guardian(student_id, guardian_id)
+            for related_payload in pending:
+                related = self.api.create_person(related_payload)
+                related_id = int(related["id"])
+                student_id, guardian_id = (
+                    (person_id, related_id) if target == "parent" else (related_id, person_id)
+                )
+                self.api.link_guardian(student_id, guardian_id)
         return updated
 
     def archive_person(self, person: dict[str, Any]) -> None:
         answer = QMessageBox.question(
             self,
             "Перенос в архив",
-            f"Перенести «{person.get('full_name', '')}» в архив?\n\nДоступ к боту будет приостановлен.",
+            f"Перенести «{person.get('full_name', '')}» в архив?\n\n"
+            "Доступ к боту будет приостановлен.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
@@ -606,9 +646,7 @@ class MainWindow(QMainWindow):
         worker = Worker(function)
         self._workers.add(worker)
         worker.signals.finished.connect(
-            lambda result, current=worker: self._operation_finished(
-                current, result, on_success
-            )
+            lambda result, current=worker: self._operation_finished(current, result, on_success)
         )
         worker.signals.failed.connect(
             lambda message, current=worker: self._operation_failed(

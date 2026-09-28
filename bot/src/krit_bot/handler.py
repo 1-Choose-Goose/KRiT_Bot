@@ -52,9 +52,7 @@ def parse_message_created(update: dict[str, Any]) -> IncomingMessage | None:
     clean_text = text.strip() if isinstance(text, str) and text.strip() else None
     contact_vcf = contact_payload.get("vcf_info")
     contact_hash = contact_payload.get("hash")
-    if clean_text is None and not (
-        isinstance(contact_vcf, str) and isinstance(contact_hash, str)
-    ):
+    if clean_text is None and not (isinstance(contact_vcf, str) and isinstance(contact_hash, str)):
         return None
     display_name = (
         " ".join(part for part in (sender.get("first_name"), sender.get("last_name")) if part)
@@ -137,8 +135,7 @@ class EchoHandler:
                 )
                 await session.commit()
                 message = (
-                    "Этот номер уже привязан к другому аккаунту MAX. "
-                    "Обратитесь к администратору."
+                    "Этот номер уже привязан к другому аккаунту MAX. Обратитесь к администратору."
                     if result == "belongs_to_another_user"
                     else "Номер не найден в базе «КРиТ». Обратитесь к администратору."
                 )
