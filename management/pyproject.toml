@@ -10,7 +10,7 @@ requires-python = ">=3.13"
 dependencies = [
   "certifi>=2026.2",
   "httpx>=0.28,<1",
-  "pyside6-essentials>=6.10,<7",
+  "pyside6-essentials==6.11.2",
 ]
 
 [project.optional-dependencies]

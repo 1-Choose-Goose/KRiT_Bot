@@ -33,13 +33,21 @@
 ## Запуск программы управления в PyCharm
 
 ```powershell
-py -3.14 -m venv management\.venv
+py -3.13 -m venv management\.venv
 .\management\.venv\Scripts\python.exe -m pip install -e ".\management"
 ```
 
 В PyCharm выберите `management/.venv/Scripts/python.exe`, откройте только `management/main.py` и нажмите **Run**. Бот на этом компьютере не запускается: он работает на сервере. Адрес HTTPS API уже задан в программе. Для эксперимента: логин `admin`, пароль `admin`.
 
-Пункт **Проверить обновления** уже работает в режиме PyCharm. Автоматическая установка активируется в будущей Windows-сборке; сейчас приложение не собирается по условию этапа.
+Пункт **Проверить обновления** работает и в PyCharm, и в Windows-сборке. Готовые версии публикуются в GitHub Releases.
+
+Windows-сборка создаётся одной командой:
+
+```powershell
+.\management\build_windows.ps1
+```
+
+Сценарий использует Python 3.13, очищает пути поиска DLL, проверяет реальное окно входа и запрещает сборку, если PyInstaller подхватил посторонние DLL.
 
 Фирменные PNG, Windows ICO и аватар бота находятся в `management/src/krit_management/assets`. Программа уже использует `app_icon.ico` для окон, панели задач и будущего Windows-ярлыка.
 
