@@ -9,6 +9,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -39,6 +40,19 @@ class UpdateInfo:
     size: int
     notes: str
     page_url: str
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateProgress:
+    stage: str
+    downloaded: int
+    total: int
+
+    @property
+    def percent(self) -> int:
+        if self.total <= 0:
+            return 0
+        return min(100, int(self.downloaded * 100 / self.total))
 
 
 def version_tuple(value: str) -> tuple[int, int, int]:
@@ -108,7 +122,11 @@ def check_for_update() -> UpdateInfo | None:
     )
 
 
-def download_update(update: UpdateInfo) -> Path:
+def download_update(
+    update: UpdateInfo,
+    progress: Callable[[UpdateProgress], None] | None = None,
+) -> Path:
+    report = progress or (lambda _progress: None)
     folder = Path(tempfile.mkdtemp(prefix=f"KRiT-Management-{update.version}-"))
     destination = folder / WINDOWS_ASSET_NAME
     partial = destination.with_suffix(".zip.part")
@@ -116,6 +134,7 @@ def download_update(update: UpdateInfo) -> Path:
     downloaded = 0
     context = ssl.create_default_context(cafile=certifi.where())
     try:
+        report(UpdateProgress("Подключение к серверу обновлений…", 0, update.size))
         with (
             urlopen(
                 _request(update.download_url, "application/octet-stream"),
@@ -124,15 +143,20 @@ def download_update(update: UpdateInfo) -> Path:
             ) as response,
             partial.open("wb") as stream,
         ):
+            response_size = int(response.headers.get("Content-Length") or 0)
+            total = update.size or response_size
             while block := response.read(1024 * 1024):
                 stream.write(block)
                 digest.update(block)
                 downloaded += len(block)
+                report(UpdateProgress("Загрузка обновления…", downloaded, total))
+        report(UpdateProgress("Проверка загруженного файла…", downloaded, total))
         if update.size and downloaded != update.size:
             raise UpdateError("Файл обновления загружен не полностью")
         if digest.hexdigest() != update.sha256:
             raise UpdateError("Контрольная сумма обновления не совпала")
         partial.replace(destination)
+        report(UpdateProgress("Загрузка завершена", downloaded, total or downloaded))
         return destination
     except Exception:
         shutil.rmtree(folder, ignore_errors=True)

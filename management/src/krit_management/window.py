@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSizePolicy,
     QStackedWidget,
@@ -34,12 +35,13 @@ from .dialogs import ROLE_LABELS, PersonDialog, person_roles
 from .learning_page import LearningPage
 from .updates import (
     UpdateInfo,
+    UpdateProgress,
     check_for_update,
     download_update,
     launch_updater,
     updates_supported,
 )
-from .workers import Worker
+from .workers import ProgressWorker, Worker
 
 ASSETS_DIR = Path(__file__).with_name("assets")
 
@@ -65,6 +67,7 @@ class MainWindow(QMainWindow):
         self._closing = False
         self._refresh_running = False
         self._background_jobs = 0
+        self._update_progress: QProgressDialog | None = None
         self.setWindowTitle("КРиТ · управление")
         self.setMinimumSize(1120, 620)
         self.resize(1240, 760)
@@ -635,10 +638,73 @@ class MainWindow(QMainWindow):
             notes + "\n\nСкачать и установить обновление?",
         )
         if answer == QMessageBox.StandardButton.Yes:
-            self._run(lambda: download_update(info), self._update_downloaded)
+            self._start_update_download(info)
+
+    def _start_update_download(self, info: UpdateInfo) -> None:
+        dialog = QProgressDialog("Подключение к серверу обновлений…", "", 0, 100, self)
+        dialog.setWindowTitle(f"Обновление КРиТ до версии {info.version}")
+        dialog.setCancelButton(None)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setValue(0)
+        dialog.show()
+        self._update_progress = dialog
+
+        self._background_jobs += 1
+        worker = ProgressWorker(lambda report: download_update(info, report))
+        self._workers.add(worker)
+        worker.signals.progress.connect(self._update_download_progress)
+        worker.signals.finished.connect(
+            lambda result, current=worker: self._operation_finished(
+                current, result, self._update_downloaded
+            )
+        )
+        worker.signals.failed.connect(
+            lambda message, current=worker: self._operation_failed(
+                current, message, self._update_download_failed
+            )
+        )
+        self.pool.start(worker)
+
+    def _update_download_progress(self, value: object) -> None:
+        if self._update_progress is None or not isinstance(value, UpdateProgress):
+            return
+        if value.total > 0:
+            downloaded_mb = value.downloaded / (1024 * 1024)
+            total_mb = value.total / (1024 * 1024)
+            self._update_progress.setRange(0, 100)
+            self._update_progress.setValue(value.percent)
+            self._update_progress.setLabelText(
+                f"{value.stage}\n{downloaded_mb:.1f} из {total_mb:.1f} МБ"
+            )
+        else:
+            self._update_progress.setRange(0, 0)
+            self._update_progress.setLabelText(value.stage)
+
+    def _close_update_progress(self) -> None:
+        if self._update_progress is not None:
+            self._update_progress.close()
+            self._update_progress.deleteLater()
+            self._update_progress = None
+
+    def _update_download_failed(self, message: str) -> None:
+        self._close_update_progress()
+        self._show_error(message)
 
     def _update_downloaded(self, archive: object) -> None:
-        launch_updater(archive)  # type: ignore[arg-type]
+        if self._update_progress is not None:
+            self._update_progress.setRange(0, 0)
+            self._update_progress.setLabelText(
+                "Загрузка завершена. Запускается установка обновления…"
+            )
+        try:
+            launch_updater(archive)  # type: ignore[arg-type]
+        except Exception as exc:
+            self._close_update_progress()
+            self._show_error(str(exc))
+            return
         self.close()
 
     def _run(self, function, on_success, on_failure=None) -> None:

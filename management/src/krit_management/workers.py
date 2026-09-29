@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 class WorkerSignals(QObject):
     finished = Signal(object)
     failed = Signal(str)
+    progress = Signal(object)
 
 
 class Worker(QRunnable):
@@ -21,6 +22,22 @@ class Worker(QRunnable):
     def run(self) -> None:
         try:
             result = self.function()
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
+        else:
+            self.signals.finished.emit(result)
+
+
+class ProgressWorker(QRunnable):
+    def __init__(self, function: Callable[[Callable[[object], None]], Any]) -> None:
+        super().__init__()
+        self.function = function
+        self.signals = WorkerSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = self.function(self.signals.progress.emit)
         except Exception as exc:
             self.signals.failed.emit(str(exc))
         else:

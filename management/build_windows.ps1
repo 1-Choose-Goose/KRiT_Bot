@@ -41,7 +41,8 @@ try {
     $assets = Join-Path $sourceDir "krit_management\assets"
 
     & $python -m PyInstaller --noconfirm --clean --onefile --windowed `
-        --name KRiTManagementUpdater --distpath $distDir `
+        --name KRiTManagementUpdater --icon (Join-Path $assets "app_icon.ico") `
+        --distpath $distDir `
         --workpath (Join-Path $workDir "updater") --specpath $specDir `
         --paths $sourceDir (Join-Path $sourceDir "krit_management\updater.py")
     if ($LASTEXITCODE -ne 0) { throw "Не собран updater" }
