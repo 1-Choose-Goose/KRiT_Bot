@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
@@ -17,11 +18,24 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from .widgets import matches_word_prefix
+
 ROLE_LABELS = {"student": "Ученик", "parent": "Родитель", "teacher": "Учитель"}
+ATTENDANCE_LABELS = {
+    "expected": "Ожидается",
+    "present": "Присутствует",
+    "late": "Опоздал",
+    "absent": "Не пришёл",
+    "left_early": "Ушёл раньше",
+    "excused": "Отменено",
+}
 
 
 def person_roles(person: dict[str, Any]) -> list[str]:
@@ -98,8 +112,11 @@ class PersonPickerDialog(QDialog):
         query = self.search.text().casefold().strip()
         self.list.clear()
         for person in self.people:
-            haystack = f"{person.get('full_name', '')} {person.get('phone', '')}".casefold()
-            if query and query not in haystack:
+            full_name = str(person.get("full_name", ""))
+            phone = str(person.get("phone", ""))
+            if query and not (
+                matches_word_prefix(query, full_name) or query in phone.casefold()
+            ):
                 continue
             item = QListWidgetItem(f"{person.get('full_name', '')}   {person.get('phone', '')}")
             item.setData(Qt.ItemDataRole.UserRole, person)
@@ -118,25 +135,37 @@ class PersonDialog(QDialog):
         *,
         available_people: list[dict[str, Any]] | None = None,
         open_related: Callable[[dict[str, Any]], None] | None = None,
+        load_learning_history: Callable[[int, list[str], Callable[[dict[str, Any]], None]], None]
+        | None = None,
+        open_lesson: Callable[[int], None] | None = None,
         allow_relations: bool = True,
     ) -> None:
         super().__init__(parent)
         self.person = person or {}
         self.available_people = available_people or []
         self.open_related = open_related
+        self.load_learning_history = load_learning_history
+        self.open_lesson = open_lesson
+        self._history_loaded = False
         self.allow_relations = allow_relations
         self.relation_states: dict[str, list[dict[str, Any]]] = {
             "parent": [dict(item) for item in self.person.get("guardians", [])],
             "student": [dict(item) for item in self.person.get("students", [])],
         }
         self.setWindowTitle("Карточка клиента")
-        self.setMinimumWidth(640)
+        self.setMinimumSize(760, 480)
+        self.resize(820, 520)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 22)
         layout.setSpacing(14)
         title = QLabel("Карточка клиента")
         title.setObjectName("dialogTitle")
         layout.addWidget(title)
+        self.sections = QTabWidget()
+        self.sections.setObjectName("clientTabs")
+        main_page = QWidget()
+        main_layout = QVBoxLayout(main_page)
+        main_layout.setContentsMargins(8, 12, 8, 8)
         form = QFormLayout()
         self.full_name = QLineEdit(str(self.person.get("full_name", "")))
         self.phone = QLineEdit()
@@ -169,8 +198,13 @@ class PersonDialog(QDialog):
         form.addRow("ID в MAX", self.max_user_id)
         form.addRow("Статус MAX", self.authorization)
         form.addRow("", self.active)
-        layout.addLayout(form)
+        main_layout.addLayout(form)
+        main_layout.addStretch(1)
+        self.sections.addTab(main_page, "Основное")
 
+        relations_page = QWidget()
+        relations_layout = QVBoxLayout(relations_page)
+        relations_layout.setContentsMargins(8, 12, 8, 8)
         self.relation_widgets: list[Any] = []
         relation_header = QHBoxLayout()
         self.relation_mode = QComboBox()
@@ -190,12 +224,50 @@ class PersonDialog(QDialog):
             relation_header.addWidget(button)
             self.relation_widgets.append(button)
         self.relation_widgets.append(self.relation_mode)
-        layout.addLayout(relation_header)
+        relations_layout.addLayout(relation_header)
         self.related_list = QListWidget()
         self.related_list.setMaximumHeight(130)
         self.related_list.itemDoubleClicked.connect(self._open_related)
-        layout.addWidget(self.related_list)
+        relations_layout.addWidget(self.related_list)
         self.relation_widgets.append(self.related_list)
+        self.sections.addTab(relations_page, "Связи")
+
+        if self.person.get("id") and ({"student", "teacher"} & set(roles)):
+            learning_page = QWidget()
+            learning_layout = QVBoxLayout(learning_page)
+            learning_layout.setContentsMargins(8, 12, 8, 8)
+            self.learning_status = QLabel(
+                "История загрузится при открытии этого раздела."
+            )
+            learning_layout.addWidget(self.learning_status)
+            self.learning_history = QTableWidget(0, 8)
+            self.learning_history.setHorizontalHeaderLabels(
+                [
+                    "Роль",
+                    "Дата",
+                    "Предмет",
+                    "Преподаватель / кабинет",
+                    "План",
+                    "Факт",
+                    "Посещение",
+                    "Отмена",
+                ]
+            )
+            self.learning_history.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self.learning_history.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self.learning_history.verticalHeader().setVisible(False)
+            self.learning_history.horizontalHeader().setStretchLastSection(True)
+            self.learning_history.itemDoubleClicked.connect(self._open_history_lesson)
+            learning_layout.addWidget(self.learning_history, 1)
+            self.presence_history = QTableWidget(0, 2)
+            self.presence_history.setHorizontalHeaderLabels(["Приход в клуб", "Уход из клуба"])
+            self.presence_history.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self.presence_history.verticalHeader().setVisible(False)
+            self.presence_history.horizontalHeader().setStretchLastSection(True)
+            learning_layout.addWidget(self.presence_history)
+            self.sections.addTab(learning_page, "Учебный процесс")
+        layout.addWidget(self.sections, 1)
+        self.sections.currentChanged.connect(self._section_changed)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -207,6 +279,99 @@ class PersonDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self._role_changed()
+
+    def _section_changed(self, index: int) -> None:
+        if self.sections.tabText(index) != "Учебный процесс" or self._history_loaded:
+            return
+        person_id = self.person.get("id")
+        if person_id is None or self.load_learning_history is None:
+            return
+        self._history_loaded = True
+        self.learning_status.setText("Загрузка истории…")
+        self.load_learning_history(
+            int(person_id), person_roles(self.person), self.set_learning_history
+        )
+
+    def set_learning_history(self, result: dict[str, Any]) -> None:
+        rows: list[tuple[str, dict[str, Any]]] = []
+        rows.extend(("Ученик", item) for item in result.get("student", {}).get("lessons", []))
+        rows.extend(
+            ("Преподаватель", item)
+            for item in result.get("teacher", {}).get("lessons", [])
+        )
+        rows.sort(key=lambda pair: str(pair[1].get("start_at", "")), reverse=True)
+        self.learning_history.setRowCount(len(rows))
+        for row, (role, lesson) in enumerate(rows):
+            start = datetime.fromisoformat(lesson["start_at"]).astimezone()
+            end = datetime.fromisoformat(lesson["end_at"]).astimezone()
+            actual_start = lesson.get("actual_start_at")
+            actual_end = lesson.get("actual_end_at")
+            fact = "—"
+            if actual_start:
+                fact_start = datetime.fromisoformat(actual_start).astimezone()
+                fact = f"{fact_start:%H:%M}"
+                if actual_end:
+                    fact_end = datetime.fromisoformat(actual_end).astimezone()
+                    fact += f"–{fact_end:%H:%M}"
+            attendance = ATTENDANCE_LABELS.get(
+                str(lesson.get("attendance_status", "")),
+                str(lesson.get("attendance_status", "—")),
+            )
+            cancellation = "—"
+            if lesson.get("cancelled_by"):
+                actor = {
+                    "student": "учеником",
+                    "guardian": "родителем",
+                    "administrator": "администратором",
+                }.get(lesson.get("cancelled_by"), "неизвестно кем")
+                cancelled_at = lesson.get("cancelled_at")
+                when = (
+                    datetime.fromisoformat(cancelled_at).astimezone().strftime(
+                        "%d.%m.%Y %H:%M"
+                    )
+                    if cancelled_at
+                    else "время не указано"
+                )
+                cancellation = (
+                    f"{actor}, {when}: "
+                    f"{lesson.get('cancellation_reason') or 'без причины'}"
+                )
+            values = [
+                role,
+                f"{start:%d.%m.%Y}",
+                lesson.get("subject_name_snapshot", ""),
+                (
+                    f"{lesson.get('teacher_name_snapshot', '')} · "
+                    f"{lesson.get('room_name_snapshot', '')}"
+                ),
+                f"{start:%H:%M}–{end:%H:%M}",
+                fact,
+                attendance,
+                cancellation,
+            ]
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(str(value))
+                cell.setData(Qt.ItemDataRole.UserRole, lesson.get("id"))
+                self.learning_history.setItem(row, column, cell)
+        presence = result.get("student", {}).get("presence", [])
+        self.presence_history.setRowCount(len(presence))
+        for row, item in enumerate(presence):
+            for column, key in enumerate(("arrived_at", "left_at")):
+                value = item.get(key)
+                text_value = (
+                    datetime.fromisoformat(value).astimezone().strftime("%d.%m.%Y %H:%M")
+                    if value
+                    else "—"
+                )
+                self.presence_history.setItem(row, column, QTableWidgetItem(text_value))
+        self.learning_status.setText(
+            "Дважды щёлкните по занятию, чтобы открыть его карточку."
+        )
+
+    def _open_history_lesson(self, item: QTableWidgetItem) -> None:
+        lesson_id = item.data(Qt.ItemDataRole.UserRole)
+        if lesson_id is not None and self.open_lesson is not None:
+            self.open_lesson(int(lesson_id))
 
     def _target_role(self) -> str | None:
         value = self.relation_mode.currentData()

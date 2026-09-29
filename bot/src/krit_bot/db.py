@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import (
     JSON,
@@ -27,6 +27,9 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+if TYPE_CHECKING:
+    from .learning_models import PersonMaxIdentity
 
 
 def utcnow() -> datetime:
@@ -63,6 +66,9 @@ class Person(Base):
         back_populates="guardian",
         cascade="all, delete-orphan",
         lazy="selectin",
+    )
+    max_identity: Mapped[PersonMaxIdentity | None] = relationship(
+        "PersonMaxIdentity", uselist=False, cascade="all, delete-orphan", lazy="selectin"
     )
 
 
@@ -233,9 +239,13 @@ async def ensure_schema(engine: AsyncEngine) -> None:
 
 
 async def is_authorized(session: AsyncSession, max_user_id: int) -> bool:
+    from .learning_models import PersonMaxIdentity
+
     result = await session.scalar(
-        select(Person.id).where(
-            Person.max_user_id == max_user_id,
+        select(PersonMaxIdentity.person_id)
+        .join(Person, Person.id == PersonMaxIdentity.person_id)
+        .where(
+            PersonMaxIdentity.max_user_id == max_user_id,
             Person.active.is_(True),
             Person.archived_at.is_(None),
         )
@@ -248,13 +258,10 @@ async def bind_max_user_by_phone(
 ) -> Literal["linked", "already_linked", "not_found", "belongs_to_another_user"]:
     from .learning_models import PersonMaxIdentity
 
-    existing = await session.scalar(select(Person).where(Person.max_user_id == max_user_id))
     existing_identity = await session.scalar(
         select(PersonMaxIdentity).where(PersonMaxIdentity.max_user_id == max_user_id)
     )
     if existing_identity is not None and existing_identity.verified_phone != phone:
-        return "belongs_to_another_user"
-    if existing is not None and existing_identity is None and existing.phone != phone:
         return "belongs_to_another_user"
     identity_person_id = await session.scalar(
         select(PersonMaxIdentity.person_id).where(PersonMaxIdentity.verified_phone == phone)
@@ -271,11 +278,9 @@ async def bind_max_user_by_phone(
     person = await session.scalar(statement)
     if person is None:
         return "not_found"
-    if person.max_user_id == max_user_id:
-        return "already_linked"
-    if person.max_user_id is not None:
-        return "belongs_to_another_user"
     identity = await session.get(PersonMaxIdentity, person.id)
+    if identity is not None and identity.max_user_id == max_user_id:
+        return "already_linked"
     if identity is None:
         identity = PersonMaxIdentity(
             person_id=person.id,
@@ -291,7 +296,8 @@ async def bind_max_user_by_phone(
         identity.verified_phone = phone
         identity.verified_at = utcnow()
         identity.updated_at = utcnow()
-    person.max_user_id = max_user_id
+    # Person.max_user_id is retained as a transitional database column only.
+    # Runtime authorization and delivery use PersonMaxIdentity exclusively.
     person.updated_at = utcnow()
     await session.flush()
     return "linked"

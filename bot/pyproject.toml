@@ -8,6 +8,7 @@ version = "0.2.0"
 description = "MAX notification bot for KRiT education center"
 requires-python = ">=3.13"
 dependencies = [
+  "alembic>=1.16,<2",
   "aiosqlite>=0.21,<1",
   "asyncpg>=0.30,<1",
   "fastapi>=0.116,<1",
@@ -30,6 +31,7 @@ dev = [
 
 [project.scripts]
 krit-bot = "krit_bot.main:run"
+krit-migrate = "krit_bot.migrate:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/krit_bot"]

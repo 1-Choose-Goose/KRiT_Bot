@@ -8,6 +8,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QSizeF
 from PySide6.QtWidgets import QApplication, QPushButton
 
+from krit_management.dialogs import PersonDialog
+from krit_management.learning_page import LessonDialog
+from krit_management.widgets import SearchableComboBox
 from krit_management.window import MainWindow
 
 
@@ -100,3 +103,76 @@ def test_dense_schedule_is_paginated_and_html_escaped() -> None:
     assert "&lt;углублённый курс&gt;" in document.toHtml()
     window.close()
     app.processEvents()
+
+
+def test_searchable_combo_matches_prefix_of_surname_or_name() -> None:
+    app = QApplication.instance() or QApplication([])
+    combo = SearchableComboBox()
+    combo.addItems(
+        [
+            "Алексеев Александр Фёдорович",
+            "Белов Александр Сергеевич",
+            "Смирнова Мария Алексеевна",
+        ]
+    )
+
+    combo._search("ал фё")
+    assert combo._proxy.rowCount() == 1
+    assert combo._proxy.index(0, 0).data() == "Алексеев Александр Фёдорович"
+
+    combo._search("мар")
+    assert combo._proxy.rowCount() == 1
+    assert combo._proxy.index(0, 0).data() == "Смирнова Мария Алексеевна"
+    combo.deleteLater()
+    app.processEvents()
+
+
+def test_person_history_is_loaded_only_when_learning_tab_opens() -> None:
+    app = QApplication.instance() or QApplication([])
+    calls: list[int] = []
+
+    def load(person_id: int, _roles: list[str], callback) -> None:
+        calls.append(person_id)
+        callback({"student": {"lessons": [], "presence": []}})
+
+    dialog = PersonDialog(
+        {
+            "id": 7,
+            "full_name": "Алексеев Александр Фёдорович",
+            "phone": "+70010000017",
+            "roles": ["student"],
+        },
+        load_learning_history=load,
+    )
+    assert calls == []
+    dialog.sections.setCurrentIndex(2)
+    app.processEvents()
+    assert calls == [7]
+    dialog.deleteLater()
+
+
+def test_group_defaults_fill_new_lesson_without_changing_override_support() -> None:
+    app = QApplication.instance() or QApplication([])
+    references = {
+        "subjects": [{"id": 1, "name": "Математика"}],
+        "teachers": [{"id": 2, "full_name": "Воронцов Борис Александрович"}],
+        "rooms": [{"id": 3, "name": "Кабинет 2"}],
+        "groups": [
+            {
+                "id": 4,
+                "name": "Группа А",
+                "subject_id": 1,
+                "default_teacher_id": 2,
+                "default_duration_minutes": 90,
+            }
+        ],
+        "students": [],
+    }
+    dialog = LessonDialog(references)
+    dialog.group.setCurrentIndex(dialog.group.findData(4))
+    app.processEvents()
+
+    assert dialog.subject.currentData() == 1
+    assert dialog.teacher.currentData() == 2
+    assert dialog.start.dateTime().secsTo(dialog.end.dateTime()) == 90 * 60
+    dialog.deleteLater()

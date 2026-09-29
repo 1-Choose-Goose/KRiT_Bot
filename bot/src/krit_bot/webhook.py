@@ -33,6 +33,7 @@ from .db import (
 )
 from .handler import EchoHandler
 from .learning import create_learning_router
+from .learning_models import PersonMaxIdentity
 from .learning_notifications import LearningNotificationWorker
 from .max_api import MaxApiClient
 from .polling import run_polling
@@ -110,7 +111,7 @@ def as_related(person: Person) -> RelatedPersonView:
             "id": person.id,
             "full_name": person.full_name,
             "phone": person.phone,
-            "max_user_id": person.max_user_id,
+            "max_user_id": person.max_identity.max_user_id if person.max_identity else None,
             "active": person.active,
         }
     )
@@ -123,7 +124,7 @@ def as_person_view(person: Person) -> PersonView:
         phone=person.phone,
         roles=sorted(link.role for link in person.role_links),
         active=person.active,
-        max_user_id=person.max_user_id,
+        max_user_id=person.max_identity.max_user_id if person.max_identity else None,
         archived_at=person.archived_at,
         guardians=[as_related(link.guardian) for link in person.guardian_links],
         students=[as_related(link.student) for link in person.student_links],
@@ -353,8 +354,13 @@ def create_app(settings: Settings) -> FastAPI:
                     )
                 ).all()
             )
-            known_ids = select(Person.max_user_id).where(
-                Person.max_user_id.is_not(None), Person.archived_at.is_(None)
+            known_ids = (
+                select(PersonMaxIdentity.max_user_id)
+                .join(Person, Person.id == PersonMaxIdentity.person_id)
+                .where(
+                    PersonMaxIdentity.max_user_id.is_not(None),
+                    Person.archived_at.is_(None),
+                )
             )
             attempts = list(
                 (
@@ -582,8 +588,13 @@ def create_app(settings: Settings) -> FastAPI:
     )
     async def list_access_attempts() -> list[AccessAttempt]:
         async with sessions() as session:
-            known_ids = select(Person.max_user_id).where(
-                Person.max_user_id.is_not(None), Person.archived_at.is_(None)
+            known_ids = (
+                select(PersonMaxIdentity.max_user_id)
+                .join(Person, Person.id == PersonMaxIdentity.person_id)
+                .where(
+                    PersonMaxIdentity.max_user_id.is_not(None),
+                    Person.archived_at.is_(None),
+                )
             )
             return list(
                 (

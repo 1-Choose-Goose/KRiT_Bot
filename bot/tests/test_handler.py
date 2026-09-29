@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from krit_bot.config import extract_first_token
 from krit_bot.db import Base, Person, PersonRole, build_session_factory
 from krit_bot.handler import EchoHandler, parse_message_created
+from krit_bot.learning_models import PersonMaxIdentity
 
 
 class FakeApi:
@@ -72,13 +73,19 @@ async def test_only_authorized_user_receives_echo() -> None:
         await connection.run_sync(Base.metadata.create_all)
     sessions = build_session_factory(engine)
     async with sessions() as session:
-        session.add(
-            Person(
+        person = Person(
                 full_name="Иван Иванов",
                 phone="+79990000000",
                 role_links=[PersonRole(role="student")],
-                max_user_id=42,
                 active=True,
+            )
+        session.add(person)
+        await session.flush()
+        session.add(
+            PersonMaxIdentity(
+                person_id=person.id,
+                verified_phone=person.phone,
+                max_user_id=42,
             )
         )
         await session.commit()
@@ -99,13 +106,19 @@ async def test_duplicate_message_is_ignored() -> None:
         await connection.run_sync(Base.metadata.create_all)
     sessions = build_session_factory(engine)
     async with sessions() as session:
-        session.add(
-            Person(
+        person = Person(
                 full_name="Иван Иванов",
                 phone="+79990000000",
                 role_links=[PersonRole(role="student")],
-                max_user_id=42,
                 active=True,
+            )
+        session.add(person)
+        await session.flush()
+        session.add(
+            PersonMaxIdentity(
+                person_id=person.id,
+                verified_phone=person.phone,
+                max_user_id=42,
             )
         )
         await session.commit()
@@ -141,9 +154,9 @@ async def test_verified_contact_links_user_once() -> None:
     await handler.handle(update(42, "Тест", "m2"))
 
     async with sessions() as session:
-        person = await session.get(Person, 1)
-        assert person is not None
-        assert person.max_user_id == 42
+        identity = await session.get(PersonMaxIdentity, 1)
+        assert identity is not None
+        assert identity.max_user_id == 42
     assert api.sent == [
         (42, "Авторизация завершена. Добро пожаловать в «КРиТ»!"),
         (42, "Эхо: Тест"),

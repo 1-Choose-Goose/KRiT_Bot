@@ -79,11 +79,18 @@ class ManagementApi:
         data = self._request("GET", "/learning/today")
         return data if isinstance(data, dict) else {}
 
-    def learning_lessons(self, date_from: str, date_to: str) -> list[dict[str, Any]]:
+    def learning_lessons(
+        self,
+        date_from: str,
+        date_to: str,
+        **filters: int | None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"date_from": date_from, "date_to": date_to}
+        params.update({key: value for key, value in filters.items() if value is not None})
         data = self._request(
             "GET",
             "/learning/lessons",
-            params={"date_from": date_from, "date_to": date_to},
+            params=params,
         )
         return data if isinstance(data, list) else []
 
@@ -97,6 +104,10 @@ class ManagementApi:
 
     def create_lesson(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/learning/lessons", json=payload)
+
+    def learning_lesson(self, lesson_id: int) -> dict[str, Any]:
+        data = self._request("GET", f"/learning/lesson/{lesson_id}")
+        return data if isinstance(data, dict) else {}
 
     def create_lesson_series(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/learning/series", json=payload)
@@ -132,8 +143,77 @@ class ManagementApi:
             json={"status": attendance_status},
         )
 
+    def correct_attendance(
+        self,
+        lesson_id: int,
+        person_id: int,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/learning/lessons/{lesson_id}/participants/{person_id}/correct",
+            json=payload,
+        )
+
+    def correct_actual_time(
+        self, lesson_id: int, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST", f"/learning/lessons/{lesson_id}/correct-time", json=payload
+        )
+
     def read_admin_notification(self, notification_id: int) -> dict[str, Any]:
         return self._request("POST", f"/learning/admin-notifications/{notification_id}/read")
+
+    def admin_notifications(self, *, unread_only: bool = False) -> list[dict[str, Any]]:
+        data = self._request(
+            "GET",
+            "/learning/admin-notifications",
+            params={"unread_only": str(unread_only).lower()},
+        )
+        return data if isinstance(data, list) else []
+
+    def read_all_admin_notifications(self) -> dict[str, Any]:
+        return self._request("POST", "/learning/admin-notifications/read-all")
+
+    def cancel_lesson_participant(
+        self,
+        lesson_id: int,
+        person_id: int,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/learning/lessons/{lesson_id}/participants/{person_id}/cancel",
+            json=payload,
+        )
+
+    def restore_lesson_participant(self, lesson_id: int, person_id: int) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/learning/lessons/{lesson_id}/participants/{person_id}/restore",
+        )
+
+    def free_slots(
+        self,
+        *,
+        day: str,
+        duration_minutes: int,
+        teacher_id: int | None,
+        room_id: int | None,
+        student_ids: list[int],
+    ) -> list[dict[str, Any]]:
+        params: list[tuple[str, Any]] = [
+            ("day", day),
+            ("duration_minutes", duration_minutes),
+        ]
+        if teacher_id is not None:
+            params.append(("teacher_id", teacher_id))
+        if room_id is not None:
+            params.append(("room_id", room_id))
+        params.extend(("student_ids", item) for item in student_ids)
+        data = self._request("GET", "/learning/free-slots", params=params)
+        return data if isinstance(data, list) else []
 
     def group_memberships(self, group_id: int) -> list[dict[str, Any]]:
         data = self._request("GET", f"/learning/groups/{group_id}/memberships")

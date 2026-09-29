@@ -4,6 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -27,7 +28,7 @@ class PersonMaxIdentity(Base):
         ForeignKey("persons.id", ondelete="CASCADE"), primary_key=True
     )
     verified_phone: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
-    max_user_id: Mapped[int | None] = mapped_column(unique=True, index=True)
+    max_user_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, index=True)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -60,6 +61,10 @@ class StudyGroup(Base):
     subject_id: Mapped[int | None] = mapped_column(
         ForeignKey("learning_subjects.id", ondelete="SET NULL"), index=True
     )
+    default_teacher_id: Mapped[int | None] = mapped_column(
+        ForeignKey("persons.id", ondelete="SET NULL"), index=True
+    )
+    default_duration_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -160,6 +165,10 @@ class LessonParticipant(Base):
             "attendance_status IN ('expected','present','late','absent','left_early','excused')",
             name="ck_lesson_attendance_status",
         ),
+        CheckConstraint(
+            "cancelled_by IS NULL OR cancelled_by IN ('student','guardian','administrator')",
+            name="ck_lesson_participant_cancelled_by",
+        ),
         Index("ix_participant_person_lesson", "person_id", "lesson_id"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -175,6 +184,15 @@ class LessonParticipant(Base):
     left_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     late_minutes: Mapped[int | None] = mapped_column(Integer)
     note: Mapped[str | None] = mapped_column(String(500))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_by: Mapped[str | None] = mapped_column(String(20))
+    cancelled_by_person_id: Mapped[int | None] = mapped_column(
+        ForeignKey("persons.id", ondelete="SET NULL"), index=True
+    )
+    cancelled_by_admin_id: Mapped[int | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"), index=True
+    )
+    cancellation_reason: Mapped[str | None] = mapped_column(String(500))
 
 
 class ClubPresenceSession(Base):

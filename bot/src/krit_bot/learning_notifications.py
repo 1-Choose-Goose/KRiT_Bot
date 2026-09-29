@@ -8,7 +8,12 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .db import Person, utcnow
-from .learning_models import AdminNotification, NotificationJob
+from .learning_models import (
+    AdminNotification,
+    LessonParticipant,
+    NotificationJob,
+    PersonMaxIdentity,
+)
 from .max_api import MaxApiClient, MaxApiError
 
 log = structlog.get_logger()
@@ -60,11 +65,13 @@ class LearningNotificationWorker:
             if job is None:
                 return False
             person = await session.get(Person, job.recipient_person_id)
+            identity = await session.get(PersonMaxIdentity, job.recipient_person_id)
             if (
                 person is None
                 or person.archived_at is not None
                 or not person.active
-                or person.max_user_id is None
+                or identity is None
+                or identity.max_user_id is None
             ):
                 job.status = "cancelled"
                 job.last_error = "Получатель не авторизован в MAX"
@@ -74,10 +81,26 @@ class LearningNotificationWorker:
             job.status = "processing"
             job.attempts += 1
             job.updated_at = utcnow()
+            text = str(job.payload.get("text") or "Уведомление КРиТ")
+            if job.payload.get("template") == "teacher_reminder" and job.lesson_id is not None:
+                student_names = list(
+                    (
+                        await session.scalars(
+                            select(LessonParticipant.person_name_snapshot)
+                            .where(
+                                LessonParticipant.lesson_id == job.lesson_id,
+                                LessonParticipant.attendance_status != "excused",
+                            )
+                            .order_by(LessonParticipant.person_name_snapshot)
+                        )
+                    ).all()
+                )
+                text += "\n\nУченики:\n" + (
+                    "\n".join(student_names) if student_names else "Нет участников"
+                )
             await session.commit()
             job_id = job.id
-            user_id = person.max_user_id
-            text = str(job.payload.get("text") or "Уведомление КРиТ")
+            user_id = identity.max_user_id
         try:
             await self.api.send_text(user_id=user_id, text=text)
         except (MaxApiError, OSError, TimeoutError) as exc:

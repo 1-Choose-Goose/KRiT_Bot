@@ -130,6 +130,29 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
             assert statuses[student_one] == "left_early"
             assert statuses[student_two] == "absent"
 
+            corrected = await client.post(
+                f"/api/v1/learning/lessons/{lesson_id}/participants/{student_two}/correct",
+                headers=headers,
+                json={
+                    "attendance_status": "excused",
+                    "reason": "Подтверждённая уважительная причина",
+                },
+            )
+            assert corrected.status_code == 200, corrected.text
+            assert corrected.json()["attendance_status"] == "excused"
+
+            corrected_time = await client.post(
+                f"/api/v1/learning/lessons/{lesson_id}/correct-time",
+                headers=headers,
+                json={
+                    "actual_start_at": (start + timedelta(minutes=3)).isoformat(),
+                    "actual_end_at": (end + timedelta(minutes=2)).isoformat(),
+                    "reason": "Уточнение по журналу администратора",
+                },
+            )
+            assert corrected_time.status_code == 200, corrected_time.text
+            assert corrected_time.json()["actual_start_at"] is not None
+
             history = await client.get(
                 f"/api/v1/learning/history/person/{student_one}", headers=headers
             )
@@ -163,6 +186,72 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
             )
             assert series.status_code == 201, series.text
             assert len(series.json()["lesson_ids"]) == 3
+
+            dual_role = await person(
+                "Сергеев Сергей Петрович",
+                "+79000000005",
+                ["student", "teacher"],
+            )
+            room_two = (
+                await client.post(
+                    "/api/v1/learning/rooms",
+                    headers=headers,
+                    json={"name": "Кабинет 2", "capacity": 5},
+                )
+            ).json()["id"]
+            cross_start = start + timedelta(days=30)
+            teaches = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **base,
+                    "teacher_id": dual_role,
+                    "start_at": cross_start.isoformat(),
+                    "end_at": (cross_start + timedelta(hours=1)).isoformat(),
+                    "participant_ids": [student_three],
+                },
+            )
+            assert teaches.status_code == 201, teaches.text
+            cannot_be_student = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **base,
+                    "teacher_id": teacher,
+                    "room_id": room_two,
+                    "start_at": (cross_start + timedelta(minutes=30)).isoformat(),
+                    "end_at": (cross_start + timedelta(minutes=90)).isoformat(),
+                    "participant_ids": [dual_role],
+                },
+            )
+            assert cannot_be_student.status_code == 409
+
+            reverse_start = cross_start + timedelta(days=1)
+            studies = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **base,
+                    "teacher_id": teacher,
+                    "start_at": reverse_start.isoformat(),
+                    "end_at": (reverse_start + timedelta(hours=1)).isoformat(),
+                    "participant_ids": [dual_role],
+                },
+            )
+            assert studies.status_code == 201, studies.text
+            cannot_teach = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **base,
+                    "teacher_id": dual_role,
+                    "room_id": room_two,
+                    "start_at": (reverse_start + timedelta(minutes=30)).isoformat(),
+                    "end_at": (reverse_start + timedelta(minutes=90)).isoformat(),
+                    "participant_ids": [student_three],
+                },
+            )
+            assert cannot_teach.status_code == 409
 
             archived = await client.post(f"/api/v1/people/{student_one}/archive", headers=headers)
             assert archived.status_code == 200

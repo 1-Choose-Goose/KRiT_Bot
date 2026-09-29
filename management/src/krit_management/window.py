@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QThreadPool, QTimer
-from PySide6.QtGui import QCloseEvent, QPixmap
+from PySide6.QtGui import QCloseEvent, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -23,6 +26,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStackedWidget,
+    QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -68,15 +72,28 @@ class MainWindow(QMainWindow):
         self._refresh_running = False
         self._background_jobs = 0
         self._update_progress: QProgressDialog | None = None
+        self._seen_notification_ids: set[int] = set()
+        self._notifications: list[dict[str, Any]] = []
+        self._last_toast_lesson_id: int | None = None
         self.setWindowTitle("КРиТ · управление")
         self.setMinimumSize(1120, 620)
         self.resize(1240, 760)
         self._build_ui()
+        self.learning_page.notifications_changed.connect(self._notifications_changed)
+        self.learning_page.person_requested.connect(self._open_person_by_id)
+        self.tray = QSystemTrayIcon(QIcon(str(ASSETS_DIR / "app_icon.ico")), self)
+        self.tray.setToolTip("КРиТ · управление")
+        self.tray.messageClicked.connect(self._open_last_toast_lesson)
+        self.tray.show()
         self.refresh()
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(2000)
         self.refresh_timer.timeout.connect(self._auto_refresh)
         self.refresh_timer.start()
+        self.notification_timer = QTimer(self)
+        self.notification_timer.setInterval(10_000)
+        self.notification_timer.timeout.connect(self._poll_notifications)
+        self.notification_timer.start()
         QTimer.singleShot(2500, self._check_updates_automatically)
 
     def _build_ui(self) -> None:
@@ -154,11 +171,126 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("connectionStatus")
         self.status_label.setProperty("state", "loading")
         layout.addWidget(self.status_label)
+        self.notifications_button = QPushButton("Уведомления")
+        self.notifications_button.setProperty("kind", "secondary")
+        self.notifications_button.clicked.connect(self.open_notification_center)
+        layout.addWidget(self.notifications_button)
         refresh_button = QPushButton("Обновить")
         refresh_button.setProperty("kind", "secondary")
         refresh_button.clicked.connect(lambda _checked=False: self.refresh(silent=False))
         layout.addWidget(refresh_button)
         return card
+
+    def _notifications_changed(self, notifications: list[dict[str, Any]]) -> None:
+        self._notifications = notifications
+        unread = [item for item in notifications if not item.get("read_at")]
+        self.notifications_button.setText(
+            f"Уведомления ({len(unread)})" if unread else "Уведомления"
+        )
+        new_items = [
+            item for item in unread if int(item.get("id", 0)) not in self._seen_notification_ids
+        ]
+        for item in reversed(new_items[:3]):
+            self._last_toast_lesson_id = (
+                int(item["lesson_id"]) if item.get("lesson_id") is not None else None
+            )
+            self.tray.showMessage(
+                str(item.get("title", "Уведомление КРиТ")),
+                str(item.get("message", "")),
+                QSystemTrayIcon.MessageIcon.Information,
+                7000,
+            )
+        self._seen_notification_ids.update(int(item.get("id", 0)) for item in unread)
+
+    def _open_last_toast_lesson(self) -> None:
+        if self._last_toast_lesson_id is not None:
+            self._open_lesson_from_person(self._last_toast_lesson_id)
+
+    def open_notification_center(self) -> None:
+        self._run(
+            lambda: self.api.admin_notifications(unread_only=False),
+            self._show_notification_center,
+        )
+
+    def _poll_notifications(self) -> None:
+        if self._closing or QApplication.activeModalWidget() is not None:
+            return
+        self._run(
+            lambda: self.api.admin_notifications(unread_only=False),
+            lambda result: self._notifications_changed(result if isinstance(result, list) else []),
+        )
+
+    def _show_notification_center(self, result: object) -> None:
+        notifications = result if isinstance(result, list) else []
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Центр уведомлений")
+        dialog.setMinimumSize(760, 460)
+        layout = QVBoxLayout(dialog)
+        table = QTableWidget(0, 4)
+        table.setHorizontalHeaderLabels(["Состояние", "Дата", "Событие", "Сообщение"])
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setRowCount(len(notifications))
+        for row, item in enumerate(notifications):
+            created = datetime.fromisoformat(item["created_at"]).astimezone()
+            values = [
+                "Прочитано" if item.get("read_at") else "Новое",
+                f"{created:%d.%m.%Y %H:%M}",
+                item.get("title", ""),
+                item.get("message", ""),
+            ]
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(str(value))
+                cell.setData(Qt.ItemDataRole.UserRole, item)
+                table.setItem(row, column, cell)
+        layout.addWidget(table)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        open_button = buttons.addButton("Открыть занятие", QDialogButtonBox.ButtonRole.ActionRole)
+        read_button = buttons.addButton(
+            "Отметить прочитанным", QDialogButtonBox.ButtonRole.ActionRole
+        )
+        read_all_button = buttons.addButton("Прочитать все", QDialogButtonBox.ButtonRole.ActionRole)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def selected() -> dict[str, Any] | None:
+            row = table.currentRow()
+            return table.item(row, 0).data(Qt.ItemDataRole.UserRole) if row >= 0 else None
+
+        def open_selected() -> None:
+            item = selected()
+            if item and item.get("lesson_id"):
+                dialog.accept()
+                self._run(
+                    lambda: self.api.read_admin_notification(int(item["id"])),
+                    lambda _result: self._open_lesson_from_person(int(item["lesson_id"])),
+                )
+
+        def read_selected() -> None:
+            item = selected()
+            if item:
+                row = table.currentRow()
+                self._run(
+                    lambda: self.api.read_admin_notification(int(item["id"])),
+                    lambda _result: table.item(row, 0).setText("Прочитано"),
+                )
+
+        open_button.clicked.connect(open_selected)
+        read_button.clicked.connect(read_selected)
+        read_all_button.clicked.connect(
+            lambda _checked=False: self._run(
+                self.api.read_all_admin_notifications,
+                lambda _result: [
+                    table.item(row, 0).setText("Прочитано")
+                    for row in range(table.rowCount())
+                ],
+            )
+        )
+        table.doubleClicked.connect(lambda _index: open_selected())
+        dialog.exec()
+        self.learning_page.refresh_today()
 
     def _change_section(self, index: int) -> None:
         if index < 0:
@@ -509,6 +641,8 @@ class MainWindow(QMainWindow):
             self,
             available_people=self.people,
             open_related=self.edit_person,
+            load_learning_history=self._load_person_history,
+            open_lesson=self._open_lesson_from_person,
         )
         if dialog.exec():
             relations = dialog.relation_state()
@@ -516,6 +650,35 @@ class MainWindow(QMainWindow):
                 lambda: self._update_with_relations(person, dialog.payload(), relations),
                 lambda _: self.refresh(),
             )
+
+    def _open_person_by_id(self, person_id: int) -> None:
+        person = next((item for item in self.people if int(item["id"]) == person_id), None)
+        if person is not None:
+            self.edit_person(person)
+
+    def _load_person_history(
+        self,
+        person_id: int,
+        roles: list[str],
+        callback,
+    ) -> None:
+        def load() -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            if "student" in roles:
+                result["student"] = self.api.student_history(person_id)
+            if "teacher" in roles:
+                result["teacher"] = self.api.teacher_history(person_id)
+            return result
+
+        self._run(load, callback)
+
+    def _open_lesson_from_person(self, lesson_id: int) -> None:
+        self._run(
+            lambda: self.api.learning_lesson(lesson_id),
+            lambda lesson: self.learning_page.open_lesson(lesson)
+            if isinstance(lesson, dict)
+            else None,
+        )
 
     def _create_with_relations(
         self,
