@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSizeF
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from krit_management.window import MainWindow
 
@@ -51,7 +51,29 @@ def test_main_window_loads_learning_calendar_without_worker_argument_error() -> 
     app.processEvents()
 
     assert window.learning_page.calendar_table.rowCount() == 0
+    assert [window.client_tabs.tabText(index) for index in range(4)] == [
+        "Ученики",
+        "Учителя",
+        "Родители",
+        "Все",
+    ]
     window.close()
+    app.processEvents()
+
+
+def test_archive_action_buttons_are_not_clipped() -> None:
+    app = QApplication.instance() or QApplication([])
+    actions = MainWindow._actions(
+        [("Восстановить", "secondary", lambda: None), ("Удалить", "danger", lambda: None)]
+    )
+    buttons = actions.findChildren(QPushButton)
+
+    assert [button.text() for button in buttons] == ["Восстановить", "Удалить"]
+    assert all(
+        button.width() >= button.fontMetrics().horizontalAdvance(button.text()) + 40
+        for button in buttons
+    )
+    actions.deleteLater()
     app.processEvents()
 
 

@@ -191,10 +191,10 @@ class MainWindow(QMainWindow):
         self.client_tabs = QTabWidget()
         self.client_tabs.setObjectName("clientTabs")
         self.client_tabs.setDocumentMode(True)
-        self.client_tabs.addTab(self._people_tab("all"), "Все")
         self.client_tabs.addTab(self._people_tab("student"), "Ученики")
-        self.client_tabs.addTab(self._people_tab("parent"), "Родители")
         self.client_tabs.addTab(self._people_tab("teacher"), "Учителя")
+        self.client_tabs.addTab(self._people_tab("parent"), "Родители")
+        self.client_tabs.addTab(self._people_tab("all"), "Все")
         self.client_tabs.addTab(self._attempts_tab(), "Запросы авторизации")
         self.client_tabs.addTab(self._archive_tab(), "Архив")
         layout.addWidget(self.client_tabs, 1)
@@ -449,16 +449,11 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(3, 3, 3, 3)
         layout.setSpacing(6)
         layout.addStretch(1)
-        probe = QPushButton()
-        button_width = max(
-            88,
-            max(probe.fontMetrics().horizontalAdvance(text) for text, _, _ in actions) + 32,
-        )
-        probe.deleteLater()
         for text, kind, callback in actions:
             button = QPushButton(text)
             button.setProperty("kind", kind)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button_width = max(92, button.fontMetrics().horizontalAdvance(text) + 48)
             button.setFixedSize(button_width, 34)
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             button.clicked.connect(lambda _checked=False, fn=callback: fn())
