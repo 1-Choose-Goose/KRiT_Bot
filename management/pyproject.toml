@@ -4,13 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "krit-management"
-version = "0.2.1"
+version = "0.3.0"
 description = "Management panel for KRiT education center bot"
 requires-python = ">=3.13"
 dependencies = [
   "certifi>=2026.2",
   "httpx>=0.28,<1",
   "pyside6-essentials==6.11.2",
+  "tzdata>=2025.2",
 ]
 
 [project.optional-dependencies]
@@ -28,4 +29,3 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
-

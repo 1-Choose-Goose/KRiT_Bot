@@ -28,6 +28,7 @@ async def test_concurrent_booking_allows_only_one_lesson(conflict_kind: str) -> 
         database_url=str(POSTGRES_URL),
         max_bot_token=SecretStr("test-token"),
         jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
+        bootstrap_admin_password=SecretStr("ci-only-strong-password"),
         bot_mode="webhook",
         vk_syndication_enabled=False,
     )
@@ -37,7 +38,8 @@ async def test_concurrent_booking_allows_only_one_lesson(conflict_kind: str) -> 
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
             login = await client.post(
-                "/api/v1/auth/login", json={"username": "admin", "password": "admin"}
+                "/api/v1/auth/login",
+                json={"username": "admin", "password": "ci-only-strong-password"},
             )
             headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
 
@@ -116,3 +118,86 @@ async def test_concurrent_booking_allows_only_one_lesson(conflict_kind: str) -> 
                 ),
             )
             assert sorted((first.status_code, second.status_code)) == [201, 409]
+
+
+@pytest.mark.skipif(
+    not POSTGRES_URL,
+    reason="KRIT_TEST_POSTGRES_URL is required for the PostgreSQL concurrency test",
+)
+@pytest.mark.asyncio
+async def test_concurrent_arrival_and_group_membership_are_serialized() -> None:
+    suffix = str(uuid4().int)[-10:]
+    settings = Settings(
+        database_url=str(POSTGRES_URL),
+        max_bot_token=SecretStr("test-token"),
+        jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
+        bootstrap_admin_password=SecretStr("ci-only-strong-password"),
+        bot_mode="webhook",
+        vk_syndication_enabled=False,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            login = await client.post(
+                "/api/v1/auth/login",
+                json={"username": "admin", "password": "ci-only-strong-password"},
+            )
+            headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+            person = await client.post(
+                "/api/v1/people",
+                headers=headers,
+                json={
+                    "full_name": f"Ученик Конкурентный {suffix}",
+                    "phone": f"+76{suffix[:9]}",
+                    "roles": ["student"],
+                },
+            )
+            assert person.status_code == 201, person.text
+            person_id = int(person.json()["id"])
+
+            arrivals = await asyncio.gather(
+                client.post(
+                    f"/api/v1/learning/presence/{person_id}/arrival", headers=headers
+                ),
+                client.post(
+                    f"/api/v1/learning/presence/{person_id}/arrival", headers=headers
+                ),
+            )
+            assert [response.status_code for response in arrivals] == [201, 201]
+            assert sorted(response.json()["already_present"] for response in arrivals) == [
+                False,
+                True,
+            ]
+            today = (await client.get("/api/v1/learning/today", headers=headers)).json()
+            assert sum(item["person_id"] == person_id for item in today["present"]) == 1
+
+            group = await client.post(
+                "/api/v1/learning/groups",
+                headers=headers,
+                json={
+                    "name": f"Группа конкурентная {suffix}",
+                    "default_duration_minutes": 60,
+                },
+            )
+            assert group.status_code == 201, group.text
+            group_id = int(group.json()["id"])
+            membership_payload = {
+                "person_id": person_id,
+                "start_at": datetime.now(UTC).isoformat(),
+                "end_at": (datetime.now(UTC) + timedelta(days=30)).isoformat(),
+            }
+            memberships = await asyncio.gather(
+                client.post(
+                    f"/api/v1/learning/groups/{group_id}/memberships",
+                    headers=headers,
+                    json=membership_payload,
+                ),
+                client.post(
+                    f"/api/v1/learning/groups/{group_id}/memberships",
+                    headers=headers,
+                    json=membership_payload,
+                ),
+            )
+            assert sorted(response.status_code for response in memberships) == [201, 409]

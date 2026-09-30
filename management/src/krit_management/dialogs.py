@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
@@ -26,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .timeutils import parse_center
 from .widgets import configure_form_layout, matches_word_prefix
 
 ROLE_LABELS = {"student": "Ученик", "parent": "Родитель", "teacher": "Учитель"}
@@ -201,7 +201,7 @@ class PersonDialog(QDialog):
         self.max_user_id.setReadOnly(True)
         self.authorization = QLabel("Авторизован" if max_user_id is not None else "Не авторизован")
         self.active = QCheckBox("Доступ к боту")
-        self.active.setChecked(bool(self.person.get("active", True)))
+        self.active.setChecked(bool(self.person.get("bot_access_enabled", True)))
         form.addRow("ФИО", self.full_name)
         form.addRow("Телефон", self.phone)
         form.addRow("Личный телефон для входа в MAX", self.max_auth_phone)
@@ -318,16 +318,16 @@ class PersonDialog(QDialog):
         rows.sort(key=lambda pair: str(pair[1].get("start_at", "")), reverse=True)
         self.learning_history.setRowCount(len(rows))
         for row, (role, lesson) in enumerate(rows):
-            start = datetime.fromisoformat(lesson["start_at"]).astimezone()
-            end = datetime.fromisoformat(lesson["end_at"]).astimezone()
+            start = parse_center(lesson["start_at"])
+            end = parse_center(lesson["end_at"])
             actual_start = lesson.get("actual_start_at")
             actual_end = lesson.get("actual_end_at")
             fact = "—"
             if actual_start:
-                fact_start = datetime.fromisoformat(actual_start).astimezone()
+                fact_start = parse_center(actual_start)
                 fact = f"{fact_start:%H:%M}"
                 if actual_end:
-                    fact_end = datetime.fromisoformat(actual_end).astimezone()
+                    fact_end = parse_center(actual_end)
                     fact += f"–{fact_end:%H:%M}"
             attendance = ATTENDANCE_LABELS.get(
                 str(lesson.get("attendance_status", "")),
@@ -342,7 +342,7 @@ class PersonDialog(QDialog):
                 }.get(lesson.get("cancelled_by"), "неизвестно кем")
                 cancelled_at = lesson.get("cancelled_at")
                 when = (
-                    datetime.fromisoformat(cancelled_at).astimezone().strftime("%d.%m.%Y %H:%M")
+                    parse_center(cancelled_at).strftime("%d.%m.%Y %H:%M")
                     if cancelled_at
                     else "время не указано"
                 )
@@ -374,7 +374,7 @@ class PersonDialog(QDialog):
             for column, key in enumerate(("arrived_at", "left_at")):
                 value = item.get(key)
                 text_value = (
-                    datetime.fromisoformat(value).astimezone().strftime("%d.%m.%Y %H:%M")
+                    parse_center(value).strftime("%d.%m.%Y %H:%M")
                     if value
                     else "—"
                 )
@@ -498,7 +498,8 @@ class PersonDialog(QDialog):
             "phone": "+" + digits,
             "max_auth_phone": "+" + auth_digits if len(auth_digits) == 11 else None,
             "roles": [role for role, check in self.role_checks.items() if check.isChecked()],
-            "active": self.active.isChecked(),
+            "active": bool(self.person.get("active", True)),
+            "bot_access_enabled": self.active.isChecked(),
         }
 
     def relation_state(self) -> dict[str, tuple[list[int], list[dict[str, Any]]]]:

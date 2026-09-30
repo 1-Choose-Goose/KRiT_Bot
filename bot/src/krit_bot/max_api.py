@@ -132,13 +132,17 @@ class MaxApiClient:
             self._token.encode("utf-8"), vcf_info.encode("utf-8"), hashlib.sha256
         ).digest()
         provided = signature.strip()
-        candidates = (
-            digest.hex(),
+        hex_digest = digest.hex()
+        if len(provided) == len(hex_digest) and hmac.compare_digest(
+            provided.lower(), hex_digest
+        ):
+            return True
+        base64_candidates = (
             base64.b64encode(digest).decode("ascii"),
             base64.urlsafe_b64encode(digest).decode("ascii"),
             base64.urlsafe_b64encode(digest).decode("ascii").rstrip("="),
         )
-        return any(hmac.compare_digest(provided.lower(), item.lower()) for item in candidates)
+        return any(hmac.compare_digest(provided, item) for item in base64_candidates)
 
     async def subscribe_webhook(
         self, *, url: str, secret: str, update_types: list[str] | None = None

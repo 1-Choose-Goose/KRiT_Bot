@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -127,6 +128,11 @@ class LessonSeries(Base):
 class Lesson(Base):
     __tablename__ = "learning_lessons"
     __table_args__ = (
+        UniqueConstraint(
+            "series_id",
+            "series_occurrence_index",
+            name="uq_lesson_series_occurrence",
+        ),
         CheckConstraint("end_at > start_at", name="ck_lesson_period"),
         CheckConstraint(
             "status IN ('planned','scheduled','in_progress','completed','cancelled')",
@@ -140,6 +146,8 @@ class Lesson(Base):
     series_id: Mapped[int | None] = mapped_column(
         ForeignKey("learning_lesson_series.id", ondelete="SET NULL"), index=True
     )
+    series_occurrence_index: Mapped[int | None] = mapped_column(Integer)
+    series_exception: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     subject_id: Mapped[int] = mapped_column(
         ForeignKey("learning_subjects.id", ondelete="RESTRICT"), index=True
     )
@@ -247,6 +255,13 @@ class ClubPresenceSession(Base):
     __table_args__ = (
         CheckConstraint("left_at IS NULL OR left_at >= arrived_at", name="ck_presence_period"),
         Index("ix_presence_person_open", "person_id", "left_at"),
+        Index(
+            "uq_presence_one_open_per_person",
+            "person_id",
+            unique=True,
+            sqlite_where=text("left_at IS NULL"),
+            postgresql_where=text("left_at IS NULL"),
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     person_id: Mapped[int] = mapped_column(
@@ -287,6 +302,8 @@ class NotificationJob(Base):
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     last_error: Mapped[str | None] = mapped_column(Text)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    external_message_id: Mapped[str | None] = mapped_column(String(180))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -296,7 +313,13 @@ class AdminNotification(Base):
     __tablename__ = "learning_admin_notifications"
     __table_args__ = (
         UniqueConstraint("dedupe_key", name="uq_admin_notification_dedupe"),
-        UniqueConstraint("lesson_id", "kind", name="uq_admin_notification_lesson_kind"),
+        Index(
+            "uq_admin_notification_open_condition",
+            "condition_key",
+            unique=True,
+            sqlite_where=text("condition_key IS NOT NULL AND resolved_at IS NULL"),
+            postgresql_where=text("condition_key IS NOT NULL AND resolved_at IS NULL"),
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     dedupe_key: Mapped[str] = mapped_column(String(180), nullable=False)
@@ -306,7 +329,9 @@ class AdminNotification(Base):
     lesson_id: Mapped[int | None] = mapped_column(
         ForeignKey("learning_lessons.id", ondelete="CASCADE"), index=True
     )
+    condition_key: Mapped[str | None] = mapped_column(String(180), index=True)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -43,7 +43,7 @@ py -3.13 -m venv management\.venv
 .\management\.venv\Scripts\python.exe -m pip install -e ".\management"
 ```
 
-В PyCharm выберите `management/.venv/Scripts/python.exe`, откройте только `management/main.py` и нажмите **Run**. Бот на этом компьютере не запускается: он работает на сервере. Адрес HTTPS API уже задан в программе. Для эксперимента: логин `admin`, пароль `admin`.
+В PyCharm выберите `management/.venv/Scripts/python.exe`, откройте только `management/main.py` и нажмите **Run**. Бот на этом компьютере не запускается: он работает на сервере. Адрес HTTPS API уже задан в программе. Пара `admin/admin` допустима только для локального SQLite-эксперимента; PostgreSQL-запуск с таким или другим слабым bootstrap-паролем завершается с ошибкой.
 
 Пункт **Проверить обновления** работает и в PyCharm, и в Windows-сборке. Готовые версии публикуются в GitHub Releases.
 
@@ -60,3 +60,46 @@ Windows-сборка создаётся одной командой:
 ## Сервер
 
 На сервер устанавливается только содержимое `bot`. Сервис работает от отдельного системного пользователя, API слушает `127.0.0.1:8080`, а Nginx публикует выделенный HTTPS-маршрут. База `krit_bot` и роль PostgreSQL отдельные — существующие сайты и базы не используются.
+
+Перед каждым production-запуском обновите схему отдельно от приложения:
+
+```bash
+krit-migrate
+krit-bot
+```
+
+`krit-migrate` — единственный production-механизм изменения PostgreSQL. Сам сервер не выполняет `create_all` и не исправляет схему скрыто: если версия Alembic отстаёт от ожидаемой, запуск останавливается с понятной ошибкой. Перед миграцией сделайте резервную копию базы. Локальный SQLite bootstrap сохраняется только для разработки и тестов.
+
+Для PostgreSQL задайте уникальный `BOOTSTRAP_ADMIN_PASSWORD` длиной не менее 12 символов. Bootstrap-значение используется только при создании первого администратора и не перезаписывает существующую учётную запись.
+
+Состояния клиента разделены:
+
+- `active` — карточка доступна для текущей учебной работы;
+- `bot_access_enabled` — разрешено взаимодействие с MAX-ботом;
+- MAX authorized — у карточки существует подтверждённая MAX identity.
+
+Часовой пояс центра задаётся `CENTER_TIMEZONE` (по умолчанию `Asia/Yekaterinburg`) и передаётся программе управления через API. Расписание, журналы, уведомления и печать не зависят от часового пояса Windows администратора.
+
+MAX `POST /messages` не принимает официальный idempotency key. Поэтому доставка имеет гарантию **at least once**: внутри базы задания дедуплицируются, число попыток и ошибка сохраняются, прерванные задания восстанавливаются, но при остановке процесса после принятия сообщения MAX и до фиксации `sent` возможна повторная отправка. Для VK → MAX действует то же внешнее ограничение; идентификатор успешного сообщения сохраняется.
+
+Общая release-версия сервера и management хранится синхронно в обоих `pyproject.toml`. Windows-сборка и механизм обновления продолжают использовать эту версию.
+
+Полная локальная проверка:
+
+```bash
+ruff check bot/src bot/tests management/src management/tests
+pytest bot/tests -q
+pytest management/tests -q
+```
+
+PostgreSQL concurrency-тесты требуют отдельной тестовой базы, обновлённой до Alembic head:
+
+```bash
+export DATABASE_URL=postgresql+asyncpg://krit_test:password@127.0.0.1/krit_test
+export KRIT_TEST_POSTGRES_URL=$DATABASE_URL
+export BOOTSTRAP_ADMIN_PASSWORD=ci-only-strong-password
+krit-migrate
+pytest bot/tests/test_learning_postgresql.py -q
+```
+
+В GitHub Actions PostgreSQL 16 поднимается как отдельный service container; management-тесты запускаются с `QT_QPA_PLATFORM=offscreen` и минимальной библиотекой `libegl1`.

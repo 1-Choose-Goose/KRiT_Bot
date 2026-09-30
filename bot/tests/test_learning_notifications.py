@@ -185,13 +185,27 @@ async def test_start_and_finish_notifications_are_role_specific_without_self_cop
             event="finished",
             center_timezone="Asia/Yekaterinburg",
         )
+        await _queue_lesson_state_notifications(
+            session,
+            lesson,
+            [participants[1]],
+            event="participant_started",
+            center_timezone="Asia/Yekaterinburg",
+        )
+        await _queue_lesson_state_notifications(
+            session,
+            lesson,
+            [participants[1]],
+            event="participant_started",
+            center_timezone="Asia/Yekaterinburg",
+        )
         await session.commit()
         jobs = list(
             (
                 await session.scalars(select(NotificationJob).order_by(NotificationJob.dedupe_key))
             ).all()
         )
-        assert len(jobs) == 6
+        assert len(jobs) == 8
         assert not any(
             f"guardian:{guardian.id}:student:{guardian.id}" in job.dedupe_key for job in jobs
         )
@@ -202,5 +216,12 @@ async def test_start_and_finish_notifications_are_role_specific_without_self_cop
             for job in jobs
         )
         assert any("Занятие началось" in job.payload["text"] for job in jobs)
+        assert sum(job.event_type == "lesson_participant_started" for job in jobs) == 2
+        assert any(
+            job.event_type == "lesson_participant_started"
+            and job.recipient_person_id == guardian.id
+            and job.payload.get("subject_person_id") == child.id
+            for job in jobs
+        )
         assert any("Фактически:" in job.payload["text"] for job in jobs)
     await engine.dispose()

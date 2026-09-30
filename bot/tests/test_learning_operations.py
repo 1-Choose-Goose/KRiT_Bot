@@ -170,6 +170,34 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
             )
             assert replacement.status_code == 200, replacement.text
             assert len(replacement.json()["teacher_segments"]) == 2
+            factual_now = datetime.now(UTC)
+            free_slots = await client.get(
+                "/api/v1/learning/free-slots",
+                headers=headers,
+                params={
+                    "day": (factual_now + timedelta(hours=5)).date().isoformat(),
+                    "duration_minutes": 30,
+                    "teacher_id": substitute,
+                },
+            )
+            assert free_slots.status_code == 200, free_slots.text
+            assert not any(
+                datetime.fromisoformat(slot["start_at"]).replace(tzinfo=UTC)
+                <= factual_now
+                < datetime.fromisoformat(slot["end_at"]).replace(tzinfo=UTC)
+                for slot in free_slots.json()
+            )
+            returned_teacher = await client.post(
+                f"/api/v1/learning/lessons/{lesson_id}/teacher-transition",
+                headers=headers,
+                json={
+                    "action": "substitute",
+                    "replacement_teacher_id": teacher,
+                    "reason": "Основной преподаватель вернулся",
+                },
+            )
+            assert returned_teacher.status_code == 200, returned_teacher.text
+            assert len(returned_teacher.json()["teacher_segments"]) == 3
             completed = await client.post(
                 f"/api/v1/learning/lessons/{lesson_id}/finish-early",
                 headers=headers,
@@ -181,6 +209,44 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
             assert completed.status_code == 200, completed.text
             assert completed.json()["status"] == "completed"
             assert completed.json()["completion_type"] == "early"
+            completed_segments = completed.json()["teacher_segments"]
+            replacement_boundary = datetime.fromisoformat(
+                completed_segments[1]["started_at"]
+            ).replace(tzinfo=UTC)
+            corrected_start = (
+                datetime.fromisoformat(completed_segments[0]["started_at"]).replace(tzinfo=UTC)
+                - timedelta(minutes=1)
+            )
+            corrected_end = (
+                datetime.fromisoformat(completed_segments[-1]["ended_at"]).replace(tzinfo=UTC)
+                + timedelta(minutes=2)
+            )
+            corrected = await client.post(
+                f"/api/v1/learning/lessons/{lesson_id}/correct-time",
+                headers=headers,
+                json={
+                    "actual_start_at": corrected_start.isoformat(),
+                    "actual_end_at": corrected_end.isoformat(),
+                    "reason": "Уточнение по журналу администратора",
+                },
+            )
+            assert corrected.status_code == 200, corrected.text
+            assert datetime.fromisoformat(
+                corrected.json()["teacher_segments"][0]["started_at"]
+            ).replace(tzinfo=UTC) == corrected_start
+            assert datetime.fromisoformat(
+                corrected.json()["teacher_segments"][-1]["ended_at"]
+            ).replace(tzinfo=UTC) == corrected_end
+            invalid_correction = await client.post(
+                f"/api/v1/learning/lessons/{lesson_id}/correct-time",
+                headers=headers,
+                json={
+                    "actual_start_at": replacement_boundary.isoformat(),
+                    "actual_end_at": corrected_end.isoformat(),
+                    "reason": "Недопустимое пересечение смены",
+                },
+            )
+            assert invalid_correction.status_code == 422
             old_attendance = await client.put(
                 f"/api/v1/learning/lessons/{lesson_id}/participants/{absent}/attendance",
                 headers=headers,
@@ -193,8 +259,92 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
             second_history = (
                 await client.get(f"/api/v1/learning/history/teacher/{substitute}", headers=headers)
             ).json()
-            assert first_history["lessons"][0]["teacher_segment_type"] == "primary"
+            assert first_history["lessons"][0]["teacher_segment_type"] == "aggregated"
+            assert len(first_history["lessons"][0]["teacher_segments"]) == 2
             assert second_history["lessons"][0]["teacher_segment_type"] == "substitute"
+            assert (
+                await client.put(
+                    f"/api/v1/learning/subjects/{subject}",
+                    headers=headers,
+                    json={
+                        "name": "Математика переименованная",
+                        "color": "#2563eb",
+                        "teacher_ids": [teacher, substitute],
+                    },
+                )
+            ).status_code == 200
+            assert (
+                await client.put(
+                    f"/api/v1/learning/rooms/{room_two}",
+                    headers=headers,
+                    json={"name": "Кабинет переименованный", "capacity": 10},
+                )
+            ).status_code == 200
+            assert (
+                await client.put(
+                    f"/api/v1/people/{teacher}",
+                    headers=headers,
+                    json={
+                        "full_name": "Иванов Иван Переименованный",
+                        "phone": "+79000000001",
+                        "roles": ["teacher"],
+                    },
+                )
+            ).status_code == 200
+            preserved_history = (
+                await client.get(f"/api/v1/learning/history/teacher/{teacher}", headers=headers)
+            ).json()["lessons"][0]
+            assert preserved_history["subject_name_snapshot"] == "Математика"
+            assert preserved_history["room_name_snapshot"] == "Кабинет 2"
+            assert preserved_history["teacher_name_snapshot"] == "Иванов Иван Иванович"
+
+            overdue_start = datetime.now(UTC) - timedelta(hours=2)
+            overdue = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **payload,
+                    "start_at": overdue_start.isoformat(),
+                    "end_at": (overdue_start + timedelta(hours=1)).isoformat(),
+                    "participant_ids": [],
+                },
+            )
+            assert overdue.status_code == 201, overdue.text
+            overdue_id = int(overdue.json()["id"])
+            assert (
+                await client.post(
+                    f"/api/v1/learning/lessons/{overdue_id}/start", headers=headers
+                )
+            ).status_code == 200
+            missing_expected_end = await client.post(
+                f"/api/v1/learning/lessons/{overdue_id}/teacher-transition",
+                headers=headers,
+                json={
+                    "action": "substitute",
+                    "replacement_teacher_id": substitute,
+                    "reason": "Замена после планового окончания",
+                },
+            )
+            assert missing_expected_end.status_code == 422
+            expected_end = datetime.now(UTC) + timedelta(minutes=30)
+            overdue_replacement = await client.post(
+                f"/api/v1/learning/lessons/{overdue_id}/teacher-transition",
+                headers=headers,
+                json={
+                    "action": "substitute",
+                    "replacement_teacher_id": substitute,
+                    "expected_end_at": expected_end.isoformat(),
+                    "reason": "Замена после планового окончания",
+                },
+            )
+            assert overdue_replacement.status_code == 200, overdue_replacement.text
+            assert (
+                await client.post(
+                    f"/api/v1/learning/lessons/{overdue_id}/finish-early",
+                    headers=headers,
+                    json={"reason": "Проверка завершена"},
+                )
+            ).status_code == 200
 
             future_start = start + timedelta(days=3)
             future = await client.post(
@@ -315,7 +465,7 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
         ).fetchone()[0]
         assert absent_notifications == 0
         no_active_alerts = connection.execute(
-            "SELECT COUNT(*) FROM learning_admin_notifications WHERE dedupe_key = ?",
+            "SELECT COUNT(*) FROM learning_admin_notifications WHERE condition_key = ?",
             (f"lesson:{lesson_id}:no_active_students",),
         ).fetchone()[0]
         assert no_active_alerts == 1

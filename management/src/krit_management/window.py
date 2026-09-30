@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import webbrowser
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +35,7 @@ from PySide6.QtWidgets import (
 from .api import ManagementApi
 from .dialogs import ROLE_LABELS, PersonDialog, person_roles
 from .learning_page import LearningPage
+from .timeutils import parse_center
 from .updates import (
     UpdateInfo,
     UpdateProgress,
@@ -238,7 +238,7 @@ class MainWindow(QMainWindow):
         table.setColumnWidth(2, 190)
         table.setRowCount(len(notifications))
         for row, item in enumerate(notifications):
-            created = datetime.fromisoformat(item["created_at"]).astimezone()
+            created = parse_center(item["created_at"])
             values = [
                 "Прочитано" if item.get("read_at") else "Новое",
                 f"{created:%d.%m.%Y %H:%M}",
@@ -568,9 +568,9 @@ class MainWindow(QMainWindow):
                     and not (query_digits and query_digits in phone_digits)
                 ):
                     continue
-                if status == "active" and not person.get("active"):
+                if status == "active" and not person.get("bot_access_enabled", True):
                     continue
-                if status == "inactive" and person.get("active"):
+                if status == "inactive" and person.get("bot_access_enabled", True):
                     continue
                 if status == "authorized" and person.get("max_user_id") is None:
                     continue
@@ -785,22 +785,15 @@ class MainWindow(QMainWindow):
         payload: dict[str, Any],
         relations: dict[str, tuple[list[int], list[dict[str, Any]]]],
     ) -> dict[str, Any]:
-        person = self.api.create_person(payload)
-        person_id = int(person["id"])
-        for target, (related_ids, pending) in relations.items():
-            for related_id in related_ids:
-                student_id, guardian_id = (
-                    (person_id, related_id) if target == "parent" else (related_id, person_id)
-                )
-                self.api.link_guardian(student_id, guardian_id)
-            for related_payload in pending:
-                related = self.api.create_person(related_payload)
-                related_id = int(related["id"])
-                student_id, guardian_id = (
-                    (person_id, related_id) if target == "parent" else (related_id, person_id)
-                )
-                self.api.link_guardian(student_id, guardian_id)
-        return person
+        return self.api.create_person_aggregate(
+            {
+                "person": payload,
+                "parent_ids": relations.get("parent", ([], []))[0],
+                "student_ids": relations.get("student", ([], []))[0],
+                "new_parents": relations.get("parent", ([], []))[1],
+                "new_students": relations.get("student", ([], []))[1],
+            }
+        )
 
     def _update_with_relations(
         self,
@@ -809,29 +802,16 @@ class MainWindow(QMainWindow):
         relations: dict[str, tuple[list[int], list[dict[str, Any]]]],
     ) -> dict[str, Any]:
         person_id = int(original["id"])
-        updated = self.api.update_person(person_id, payload)
-        for target, (related_ids, pending) in relations.items():
-            source_key = "guardians" if target == "parent" else "students"
-            original_ids = {int(item["id"]) for item in original.get(source_key, [])}
-            desired_ids = set(related_ids)
-            for related_id in original_ids - desired_ids:
-                student_id, guardian_id = (
-                    (person_id, related_id) if target == "parent" else (related_id, person_id)
-                )
-                self.api.unlink_guardian(student_id, guardian_id)
-            for related_id in desired_ids - original_ids:
-                student_id, guardian_id = (
-                    (person_id, related_id) if target == "parent" else (related_id, person_id)
-                )
-                self.api.link_guardian(student_id, guardian_id)
-            for related_payload in pending:
-                related = self.api.create_person(related_payload)
-                related_id = int(related["id"])
-                student_id, guardian_id = (
-                    (person_id, related_id) if target == "parent" else (related_id, person_id)
-                )
-                self.api.link_guardian(student_id, guardian_id)
-        return updated
+        return self.api.update_person_aggregate(
+            person_id,
+            {
+                "person": payload,
+                "parent_ids": relations.get("parent", ([], []))[0],
+                "student_ids": relations.get("student", ([], []))[0],
+                "new_parents": relations.get("parent", ([], []))[1],
+                "new_students": relations.get("student", ([], []))[1],
+            },
+        )
 
     def archive_person(self, person: dict[str, Any]) -> None:
         answer = QMessageBox.question(

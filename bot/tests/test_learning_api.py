@@ -250,6 +250,76 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
             )
             assert series.status_code == 201, series.text
             assert len(series.json()["lesson_ids"]) == 3
+            series_id = int(series.json()["id"])
+            first_series_lesson, exception_lesson, last_series_lesson = series.json()[
+                "lesson_ids"
+            ]
+            assert (
+                await client.post(
+                    f"/api/v1/learning/lessons/{first_series_lesson}/start",
+                    headers=headers,
+                )
+            ).status_code == 200
+            assert (
+                await client.post(
+                    f"/api/v1/learning/lessons/{first_series_lesson}/finish",
+                    headers=headers,
+                )
+            ).status_code == 200
+            exception_start = series_start + timedelta(weeks=1, days=1)
+            exception = await client.put(
+                f"/api/v1/learning/lessons/{exception_lesson}",
+                headers=headers,
+                json={
+                    "subject_id": subject,
+                    "teacher_id": teacher,
+                    "room_id": room,
+                    "start_at": exception_start.isoformat(),
+                    "end_at": (exception_start + timedelta(hours=1)).isoformat(),
+                    "participant_ids": [student_three],
+                },
+            )
+            assert exception.status_code == 200, exception.text
+            assert exception.json()["series_exception"] is True
+            series_update = await client.put(
+                f"/api/v1/learning/series/{series_id}",
+                headers=headers,
+                json={
+                    "subject_id": subject,
+                    "teacher_id": teacher,
+                    "room_id": room,
+                    "starts_at": series_start.isoformat(),
+                    "duration_minutes": 60,
+                    "interval_weeks": 1,
+                    "occurrences": 3,
+                    "participant_ids": [student_three],
+                    "scope": "all",
+                },
+            )
+            assert series_update.status_code == 200, series_update.text
+            assert series_update.json()["lesson_ids"] == [last_series_lesson]
+            first_after = (
+                await client.get(
+                    f"/api/v1/learning/lesson/{first_series_lesson}", headers=headers
+                )
+            ).json()
+            exception_after = (
+                await client.get(
+                    f"/api/v1/learning/lesson/{exception_lesson}", headers=headers
+                )
+            ).json()
+            last_after = (
+                await client.get(
+                    f"/api/v1/learning/lesson/{last_series_lesson}", headers=headers
+                )
+            ).json()
+            assert first_after["status"] == "completed"
+            assert datetime.fromisoformat(exception_after["start_at"]).replace(
+                tzinfo=UTC
+            ) == exception_start
+            assert datetime.fromisoformat(last_after["start_at"]).replace(
+                tzinfo=UTC
+            ) == series_start + timedelta(weeks=2)
 
             dual_role = await person(
                 "Сергеев Сергей Петрович",

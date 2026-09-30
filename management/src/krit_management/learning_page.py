@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import ManagementApi
+from .timeutils import center_timezone, center_wall_time, now_center, parse_center
 from .widgets import (
     SearchableComboBox,
     configure_calendar,
@@ -509,7 +510,7 @@ class LessonDialog(QDialog):
         self.teacher = self._combo([], "full_name", empty="Выберите преподавателя")
         self.room = self._combo(references.get("rooms", []), "name")
         self.group = self._combo(references.get("groups", []), "name", empty="Без группы")
-        now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        now = now_center().replace(second=0, microsecond=0)
         rounded = now + timedelta(minutes=(30 - now.minute % 30) % 30)
         self.start = QDateTimeEdit(QDateTime(rounded))
         self.start.setCalendarPopup(True)
@@ -642,12 +643,12 @@ class LessonDialog(QDialog):
         )
         if group is None:
             return set()
-        lesson_start = self.start.dateTime().toPython().astimezone()
+        lesson_start = center_wall_time(self.start.dateTime().toPython())
         result: set[int] = set()
         for membership in group.get("memberships", []):
-            starts_at = datetime.fromisoformat(str(membership["start_at"])).astimezone()
+            starts_at = parse_center(membership["start_at"])
             ends_at = (
-                datetime.fromisoformat(str(membership["end_at"])).astimezone()
+                parse_center(membership["end_at"])
                 if membership.get("end_at")
                 else None
             )
@@ -796,8 +797,8 @@ class LessonDialog(QDialog):
             check = self.students.cellWidget(row, 0).findChild(QCheckBox)
             if check and check.isChecked():
                 participant_ids.append(int(check.property("person_id")))
-        start = self.start.dateTime().toPython().astimezone()
-        end = self._end_datetime().toPython().astimezone()
+        start = center_wall_time(self.start.dateTime().toPython())
+        end = center_wall_time(self._end_datetime().toPython())
         return {
             "subject_id": self.subject.currentData(),
             "teacher_id": self.teacher.currentData(),
@@ -842,8 +843,8 @@ class LessonCardDialog(QDialog):
         title = QLabel(str(lesson.get("subject_name_snapshot", "Занятие")))
         title.setObjectName("dialogTitle")
         layout.addWidget(title)
-        start = datetime.fromisoformat(lesson["start_at"]).astimezone()
-        end = datetime.fromisoformat(lesson["end_at"]).astimezone()
+        start = parse_center(lesson["start_at"])
+        end = parse_center(lesson["end_at"])
         details = QLabel(
             f"План: {start:%d.%m.%Y, %H:%M}–{end:%H:%M} · "
             f"{lesson.get('teacher_name_snapshot', '')} · "
@@ -857,10 +858,10 @@ class LessonCardDialog(QDialog):
                 "Плановый преподаватель: " + str(lesson.get("teacher_name_snapshot", ""))
             ]
             for segment in segments:
-                segment_start = datetime.fromisoformat(segment["started_at"]).astimezone()
+                segment_start = parse_center(segment["started_at"])
                 segment_end_value = segment.get("ended_at")
                 segment_end = (
-                    datetime.fromisoformat(segment_end_value).astimezone().strftime("%H:%M")
+                    parse_center(segment_end_value).strftime("%H:%M")
                     if segment_end_value
                     else "сейчас"
                 )
@@ -878,8 +879,8 @@ class LessonCardDialog(QDialog):
             lesson.get("actual_end_at"),
         )
         if lesson.get("status") == "completed" and all(self._actual_original):
-            actual_start = datetime.fromisoformat(str(self._actual_original[0])).astimezone()
-            actual_end = datetime.fromisoformat(str(self._actual_original[1])).astimezone()
+            actual_start = parse_center(self._actual_original[0])
+            actual_end = parse_center(self._actual_original[1])
             duration = max(0, int((actual_end - actual_start).total_seconds() // 60))
             actual_form = QFormLayout()
             configure_form_layout(actual_form)
@@ -923,7 +924,7 @@ class LessonCardDialog(QDialog):
             self.table.setCellWidget(row, 1, combo)
             for column, key in ((2, "arrived_at"), (3, "left_at")):
                 value = participant.get(key)
-                text_value = f"{datetime.fromisoformat(value).astimezone():%H:%M}" if value else "—"
+                text_value = f"{parse_center(value):%H:%M}" if value else "—"
                 self.table.setItem(row, column, QTableWidgetItem(text_value))
             self.table.setItem(
                 row,
@@ -940,7 +941,7 @@ class LessonCardDialog(QDialog):
                 reason = participant.get("cancellation_reason") or "без причины"
                 cancelled_at = participant.get("cancelled_at")
                 when = (
-                    datetime.fromisoformat(cancelled_at).astimezone().strftime("%d.%m.%Y %H:%M")
+                    parse_center(cancelled_at).strftime("%d.%m.%Y %H:%M")
                     if cancelled_at
                     else "время не указано"
                 )
@@ -1122,10 +1123,10 @@ class GroupMembersDialog(QDialog):
             end = item.get("end_at")
             values = [
                 item.get("person_name", ""),
-                datetime.fromisoformat(start).astimezone().strftime("%d.%m.%Y")
+                parse_center(start).strftime("%d.%m.%Y")
                 if start
                 else "После сохранения",
-                datetime.fromisoformat(end).astimezone().strftime("%d.%m.%Y") if end else "—",
+                parse_center(end).strftime("%d.%m.%Y") if end else "—",
                 "Будет завершено" if item.get("_end") else "Активно" if not end else "Завершено",
             ]
             for column, value in enumerate(values):
@@ -1257,8 +1258,8 @@ class FreeSlotDialog(QDialog):
         self.slots = slots
         self.results.setRowCount(len(slots))
         for row, slot in enumerate(slots):
-            start = datetime.fromisoformat(slot["start_at"]).astimezone()
-            end = datetime.fromisoformat(slot["end_at"]).astimezone()
+            start = parse_center(slot["start_at"])
+            end = parse_center(slot["end_at"])
             for column, value in enumerate(
                 (f"{start:%d.%m.%Y}", f"{start:%H:%M}–{end:%H:%M}", slot.get("room_name", ""))
             ):
@@ -1743,8 +1744,8 @@ class LearningPage(QWidget):
         ]
         self.today_lessons.setRowCount(len(lessons))
         for row, lesson in enumerate(lessons):
-            start = datetime.fromisoformat(lesson["start_at"]).astimezone()
-            end = datetime.fromisoformat(lesson["end_at"]).astimezone()
+            start = parse_center(lesson["start_at"])
+            end = parse_center(lesson["end_at"])
             values = [
                 f"{start:%H:%M}–{end:%H:%M}",
                 lesson.get("subject_name_snapshot", ""),
@@ -1794,7 +1795,7 @@ class LearningPage(QWidget):
         present = self.today_data.get("present", [])
         self.present_table.setRowCount(len(present))
         for row, person in enumerate(present):
-            arrived = datetime.fromisoformat(person["arrived_at"]).astimezone()
+            arrived = parse_center(person["arrived_at"])
             name_item = QTableWidgetItem(person.get("person_name", ""))
             name_item.setData(Qt.ItemDataRole.UserRole, person.get("person_id"))
             self.present_table.setItem(row, 0, name_item)
@@ -1818,7 +1819,7 @@ class LearningPage(QWidget):
 
     def load_calendar(self, *_args: object) -> None:
         selected = self.calendar_date.date().toPython()
-        local = datetime.now().astimezone().tzinfo
+        local = center_timezone()
         start = datetime.combine(selected, datetime.min.time(), tzinfo=local)
         days = int(self.calendar_period.currentData() or 1)
         if int(self.calendar_period.currentData() or 0) == 0:
@@ -1877,7 +1878,7 @@ class LearningPage(QWidget):
         self.calendar_table.setRowCount(len(self.calendar_lessons))
         show_date = self.calendar_end.date() > self.calendar_date.date()
         for row, lesson in enumerate(self.calendar_lessons):
-            start = datetime.fromisoformat(lesson["start_at"]).astimezone()
+            start = parse_center(lesson["start_at"])
             values = [
                 f"{start:%d.%m %H:%M}" if show_date else f"{start:%H:%M}",
                 lesson.get("subject_name_snapshot", ""),
@@ -2300,6 +2301,28 @@ class LearningPage(QWidget):
         if not accepted or not reason.strip():
             return
         teacher = next(item for item in teachers if item.get("full_name") == name)
+        expected_end = parse_center(lesson["end_at"])
+        if now_center() >= expected_end:
+            suggested = now_center() + timedelta(minutes=30)
+            value, accepted = QInputDialog.getText(
+                self,
+                "Замена преподавателя",
+                "До какого времени продлится занятие (ДД.ММ.ГГГГ ЧЧ:ММ):",
+                text=suggested.strftime("%d.%m.%Y %H:%M"),
+            )
+            if not accepted:
+                return
+            try:
+                expected_end = datetime.strptime(value.strip(), "%d.%m.%Y %H:%M").replace(
+                    tzinfo=center_timezone()
+                )
+            except ValueError:
+                QMessageBox.warning(
+                    self,
+                    "Некорректное время",
+                    "Укажите дату и время в формате ДД.ММ.ГГГГ ЧЧ:ММ.",
+                )
+                return
         self._run(
             self.api.transition_lesson_teacher,
             int(lesson["id"]),
@@ -2307,6 +2330,7 @@ class LearningPage(QWidget):
                 "action": "substitute",
                 "replacement_teacher_id": int(teacher["id"]),
                 "reason": reason.strip(),
+                "expected_end_at": expected_end.isoformat(),
             },
             done=self._action_done,
         )
@@ -2427,7 +2451,7 @@ class LearningPage(QWidget):
         for lesson in self.calendar_lessons:
             if lesson.get("status") == "cancelled":
                 continue
-            start = datetime.fromisoformat(lesson["start_at"]).astimezone()
+            start = parse_center(lesson["start_at"])
             if not selected <= start.date() <= selected_end:
                 continue
             lessons_by_day.setdefault(start.date(), []).append(lesson)
@@ -2561,8 +2585,8 @@ class LearningPage(QWidget):
         return f"{parts[0]} {initials}".strip()
 
     def _schedule_lesson_html(self, lesson: dict[str, Any]) -> str:
-        start = datetime.fromisoformat(lesson["start_at"]).astimezone()
-        end = datetime.fromisoformat(lesson["end_at"]).astimezone()
+        start = parse_center(lesson["start_at"])
+        end = parse_center(lesson["end_at"])
         participants = self._schedule_participant_names(lesson)
         students = ", ".join(map(escape, participants)) or "не указаны"
         subject = escape(str(lesson.get("subject_name_snapshot", "")))
@@ -2621,8 +2645,8 @@ class LearningPage(QWidget):
         }
         self.student_journal.setRowCount(len(lessons))
         for row, lesson in enumerate(lessons):
-            start = datetime.fromisoformat(lesson["start_at"]).astimezone()
-            end = datetime.fromisoformat(lesson["end_at"]).astimezone()
+            start = parse_center(lesson["start_at"])
+            end = parse_center(lesson["end_at"])
             values = [
                 f"{start:%d.%m.%Y}",
                 lesson.get("subject_name_snapshot", ""),
@@ -2664,18 +2688,18 @@ class LearningPage(QWidget):
         )
         self.teacher_journal.setRowCount(len(lessons))
         for row, lesson in enumerate(lessons):
-            planned_start = datetime.fromisoformat(lesson["start_at"]).astimezone()
+            planned_start = parse_center(lesson["start_at"])
             actual_start_value = lesson.get("actual_start_at")
             actual_end_value = lesson.get("actual_end_at")
             start = (
-                datetime.fromisoformat(actual_start_value).astimezone()
+                parse_center(actual_start_value)
                 if actual_start_value
                 else planned_start
             )
             end = (
-                datetime.fromisoformat(actual_end_value).astimezone()
+                parse_center(actual_end_value)
                 if actual_end_value
-                else datetime.fromisoformat(lesson["end_at"]).astimezone()
+                else parse_center(lesson["end_at"])
             )
             segment_type = lesson.get("teacher_segment_type")
             role_status = STATUS_LABELS.get(lesson.get("status"), lesson.get("status", ""))

@@ -51,18 +51,28 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def load_token_file(self) -> Settings:
-        if self.max_bot_token is not None:
-            return self
-        candidates = [self.max_token_file, Path("TOKEN.txt")]
-        for candidate in candidates:
-            if not candidate.is_file():
-                continue
-            value = extract_first_token(candidate.read_text(encoding="utf-8-sig"))
-            if value is None:
-                continue
-            self.max_bot_token = SecretStr(value)
-            return self
-        raise ValueError("MAX_BOT_TOKEN is not set and TOKEN.txt was not found")
+        if self.max_bot_token is None:
+            candidates = [self.max_token_file, Path("TOKEN.txt")]
+            for candidate in candidates:
+                if not candidate.is_file():
+                    continue
+                value = extract_first_token(candidate.read_text(encoding="utf-8-sig"))
+                if value is None:
+                    continue
+                self.max_bot_token = SecretStr(value)
+                break
+        if self.max_bot_token is None:
+            raise ValueError("MAX_BOT_TOKEN is not set and TOKEN.txt was not found")
+        if self.database_url.startswith(("postgresql", "postgres")):
+            password = self.bootstrap_admin_password.get_secret_value()
+            if password.lower() in {"admin", "password", "replace_with_strong_password"} or len(
+                password
+            ) < 12:
+                raise ValueError(
+                    "BOOTSTRAP_ADMIN_PASSWORD must contain at least 12 characters "
+                    "and must not use a default value in production"
+                )
+        return self
 
 
 @lru_cache

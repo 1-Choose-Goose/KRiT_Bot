@@ -14,7 +14,7 @@ from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pwdlib import PasswordHash
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import or_, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from .config import Settings
@@ -75,10 +75,19 @@ class PersonPayload(BaseModel):
     max_auth_phone: str | None = Field(default=None, max_length=32)
     roles: list[str] = Field(default_factory=list, min_length=1)
     active: bool = True
+    bot_access_enabled: bool | None = None
 
 
 class ArchivePersonPayload(BaseModel):
     resolve_future_student_dependencies: bool = False
+
+
+class PersonAggregatePayload(BaseModel):
+    person: PersonPayload
+    parent_ids: list[int] = Field(default_factory=list)
+    student_ids: list[int] = Field(default_factory=list)
+    new_parents: list[PersonPayload] = Field(default_factory=list)
+    new_students: list[PersonPayload] = Field(default_factory=list)
 
 
 class RelatedPersonView(BaseModel):
@@ -88,6 +97,7 @@ class RelatedPersonView(BaseModel):
     max_auth_phone: str | None
     max_user_id: int | None
     active: bool
+    bot_access_enabled: bool
 
 
 class PersonView(BaseModel):
@@ -97,6 +107,7 @@ class PersonView(BaseModel):
     max_auth_phone: str | None
     roles: list[str]
     active: bool
+    bot_access_enabled: bool
     max_user_id: int | None
     archived_at: datetime | None
     guardians: list[RelatedPersonView]
@@ -115,6 +126,7 @@ class AccessAttemptView(BaseModel):
 
 class ManagementSnapshot(BaseModel):
     status: str
+    center_timezone: str
     people: list[PersonView]
     archived_people: list[PersonView]
     access_attempts: list[AccessAttemptView]
@@ -129,6 +141,7 @@ def as_related(person: Person) -> RelatedPersonView:
             "max_auth_phone": person.max_auth_phone,
             "max_user_id": person.max_identity.max_user_id if person.max_identity else None,
             "active": person.active,
+            "bot_access_enabled": person.bot_access_enabled,
         }
     )
 
@@ -141,6 +154,7 @@ def as_person_view(person: Person) -> PersonView:
         max_auth_phone=person.max_auth_phone,
         roles=sorted(link.role for link in person.role_links),
         active=person.active,
+        bot_access_enabled=person.bot_access_enabled,
         max_user_id=person.max_identity.max_user_id if person.max_identity else None,
         archived_at=person.archived_at,
         guardians=[as_related(link.guardian) for link in person.guardian_links],
@@ -163,6 +177,21 @@ def normalized_person_data(payload: PersonPayload) -> tuple[list[str], str, str 
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="Invalid MAX authorization phone") from exc
     return roles, phone, max_auth_phone
+
+
+def _new_person(payload: PersonPayload) -> Person:
+    roles, phone, max_auth_phone = normalized_person_data(payload)
+    person = Person(
+        full_name=" ".join(payload.full_name.split()),
+        phone=phone,
+        max_auth_phone=max_auth_phone,
+        active=payload.active,
+        bot_access_enabled=(
+            payload.active if payload.bot_access_enabled is None else payload.bot_access_enabled
+        ),
+    )
+    person.role_links.extend(PersonRole(role=role) for role in roles)
+    return person
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -350,7 +379,11 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.get("/api/v1/status", dependencies=[Depends(require_management_token)])
     async def management_status() -> dict[str, str]:
-        return {"status": "ok", "bot_mode": settings.bot_mode}
+        return {
+            "status": "ok",
+            "bot_mode": settings.bot_mode,
+            "center_timezone": settings.center_timezone,
+        }
 
     @app.get(
         "/api/v1/snapshot",
@@ -397,6 +430,7 @@ def create_app(settings: Settings) -> FastAPI:
             )
         return {
             "status": "ok",
+            "center_timezone": settings.center_timezone,
             "people": [as_person_view(person) for person in people],
             "archived_people": [as_person_view(person) for person in archived_people],
             "access_attempts": attempts,
@@ -526,6 +560,11 @@ def create_app(settings: Settings) -> FastAPI:
                 phone=phone,
                 max_auth_phone=max_auth_phone,
                 active=payload.active,
+                bot_access_enabled=(
+                    payload.active
+                    if payload.bot_access_enabled is None
+                    else payload.bot_access_enabled
+                ),
             )
             current_roles = {link.role: link for link in person.role_links}
             for role, link in current_roles.items():
@@ -543,6 +582,164 @@ def create_app(settings: Settings) -> FastAPI:
                     detail="Этот телефон для авторизации MAX уже используется",
                 ) from exc
             await session.refresh(person)
+            return as_person_view(person)
+
+    async def save_person_aggregate(
+        session: Any,
+        payload: PersonAggregatePayload,
+        *,
+        person_id: int | None = None,
+    ) -> Person:
+        if person_id is None:
+            person = _new_person(payload.person)
+            session.add(person)
+            await session.flush()
+        else:
+            person = await session.get(Person, person_id)
+            if person is None or person.archived_at is not None:
+                raise HTTPException(404)
+            roles, phone, max_auth_phone = normalized_person_data(payload.person)
+            person.full_name = " ".join(payload.person.full_name.split())
+            person.phone = phone
+            person.max_auth_phone = max_auth_phone
+            person.active = payload.person.active
+            person.bot_access_enabled = (
+                payload.person.active
+                if payload.person.bot_access_enabled is None
+                else payload.person.bot_access_enabled
+            )
+            current_roles = {link.role: link for link in person.role_links}
+            removed_roles = set(current_roles) - roles
+            if removed_roles & {"student", "teacher"}:
+                dependencies = await learning_dependencies(session, person_id)
+                conflict = dependency_conflict(dependencies, removed_roles)
+                if conflict:
+                    raise HTTPException(status_code=409, detail=conflict)
+            for role, link in current_roles.items():
+                if role not in roles:
+                    await session.delete(link)
+            for role in roles:
+                if role not in current_roles:
+                    person.role_links.append(PersonRole(role=role))
+            person.updated_at = utcnow()
+
+        main_roles = set(payload.person.roles)
+        if (payload.parent_ids or payload.new_parents) and "student" not in main_roles:
+            raise HTTPException(422, "Для связи с родителем нужна роль ученика")
+        if (payload.student_ids or payload.new_students) and "parent" not in main_roles:
+            raise HTTPException(422, "Для связи с учеником нужна роль родителя")
+
+        await session.execute(
+            delete(StudentGuardian).where(
+                or_(
+                    StudentGuardian.student_id == person.id,
+                    StudentGuardian.guardian_id == person.id,
+                )
+            )
+        )
+        parent_ids = set(payload.parent_ids)
+        student_ids = set(payload.student_ids)
+        if person.id in parent_ids or person.id in student_ids:
+            raise HTTPException(422, "Нельзя связать карточку с самой собой")
+
+        for related_payload in payload.new_parents:
+            if "parent" not in related_payload.roles:
+                raise HTTPException(422, "Новая связанная карточка должна иметь роль родителя")
+            related = _new_person(related_payload)
+            session.add(related)
+            await session.flush()
+            parent_ids.add(related.id)
+        for related_payload in payload.new_students:
+            if "student" not in related_payload.roles:
+                raise HTTPException(422, "Новая связанная карточка должна иметь роль ученика")
+            related = _new_person(related_payload)
+            session.add(related)
+            await session.flush()
+            student_ids.add(related.id)
+
+        related_ids = parent_ids | student_ids
+        if related_ids:
+            related_rows = list(
+                (
+                    await session.scalars(
+                        select(Person).where(
+                            Person.id.in_(related_ids),
+                            Person.archived_at.is_(None),
+                        )
+                    )
+                ).all()
+            )
+            if {entry.id for entry in related_rows} != related_ids:
+                raise HTTPException(422, "Одна из связанных карточек недоступна")
+            role_rows = set(
+                (
+                    await session.execute(
+                        select(PersonRole.person_id, PersonRole.role).where(
+                            PersonRole.person_id.in_(related_ids)
+                        )
+                    )
+                ).all()
+            )
+            if any((related_id, "parent") not in role_rows for related_id in parent_ids):
+                raise HTTPException(422, "Связанная карточка не является родителем")
+            if any((related_id, "student") not in role_rows for related_id in student_ids):
+                raise HTTPException(422, "Связанная карточка не является учеником")
+
+        session.add_all(
+            [
+                *(StudentGuardian(student_id=person.id, guardian_id=value) for value in parent_ids),
+                *(
+                    StudentGuardian(student_id=value, guardian_id=person.id)
+                    for value in student_ids
+                ),
+            ]
+        )
+        await session.flush()
+        return person
+
+    @app.post(
+        "/api/v1/people/aggregate",
+        response_model=PersonView,
+        status_code=status.HTTP_201_CREATED,
+        dependencies=[Depends(require_management_token)],
+    )
+    async def create_person_aggregate(payload: PersonAggregatePayload) -> PersonView:
+        async with sessions() as session:
+            try:
+                person = await save_person_aggregate(session, payload)
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise HTTPException(
+                    409, "Телефон для входа в MAX уже используется"
+                ) from exc
+            await session.refresh(
+                person,
+                attribute_names=["role_links", "guardian_links", "student_links", "max_identity"],
+            )
+            return as_person_view(person)
+
+    @app.put(
+        "/api/v1/people/{person_id}/aggregate",
+        response_model=PersonView,
+        dependencies=[Depends(require_management_token)],
+    )
+    async def update_person_aggregate(
+        person_id: int, payload: PersonAggregatePayload
+    ) -> PersonView:
+        async with sessions() as session:
+            try:
+                person = await save_person_aggregate(session, payload, person_id=person_id)
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise HTTPException(
+                    409, "Телефон для входа в MAX уже используется"
+                ) from exc
+            await session.refresh(
+                person,
+                attribute_names=["role_links", "guardian_links", "student_links", "max_identity"],
+            )
             return as_person_view(person)
 
     @app.post(
@@ -619,6 +816,11 @@ def create_app(settings: Settings) -> FastAPI:
                 if role not in current_roles:
                     person.role_links.append(PersonRole(role=role))
             person.active = payload.active
+            person.bot_access_enabled = (
+                payload.active
+                if payload.bot_access_enabled is None
+                else payload.bot_access_enabled
+            )
             person.updated_at = utcnow()
             try:
                 await session.commit()
@@ -726,6 +928,25 @@ def create_app(settings: Settings) -> FastAPI:
             person = await session.get(Person, person_id)
             if person is None or person.archived_at is None:
                 raise HTTPException(status_code=404)
+            if person.max_auth_phone is not None:
+                collision = await session.scalar(
+                    select(Person.id).where(
+                        Person.id != person.id,
+                        Person.max_auth_phone == person.max_auth_phone,
+                        Person.active.is_(True),
+                        Person.archived_at.is_(None),
+                    )
+                )
+                if collision is not None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "max_auth_phone_conflict",
+                            "message": (
+                                "Телефон для входа в MAX уже используется другим клиентом"
+                            ),
+                        },
+                    )
             person.archived_at = None
             person.updated_at = utcnow()
             await session.commit()

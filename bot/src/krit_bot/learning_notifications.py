@@ -34,9 +34,21 @@ class LearningNotificationWorker:
         self.max_attempts = max_attempts
 
     async def run(self) -> None:
-        await self.recover_interrupted()
+        try:
+            await self.recover_interrupted()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("learning_notification_recovery_failed")
         while True:
-            handled = await self.process_one()
+            try:
+                handled = await self.process_one()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("learning_notification_worker_iteration_failed")
+                await asyncio.sleep(self.poll_seconds)
+                continue
             if not handled:
                 await asyncio.sleep(self.poll_seconds)
 
@@ -70,6 +82,7 @@ class LearningNotificationWorker:
                 person is None
                 or person.archived_at is not None
                 or not person.active
+                or not person.bot_access_enabled
                 or identity is None
                 or identity.max_user_id is None
             ):
@@ -80,7 +93,8 @@ class LearningNotificationWorker:
                 return True
             job.status = "processing"
             job.attempts += 1
-            job.updated_at = utcnow()
+            job.last_attempt_at = utcnow()
+            job.updated_at = job.last_attempt_at
             text = str(job.payload.get("text") or "Уведомление КРиТ")
             if job.payload.get("template") == "teacher_reminder" and job.lesson_id is not None:
                 student_names = list(
@@ -102,7 +116,7 @@ class LearningNotificationWorker:
             job_id = job.id
             user_id = identity.max_user_id
         try:
-            await self.api.send_text(user_id=user_id, text=text)
+            result = await self.api.send_text(user_id=user_id, text=text)
         except (MaxApiError, OSError, TimeoutError) as exc:
             async with self.sessions() as session:
                 job = await session.get(NotificationJob, job_id)
@@ -133,6 +147,14 @@ class LearningNotificationWorker:
         async with self.sessions() as session:
             job = await session.get(NotificationJob, job_id)
             if job is not None:
+                message = result.get("message", result)
+                if isinstance(message, dict):
+                    body = message.get("body")
+                    message_id = (
+                        body.get("mid") if isinstance(body, dict) else message.get("mid")
+                    )
+                    if message_id:
+                        job.external_message_id = str(message_id)
                 job.status = "sent"
                 job.sent_at = utcnow()
                 job.last_error = None

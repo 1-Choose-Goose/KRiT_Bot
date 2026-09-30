@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 import httpx
+
+from .timeutils import configure_center_timezone, now_center, parse_center
 
 
 class ApiError(RuntimeError):
@@ -45,7 +46,7 @@ FIELD_LABELS = {
 
 def _local_time(value: object) -> str:
     try:
-        return datetime.fromisoformat(str(value)).astimezone().strftime("%d.%m.%Y в %H:%M")
+        return parse_center(value).strftime("%d.%m.%Y в %H:%M")
     except (TypeError, ValueError):
         return "в это время"
 
@@ -209,10 +210,15 @@ class ManagementApi:
         self._client.close()
 
     def check(self) -> dict[str, Any]:
-        return self._request("GET", "/status")
+        data = self._request("GET", "/status")
+        if isinstance(data, dict) and data.get("center_timezone"):
+            configure_center_timezone(str(data["center_timezone"]))
+        return data
 
     def snapshot(self) -> dict[str, Any]:
         data = self._request("GET", "/snapshot")
+        if isinstance(data, dict) and data.get("center_timezone"):
+            configure_center_timezone(str(data["center_timezone"]))
         return data if isinstance(data, dict) else {}
 
     def people(self) -> list[dict[str, Any]]:
@@ -228,6 +234,14 @@ class ManagementApi:
 
     def update_person(self, person_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("PUT", f"/people/{person_id}", json=payload)
+
+    def create_person_aggregate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/people/aggregate", json=payload)
+
+    def update_person_aggregate(
+        self, person_id: int, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._request("PUT", f"/people/{person_id}/aggregate", json=payload)
 
     def archive_person(
         self, person_id: int, *, resolve_future_student_dependencies: bool = False
@@ -463,7 +477,7 @@ class ManagementApi:
         return self._request(
             "POST",
             f"/learning/groups/{group_id}/memberships",
-            json={"person_id": person_id, "start_at": datetime.now().astimezone().isoformat()},
+            json={"person_id": person_id, "start_at": now_center().isoformat()},
         )
 
     def end_group_membership(self, group_id: int, membership_id: int) -> dict[str, Any]:

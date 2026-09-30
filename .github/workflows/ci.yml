@@ -24,12 +24,16 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
       KRIT_TEST_POSTGRES_URL: postgresql+asyncpg://krit_test:krit_test@127.0.0.1:5432/krit_test
+      DATABASE_URL: postgresql+asyncpg://krit_test:krit_test@127.0.0.1:5432/krit_test
+      BOOTSTRAP_ADMIN_PASSWORD: ci-only-strong-password
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
+      - name: Install minimal Qt runtime
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -38,6 +42,8 @@ jobs:
         run: ruff check bot/src bot/tests management/src management/tests
       - name: Compile
         run: python -m compileall -q bot/src management/src
+      - name: Migrate PostgreSQL test database
+        run: krit-migrate
       - name: Server and migration tests
         run: pytest bot/tests -q
       - name: Management tests

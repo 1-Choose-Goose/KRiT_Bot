@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+import structlog
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -22,6 +23,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -34,12 +36,18 @@ if TYPE_CHECKING:
     from .learning_models import PersonMaxIdentity
 
 
+log = structlog.get_logger()
+
+
 def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
     pass
+
+
+EXPECTED_ALEMBIC_REVISION = "20260930_release_safety_v5"
 
 
 class Person(Base):
@@ -62,6 +70,9 @@ class Person(Base):
     max_auth_phone: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     max_user_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, index=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    bot_access_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, index=True
+    )
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -214,42 +225,32 @@ def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessio
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
+async def verify_schema_current(engine: AsyncEngine) -> None:
+    """Reject production startup unless the database is at the packaged Alembic head."""
+    async with engine.connect() as connection:
+        try:
+            revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+        except Exception as exc:
+            raise RuntimeError(
+                "Схема базы данных не подготовлена. Выполните krit-migrate перед запуском."
+            ) from exc
+    if revision != EXPECTED_ALEMBIC_REVISION:
+        raise RuntimeError(
+            "Схема базы данных устарела: "
+            f"ожидается {EXPECTED_ALEMBIC_REVISION}, получено {revision or 'нет версии'}. "
+            "Остановите сервис и выполните krit-migrate."
+        )
+
+
 async def ensure_schema(engine: AsyncEngine) -> None:
-    from . import learning_models
+    """Bootstrap isolated SQLite tests; production DDL belongs exclusively to Alembic."""
+    if engine.dialect.name != "sqlite":
+        await verify_schema_current(engine)
+        return
+    from . import learning_models as _learning_models  # noqa: F401
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
-        version = "20260928_learning_process_v1"
-        existing = await connection.scalar(
-            select(SchemaMigration.version).where(SchemaMigration.version == version)
-        )
-        if existing is None:
-            linked_people = (
-                await connection.execute(
-                    select(Person.id, Person.phone, Person.max_user_id).where(
-                        Person.max_user_id.is_not(None)
-                    )
-                )
-            ).all()
-            existing_identity_ids = set(
-                (
-                    await connection.scalars(select(learning_models.PersonMaxIdentity.person_id))
-                ).all()
-            )
-            for person_id, phone, max_user_id in linked_people:
-                if person_id not in existing_identity_ids:
-                    await connection.execute(
-                        learning_models.PersonMaxIdentity.__table__.insert().values(
-                            person_id=person_id,
-                            verified_phone=phone,
-                            max_user_id=max_user_id,
-                            verified_at=utcnow(),
-                            updated_at=utcnow(),
-                        )
-                    )
-            await connection.execute(
-                SchemaMigration.__table__.insert().values(version=version, applied_at=utcnow())
-            )
 
 
 async def is_authorized(session: AsyncSession, max_user_id: int) -> bool:
@@ -261,6 +262,7 @@ async def is_authorized(session: AsyncSession, max_user_id: int) -> bool:
         .where(
             PersonMaxIdentity.max_user_id == max_user_id,
             Person.active.is_(True),
+            Person.bot_access_enabled.is_(True),
             Person.archived_at.is_(None),
         )
     )
@@ -364,9 +366,13 @@ async def claim_message(session: AsyncSession, message_id: str) -> bool:
     session.add(ProcessedMessage(message_id=message_id))
     try:
         await session.flush()
-    except Exception:
+    except IntegrityError:
         await session.rollback()
         return False
+    except Exception:
+        await session.rollback()
+        log.exception("message_claim_failed", message_id=message_id)
+        raise
     return True
 
 
