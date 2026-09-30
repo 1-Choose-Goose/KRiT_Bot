@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate, QSizeF
+from PySide6.QtGui import QPageLayout, QPdfWriter
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -23,6 +24,7 @@ from krit_management.learning_page import (
     LearningPage,
     LessonDialog,
     ReferenceDialog,
+    SchedulePreviewDialog,
 )
 from krit_management.main import build_stylesheet
 from krit_management.widgets import SearchableComboBox
@@ -54,6 +56,11 @@ class FakeApi:
         assert date_from
         assert date_to
         return []
+
+    def lesson_action(
+        self, lesson_id: int, action: str, payload: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        return {"id": lesson_id, "action": action, "payload": payload or {}}
 
     def close(self) -> None:
         pass
@@ -264,6 +271,101 @@ def test_today_table_shows_current_participant_count() -> None:
     app.processEvents()
 
 
+def test_today_action_buttons_are_compact_and_share_available_width() -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page._today_loaded(
+        {
+            "alerts": [],
+            "present": [],
+            "lessons": [
+                {
+                    "id": 1,
+                    "start_at": "2026-09-30T10:30:00+05:00",
+                    "end_at": "2026-09-30T11:30:00+05:00",
+                    "subject_name_snapshot": "Информатика",
+                    "teacher_name_snapshot": "Быков Валерий Андреевич",
+                    "room_name_snapshot": "Кабинет №1",
+                    "participants": [],
+                    "status": "planned",
+                }
+            ],
+        }
+    )
+
+    action_cell = page.today_lessons.cellWidget(0, 6)
+    buttons = action_cell.findChildren(QPushButton)
+    assert page.today_lessons.columnWidth(6) == 290
+    assert [button.text() for button in buttons] == ["Начать", "Изменить", "Карточка"]
+    assert all(button.property("density") == "compact" for button in buttons)
+    page.shutdown()
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_calendar_can_remove_selected_planned_lesson(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    app.processEvents()
+    lesson = {
+        "id": 17,
+        "start_at": "2026-09-30T10:30:00+05:00",
+        "subject_name_snapshot": "Информатика",
+        "teacher_name_snapshot": "Быков Валерий Андреевич",
+        "room_name_snapshot": "Кабинет №1",
+        "participants": [],
+        "status": "planned",
+    }
+    page._calendar_loaded([lesson, {**lesson, "id": 18, "status": "cancelled"}])
+    page.calendar_table.selectRow(0)
+    app.processEvents()
+    assert page.calendar_table.rowCount() == 1
+    assert page.delete_calendar_button.isEnabled()
+
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(page, "_confirm_lesson_deletion", lambda _lesson: True)
+    monkeypatch.setattr(
+        page,
+        "_run",
+        lambda _fn, *args, **_kwargs: calls.append(args),
+    )
+    page._delete_calendar_selected()
+
+    assert calls == [(17, "cancel", {"reason": "Удалено администратором"})]
+    page.shutdown()
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_reference_data_refreshes_group_memberships_for_immediate_preview(monkeypatch) -> None:
+    api = ManagementApi("http://127.0.0.1:1")
+    calls: list[str] = []
+
+    def request(_method: str, path: str, **_kwargs):
+        calls.append(path)
+        if path == "/learning/reference-data":
+            return {"groups": [{"id": 15, "name": "Группа №15"}]}
+        if path == "/learning/groups/15/memberships":
+            return [
+                {
+                    "id": 1,
+                    "person_id": 22,
+                    "start_at": "2026-09-29T10:00:00+05:00",
+                    "end_at": None,
+                }
+            ]
+        raise AssertionError(path)
+
+    monkeypatch.setattr(api, "_request", request)
+    data = api.learning_reference_data()
+
+    assert calls == ["/learning/reference-data", "/learning/groups/15/memberships"]
+    assert data["groups"][0]["memberships"][0]["person_id"] == 22
+    api.close()
+
+
 def test_lesson_dialog_gives_participant_list_more_space() -> None:
     app = QApplication.instance() or QApplication([])
     dialog = LessonDialog(
@@ -284,21 +386,96 @@ def test_dense_schedule_is_paginated_and_html_escaped() -> None:
     app.processEvents()
 
     start = datetime(2026, 9, 28, 8, tzinfo=UTC)
+    window.learning_page.calendar_date.setDate(QDate(2026, 9, 28))
+    window.learning_page.calendar_end.setDate(QDate(2026, 11, 30))
     window.learning_page.calendar_lessons = [
         {
-            "start_at": (start + timedelta(minutes=45 * index)).isoformat(),
+            "start_at": (start + timedelta(hours=20 * index)).isoformat(),
+            "end_at": (start + timedelta(hours=20 * index, minutes=60)).isoformat(),
             "subject_name_snapshot": "Программирование & робототехника <углублённый курс>",
             "teacher_name_snapshot": "Очень Длинное Имя Преподавателя Для Проверки Макета",
             "room_name_snapshot": f"Кабинет {index % 5 + 1}",
+            "participants": [
+                {
+                    "person_name_snapshot": f"Ученик {index} Александрович",
+                    "attendance_status": "expected",
+                }
+            ],
         }
         for index in range(80)
     ]
     document = window.learning_page._schedule_document()
-    document.setPageSize(QSizeF(595, 842))
+    document.setPageSize(QSizeF(842, 595))
 
     assert document.pageCount() > 1
     assert "&lt;углублённый курс&gt;" in document.toHtml()
+    assert "Кабинет" not in document.toPlainText()
     window.close()
+    app.processEvents()
+
+
+def test_schedule_preview_is_landscape_calendar_with_students(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    app.processEvents()
+    page.calendar_date.setDate(QDate(2026, 9, 28))
+    page.calendar_end.setDate(QDate(2026, 10, 4))
+    page.calendar_lessons = [
+        {
+            "start_at": "2026-09-30T10:30:00+05:00",
+            "end_at": "2026-09-30T11:30:00+05:00",
+            "subject_name_snapshot": "Информатика",
+            "teacher_name_snapshot": "Быков Валерий Андреевич",
+            "room_name_snapshot": "Кабинет №1",
+            "status": "planned",
+            "participants": [
+                {
+                    "person_name_snapshot": "Алексеев Александр Фёдорович",
+                    "attendance_status": "expected",
+                },
+                {
+                    "person_name_snapshot": "Белов Степан Алексеевич",
+                    "attendance_status": "excused",
+                },
+            ],
+        }
+    ]
+    document = page._schedule_document()
+    plain = document.toPlainText()
+    printer = QPdfWriter(str(tmp_path / "preview-layout.pdf"))
+    page._prepare_schedule_printer(printer)
+
+    assert printer.pageLayout().orientation() == QPageLayout.Orientation.Landscape
+    assert all(day in plain for day in ("Понедельник", "Среда", "Воскресенье"))
+    assert "Алексеев А. Ф." in plain
+    assert "Белов" not in plain
+    assert "Кабинет №1" not in plain
+
+    assert SchedulePreviewDialog._normalize_zoom_percent(150) == 150
+    assert SchedulePreviewDialog._normalize_zoom_percent(10) == 25
+    assert SchedulePreviewDialog._normalize_zoom_percent(500) == 400
+    page.shutdown()
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_schedule_document_exports_to_nonempty_landscape_pdf(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    app.processEvents()
+    output = tmp_path / "schedule.pdf"
+    printer = QPdfWriter(str(output))
+    page._prepare_schedule_printer(printer)
+
+    page._schedule_document().print_(printer)
+    del printer
+
+    assert output.exists()
+    assert output.stat().st_size > 500
+    page.shutdown()
+    page.deleteLater()
     app.processEvents()
 
 

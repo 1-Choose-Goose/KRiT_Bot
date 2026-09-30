@@ -10,6 +10,172 @@ class ApiError(RuntimeError):
     pass
 
 
+FIELD_LABELS = {
+    "username": "логин",
+    "password": "пароль",
+    "full_name": "ФИО",
+    "phone": "телефон",
+    "max_auth_phone": "телефон для MAX",
+    "roles": "роли",
+    "name": "название",
+    "capacity": "вместимость",
+    "color": "цвет",
+    "subject_id": "предмет",
+    "teacher_id": "преподаватель",
+    "room_id": "кабинет",
+    "group_id": "группа",
+    "start_at": "дата и время начала",
+    "end_at": "время окончания",
+    "duration_minutes": "продолжительность",
+    "participant_ids": "участники",
+    "reason": "причина",
+}
+
+
+def _local_time(value: object) -> str:
+    try:
+        return datetime.fromisoformat(str(value)).astimezone().strftime("%d.%m.%Y в %H:%M")
+    except (TypeError, ValueError):
+        return "в это время"
+
+
+def _validation_message(item: dict[str, Any]) -> str:
+    location = [part for part in item.get("loc", []) if part not in {"body", "query"}]
+    field = FIELD_LABELS.get(str(location[-1]), str(location[-1])) if location else "данные"
+    raw = str(item.get("msg") or "").strip()
+    lowered = raw.lower()
+    if lowered == "field required":
+        problem = "нужно заполнить"
+    elif "valid datetime" in lowered:
+        problem = "укажите корректные дату и время"
+    elif "valid integer" in lowered:
+        problem = "укажите целое число"
+    elif "at least" in lowered or "greater than or equal" in lowered:
+        problem = "значение слишком маленькое"
+    elif "at most" in lowered or "less than or equal" in lowered:
+        problem = "значение слишком большое"
+    elif lowered.startswith("value error,"):
+        problem = raw.split(",", 1)[1].strip()
+    else:
+        problem = "проверьте значение"
+    return f"Поле «{field}»: {problem}."
+
+
+def _format_conflicts(detail: dict[str, Any]) -> str:
+    lines: list[str] = []
+    labels = {
+        "room": "Выбранный кабинет уже занят",
+        "teacher": "Выбранный преподаватель уже занят",
+        "student": "Один из выбранных учеников уже занят",
+        "person": "Выбранный человек уже занят",
+        "capacity": "В кабинете недостаточно мест",
+    }
+    for conflict in detail.get("conflicts", []):
+        if not isinstance(conflict, dict):
+            continue
+        fallback = str(conflict.get("message") or "Конфликт расписания")
+        line = labels.get(str(conflict.get("kind")), fallback)
+        if conflict.get("start_at"):
+            line += f" {_local_time(conflict['start_at'])}"
+        if line not in lines:
+            lines.append(line)
+    if not lines:
+        return str(detail.get("message") or "Выбранное время занято.")
+    return (
+        "Выбранное время пересекается с другим занятием:\n• "
+        + "\n• ".join(lines)
+        + "\nИзмените время, кабинет или состав участников."
+    )
+
+
+def _format_dependencies(detail: dict[str, Any]) -> str:
+    labels = {
+        "teacher_lessons": "будущих занятий как преподаватель",
+        "default_groups": "закреплённых групп",
+        "student_lessons": "будущих занятий как ученик",
+        "memberships": "активных групп",
+    }
+    parts = []
+    for key, value in detail.get("dependencies", {}).items():
+        count = value.get("count", 0) if isinstance(value, dict) else 0
+        if count:
+            parts.append(f"{labels.get(key, key)}: {count}")
+    suffix = "\nСначала измените расписание или состав групп."
+    return str(detail.get("message") or "Операция невозможна.") + (
+        "\n• " + "\n• ".join(parts) + suffix if parts else suffix
+    )
+
+
+def _format_api_error(status_code: int, detail: object, path: str = "") -> str:
+    if status_code == 401:
+        return (
+            "Неверный логин или пароль."
+            if path.endswith("/auth/login")
+            else "Сеанс завершён. Войдите в программу ещё раз."
+        )
+    if status_code == 403:
+        return "Недостаточно прав для этого действия."
+    if status_code == 404:
+        return "Запись не найдена. Возможно, она уже была изменена или удалена."
+    if status_code >= 500:
+        return (
+            "Сервис временно недоступен. Повторите позже."
+            if status_code == 503
+            else "На сервере возникла ошибка. Повторите действие позже."
+        )
+    if isinstance(detail, list):
+        messages = [_validation_message(item) for item in detail if isinstance(item, dict)]
+        return (
+            "Проверьте заполнение формы:\n• " + "\n• ".join(messages)
+            if messages
+            else "Проверьте заполнение полей."
+        )
+    if isinstance(detail, dict):
+        if detail.get("conflicts"):
+            return _format_conflicts(detail)
+        if detail.get("kind") == "capacity" or (
+            "capacity" in detail and "participants" in detail
+        ):
+            return (
+                f"В кабинете {detail.get('capacity')} мест, "
+                f"а выбрано участников: {detail.get('participants')}. "
+                "Выберите другой кабинет или уменьшите состав."
+            )
+        if detail.get("dependencies"):
+            return _format_dependencies(detail)
+        if detail.get("message"):
+            return str(detail["message"])
+    if isinstance(detail, str):
+        normalized = detail.strip()
+        translated = {
+            "Unknown role": "Выбрана неизвестная роль клиента.",
+            "Invalid phone": "Проверьте формат контактного телефона.",
+            "Invalid MAX authorization phone": (
+                "Проверьте формат телефона для авторизации MAX."
+            ),
+        }.get(normalized)
+        if translated:
+            return translated
+        technical_defaults = {
+            "Not Found",
+            "Unauthorized",
+            "Bad Request",
+            "Internal Server Error",
+            "Service Unavailable",
+        }
+        if normalized and normalized not in technical_defaults:
+            return normalized
+    defaults = {
+        400: "Сервер не смог обработать запрос. Проверьте введённые данные.",
+        409: "Действие конфликтует с текущими данными. Обновите информацию и повторите.",
+        422: "Проверьте заполнение полей.",
+        429: "Слишком много запросов. Подождите немного и повторите.",
+        500: "На сервере возникла ошибка. Повторите действие позже.",
+        503: "Сервис временно недоступен. Повторите позже.",
+    }
+    return defaults.get(status_code, "Операцию не удалось выполнить. Повторите позже.")
+
+
 class ManagementApi:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
@@ -79,7 +245,18 @@ class ManagementApi:
 
     def learning_reference_data(self) -> dict[str, Any]:
         data = self._request("GET", "/learning/reference-data")
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        # Keep group membership current even when the management app works
+        # with a server version whose reference-data response did not embed it.
+        for group in data.get("groups", []):
+            group_id = group.get("id")
+            if group_id is not None:
+                try:
+                    group["memberships"] = self.group_memberships(int(group_id))
+                except ApiError:
+                    group.setdefault("memberships", [])
+        return data
 
     def learning_today(self) -> dict[str, Any]:
         data = self._request("GET", "/learning/today")
@@ -277,14 +454,20 @@ class ManagementApi:
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         try:
             response = self._client.request(method, path, **kwargs)
+        except httpx.TimeoutException as exc:
+            raise ApiError(
+                "Сервер не ответил вовремя. Проверьте сеть и повторите действие."
+            ) from exc
         except httpx.HTTPError as exc:
-            raise ApiError(f"Не удалось подключиться к серверу: {exc}") from exc
+            raise ApiError(
+                "Не удалось связаться с сервером. "
+                "Проверьте подключение к сети и доступность сервера."
+            ) from exc
         if response.is_error:
             try:
-                detail = response.json().get("detail", response.text)
+                payload = response.json()
+                detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
             except ValueError:
                 detail = response.text
-            if response.status_code == 401:
-                detail = "Неверный логин или пароль"
-            raise ApiError(f"Ошибка {response.status_code}: {detail}")
+            raise ApiError(_format_api_error(response.status_code, detail, path))
         return response.json()

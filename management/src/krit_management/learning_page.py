@@ -5,9 +5,9 @@ from datetime import datetime, timedelta
 from html import escape
 from typing import Any
 
-from PySide6.QtCore import QDate, QDateTime, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QColor, QPageLayout, QTextDocument
-from PySide6.QtPrintSupport import QPrintDialog, QPrinter, QPrintPreviewDialog
+from PySide6.QtCore import QDate, QDateTime, QMarginsF, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtGui import QColor, QPageLayout, QPageSize, QTextDocument
+from PySide6.QtPrintSupport import QPrintDialog, QPrinter, QPrintPreviewWidget
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -100,9 +100,16 @@ def _participant_details(lesson: dict[str, Any]) -> str:
     return result + (f" · отменено: {excused}" if excused else "")
 
 
-def _button(text: str, callback: Callable[[], None], kind: str = "secondary") -> QPushButton:
+def _button(
+    text: str,
+    callback: Callable[[], None],
+    kind: str = "secondary",
+    *,
+    compact: bool = False,
+) -> QPushButton:
     result = QPushButton(text)
     result.setProperty("kind", kind)
+    result.setProperty("density", "compact" if compact else "standard")
     result.clicked.connect(callback)
     return result
 
@@ -156,6 +163,80 @@ def _teachers_for_subject(references: dict[str, Any], subject_id: object) -> lis
         return teachers
     allowed = set(subject.get("teacher_ids") or [])
     return [item for item in teachers if item.get("id") in allowed]
+
+
+class SchedulePreviewDialog(QDialog):
+    def __init__(
+        self,
+        printer: QPrinter,
+        document: QTextDocument,
+        print_requested: Callable[[], None],
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.printer = printer
+        self.document = document
+        self.setWindowTitle("Предпросмотр расписания")
+        self.setMinimumSize(900, 620)
+        self.resize(1180, 780)
+        layout = QVBoxLayout(self)
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        controls.addWidget(_button("По ширине", self._fit_to_width))
+        controls.addWidget(_button("−", lambda: self._change_zoom(0.8)))
+        self.zoom = QComboBox()
+        self.zoom.setEditable(True)
+        self.zoom.setMinimumWidth(120)
+        self.zoom.addItems(["50 %", "75 %", "100 %", "125 %", "150 %", "200 %"])
+        self.zoom.setCurrentText("100 %")
+        self.zoom.setAccessibleName("Масштаб предпросмотра")
+        self.zoom.activated.connect(lambda _index: self._apply_zoom_text())
+        if self.zoom.lineEdit() is not None:
+            self.zoom.lineEdit().editingFinished.connect(self._apply_zoom_text)
+        controls.addWidget(self.zoom)
+        controls.addWidget(_button("+", lambda: self._change_zoom(1.25)))
+        controls.addStretch(1)
+        controls.addWidget(_button("Печать…", print_requested))
+        controls.addWidget(_button("Закрыть", self.reject))
+        layout.addLayout(controls)
+        self.preview = QPrintPreviewWidget(printer, self)
+        self.preview.paintRequested.connect(document.print_)
+        layout.addWidget(self.preview, 1)
+        QTimer.singleShot(0, self._initialize_preview)
+
+    def _initialize_preview(self) -> None:
+        self.preview.updatePreview()
+        self._set_zoom_percent(100)
+
+    @staticmethod
+    def _normalize_zoom_percent(percent: int) -> int:
+        return max(25, min(percent, 400))
+
+    def _set_zoom_percent(self, percent: int) -> None:
+        normalized = self._normalize_zoom_percent(percent)
+        self.preview.setZoomFactor(normalized / 100)
+        self.zoom.blockSignals(True)
+        self.zoom.setCurrentText(f"{normalized} %")
+        if self.zoom.lineEdit() is not None:
+            self.zoom.lineEdit().setCursorPosition(0)
+        self.zoom.blockSignals(False)
+
+    def _apply_zoom_text(self) -> None:
+        value = self.zoom.currentText().replace("%", "").strip()
+        try:
+            percent = int(value)
+        except ValueError:
+            percent = round(self.preview.zoomFactor() * 100)
+        self._set_zoom_percent(percent)
+
+    def _change_zoom(self, multiplier: float) -> None:
+        self._set_zoom_percent(round(self.preview.zoomFactor() * multiplier * 100))
+
+    def _fit_to_width(self) -> None:
+        self.preview.fitToWidth()
+        self.zoom.blockSignals(True)
+        self.zoom.setCurrentText("По ширине")
+        self.zoom.blockSignals(False)
 
 
 class ReferenceDialog(QDialog):
@@ -1203,7 +1284,7 @@ class LearningPage(QWidget):
                 "Действия",
             ],
             stretch=(1, 2, 3),
-            fixed={0: 110, 4: 100, 5: 125, 6: 320},
+            fixed={0: 110, 4: 90, 5: 125, 6: 290},
         )
         layout.addWidget(self.today_lessons, 2)
         present_header = QHBoxLayout()
@@ -1297,6 +1378,12 @@ class LearningPage(QWidget):
         actions.setSpacing(8)
         actions.addWidget(_button("Добавить занятие", self.add_lesson, "primary"))
         actions.addWidget(_button("Найти свободное время", self.find_free_time))
+        self.delete_calendar_button = _button(
+            "Удалить занятие", self._delete_calendar_selected, "danger"
+        )
+        self.delete_calendar_button.setEnabled(False)
+        self.delete_calendar_button.setToolTip("Сначала выберите занятие в таблице")
+        actions.addWidget(self.delete_calendar_button)
         actions.addStretch(1)
         actions.addWidget(_button("Предпросмотр", self.preview_calendar))
         actions.addWidget(_button("Сохранить PDF", self.save_calendar_pdf))
@@ -1308,6 +1395,7 @@ class LearningPage(QWidget):
             fixed={0: 125, 4: 105, 5: 130},
         )
         self.calendar_table.doubleClicked.connect(self._edit_calendar_selected)
+        self.calendar_table.itemSelectionChanged.connect(self._calendar_selection_changed)
         self.calendar_summary = QLabel("Загрузка расписания…")
         self.calendar_summary.setObjectName("supportingText")
         layout.addWidget(self.calendar_summary)
@@ -1578,7 +1666,11 @@ class LearningPage(QWidget):
     def _today_loaded(self, data: object) -> None:
         self.today_data = data if isinstance(data, dict) else {}
         self.notifications_changed.emit(list(self.today_data.get("alerts", [])))
-        lessons = self.today_data.get("lessons", [])
+        lessons = [
+            lesson
+            for lesson in self.today_data.get("lessons", [])
+            if lesson.get("status") != "cancelled"
+        ]
         self.today_lessons.setRowCount(len(lessons))
         for row, lesson in enumerate(lessons):
             start = datetime.fromisoformat(lesson["start_at"]).astimezone()
@@ -1597,29 +1689,36 @@ class LearningPage(QWidget):
             bar = QHBoxLayout(actions)
             bar.setContentsMargins(2, 2, 2, 2)
             if lesson.get("status") in {"planned", "scheduled"}:
-                bar.addWidget(
-                    _button(
-                        "Начать",
-                        lambda checked=False, item=lesson: self.lesson_action(item, "start"),
-                        "primary",
-                    )
+                start_button = _button(
+                    "Начать",
+                    lambda checked=False, item=lesson: self.lesson_action(item, "start"),
+                    "primary",
+                    compact=True,
                 )
-                bar.addWidget(
-                    _button(
-                        "Изменить",
-                        lambda checked=False, item=lesson: self.edit_lesson(item),
-                    )
+                edit_button = _button(
+                    "Изменить",
+                    lambda checked=False, item=lesson: self.edit_lesson(item),
+                    compact=True,
                 )
+                bar.addWidget(start_button, 1)
+                bar.addWidget(edit_button, 1)
             elif lesson.get("status") == "in_progress":
                 bar.addWidget(
                     _button(
                         "Завершить",
                         lambda checked=False, item=lesson: self.lesson_action(item, "finish"),
                         "primary",
-                    )
+                        compact=True,
+                    ),
+                    1,
                 )
             bar.addWidget(
-                _button("Карточка", lambda checked=False, item=lesson: self.open_lesson(item))
+                _button(
+                    "Карточка",
+                    lambda checked=False, item=lesson: self.open_lesson(item),
+                    compact=True,
+                ),
+                1,
             )
             self.today_lessons.setCellWidget(row, 6, actions)
         present = self.today_data.get("present", [])
@@ -1696,7 +1795,11 @@ class LearningPage(QWidget):
         self.load_calendar()
 
     def _calendar_loaded(self, data: object) -> None:
-        self.calendar_lessons = data if isinstance(data, list) else []
+        self.calendar_lessons = (
+            [item for item in data if item.get("status") != "cancelled"]
+            if isinstance(data, list)
+            else []
+        )
         count = len(self.calendar_lessons)
         self.calendar_summary.setText(
             f"Найдено занятий: {count}" if count else "В выбранном периоде занятий нет"
@@ -1715,6 +1818,55 @@ class LearningPage(QWidget):
             ]
             for column, value in enumerate(values):
                 self.calendar_table.setItem(row, column, QTableWidgetItem(str(value)))
+        self._calendar_selection_changed()
+
+    def _calendar_selection_changed(self) -> None:
+        row = self.calendar_table.currentRow()
+        lesson = self.calendar_lessons[row] if 0 <= row < len(self.calendar_lessons) else None
+        planned = bool(lesson and lesson.get("status") in {"planned", "scheduled"})
+        self.delete_calendar_button.setEnabled(planned)
+        self.delete_calendar_button.setToolTip(
+            "Удалить выбранное занятие из расписания"
+            if planned
+            else "Выберите запланированное занятие в таблице"
+        )
+
+    def _delete_calendar_selected(self) -> None:
+        row = self.calendar_table.currentRow()
+        if not 0 <= row < len(self.calendar_lessons):
+            return
+        self._delete_planned_lesson(self.calendar_lessons[row])
+
+    def _delete_planned_lesson(self, lesson: dict[str, Any]) -> None:
+        if lesson.get("status") not in {"planned", "scheduled"}:
+            return
+        if not self._confirm_lesson_deletion(lesson):
+            return
+        self._run(
+            self.api.lesson_action,
+            int(lesson["id"]),
+            "cancel",
+            {"reason": "Удалено администратором"},
+            done=self._action_done,
+        )
+
+    def _confirm_lesson_deletion(self, lesson: dict[str, Any]) -> bool:
+        confirmation = QMessageBox(self)
+        confirmation.setIcon(QMessageBox.Icon.Warning)
+        confirmation.setWindowTitle("Удаление занятия")
+        confirmation.setText(
+            f"Удалить занятие «{lesson.get('subject_name_snapshot', '')}» "
+            "из расписания?"
+        )
+        confirmation.setInformativeText(
+            "Занятие будет отменено. Если оно входит в серию, остальные занятия не изменятся."
+        )
+        delete_button = confirmation.addButton(
+            "Удалить занятие", QMessageBox.ButtonRole.DestructiveRole
+        )
+        confirmation.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        confirmation.exec()
+        return confirmation.clickedButton() == delete_button
 
     def _edit_calendar_selected(self, _index: object = None) -> None:
         row = self.calendar_table.currentRow()
@@ -2172,9 +2324,9 @@ class LearningPage(QWidget):
     def preview_calendar(self) -> None:
         document = self._schedule_document()
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
         self._prepare_schedule_printer(printer)
-        preview = QPrintPreviewDialog(printer, self)
-        preview.paintRequested.connect(document.print_)
+        preview = SchedulePreviewDialog(printer, document, self.print_calendar, self)
         preview.exec()
 
     def save_calendar_pdf(self) -> None:
@@ -2195,40 +2347,117 @@ class LearningPage(QWidget):
         self._schedule_document().print_(printer)
 
     def _schedule_document(self) -> QTextDocument:
-        rows = []
+        selected = self.calendar_date.date().toPython()
+        selected_end = max(selected, self.calendar_end.date().toPython())
+        first_day = selected - timedelta(days=selected.weekday())
+        last_day = selected_end + timedelta(days=6 - selected_end.weekday())
+        lessons_by_day: dict[object, list[dict[str, Any]]] = {}
         for lesson in self.calendar_lessons:
+            if lesson.get("status") == "cancelled":
+                continue
             start = datetime.fromisoformat(lesson["start_at"]).astimezone()
-            rows.append(
-                "<tr>"
-                f"<td>{start:%d.%m.%Y}</td>"
-                f"<td>{start:%H:%M}</td>"
-                f"<td>{escape(str(lesson.get('subject_name_snapshot', '')))}</td>"
-                f"<td>{escape(str(lesson.get('teacher_name_snapshot', '')))}</td>"
-                f"<td>{escape(str(lesson.get('room_name_snapshot', '')))}</td>"
-                "</tr>"
-            )
+            lessons_by_day.setdefault(start.date(), []).append(lesson)
+        for lessons in lessons_by_day.values():
+            lessons.sort(key=lambda item: str(item.get("start_at", "")))
+
+        weekday_names = (
+            "Понедельник",
+            "Вторник",
+            "Среда",
+            "Четверг",
+            "Пятница",
+            "Суббота",
+            "Воскресенье",
+        )
+        rows: list[str] = []
+        week_start = first_day
+        while week_start <= last_day:
+            cells: list[str] = []
+            for offset in range(7):
+                day = week_start + timedelta(days=offset)
+                outside = day < selected or day > selected_end
+                background = "#f1f4f8" if outside else "#ffffff"
+                lesson_blocks = [
+                    self._schedule_lesson_html(item) for item in lessons_by_day.get(day, [])
+                ]
+                empty = "<div class='empty'>Занятий нет</div>" if not lesson_blocks else ""
+                cells.append(
+                    f"<td bgcolor='{background}' valign='top' height='115'>"
+                    f"<div class='date'>{day:%d.%m}</div>"
+                    f"{''.join(lesson_blocks)}{empty}</td>"
+                )
+            rows.append(f"<tr>{''.join(cells)}</tr>")
+            week_start += timedelta(days=7)
+
         document = QTextDocument(self)
-        period_label = self.calendar_date.date().toString("dd.MM.yyyy")
-        if self.calendar_end.date() != self.calendar_date.date():
-            period_label += f"–{self.calendar_end.date().toString('dd.MM.yyyy')}"
+        period_label = selected.strftime("%d.%m.%Y")
+        if selected_end != selected:
+            period_label += f"–{selected_end:%d.%m.%Y}"
         filter_label = self.calendar_filter_type.currentText()
         if self.calendar_filter_value.isVisible():
             filter_label += f": {self.calendar_filter_value.currentText()}"
+        headers = "".join(f"<th>{name}</th>" for name in weekday_names)
         document.setHtml(
-            f"<h2>КРиТ · расписание на {period_label}</h2>"
-            f"<p>{escape(filter_label)}</p>"
-            "<table style='width:100%; border-collapse:collapse; word-wrap:break-word' "
-            "cellspacing='0' cellpadding='6' border='1'>"
-            "<tr><th>Дата</th><th>Время</th><th>Предмет</th><th>Учитель</th>"
-            f"<th>Кабинет</th></tr>{''.join(rows)}</table>"
+            "<style>"
+            "body { font-family: 'Segoe UI'; color: #172033; font-size: 8pt; }"
+            "h1 { font-size: 16pt; margin: 0 0 3px 0; }"
+            ".subtitle { color: #526174; margin: 0 0 10px 0; }"
+            "table.calendar { width: 100%; border-collapse: collapse; table-layout: fixed; }"
+            "table.calendar th { background: #e8eef8; padding: 6px 3px; "
+            "border: 1px solid #b8c4d4; }"
+            "table.calendar td { width: 14.28%; padding: 5px; border: 1px solid #b8c4d4; }"
+            ".date { font-size: 10pt; font-weight: 700; margin-bottom: 5px; }"
+            ".lesson { background: #eef4ff; border: 1px solid #b9ccef; "
+            "margin: 0 0 5px 0; padding: 4px; }"
+            ".time { color: #124da8; font-weight: 700; }"
+            ".subject { font-weight: 700; margin: 2px 0; }"
+            ".teacher { color: #37465a; }"
+            ".students { margin-top: 3px; }"
+            ".empty { color: #8a95a5; }"
+            "</style>"
+            f"<h1>КРиТ · расписание {period_label}</h1>"
+            f"<p class='subtitle'>{escape(filter_label)}</p>"
+            f"<table class='calendar' width='100%'><thead><tr>{headers}</tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
         )
         return document
 
+    @staticmethod
+    def _short_person_name(value: object) -> str:
+        parts = str(value or "").split()
+        if len(parts) < 2:
+            return " ".join(parts)
+        initials = " ".join(f"{part[0]}." for part in parts[1:] if part)
+        return f"{parts[0]} {initials}".strip()
+
+    def _schedule_lesson_html(self, lesson: dict[str, Any]) -> str:
+        start = datetime.fromisoformat(lesson["start_at"]).astimezone()
+        end = datetime.fromisoformat(lesson["end_at"]).astimezone()
+        participants = [
+            name
+            for item in lesson.get("participants", [])
+            if item.get("attendance_status") != "excused"
+            if (
+                name := self._short_person_name(
+                    item.get("person_name_snapshot") or item.get("person_name")
+                )
+            )
+        ]
+        students = "<br>".join(map(escape, participants)) or "Ученики не указаны"
+        teacher = escape(self._short_person_name(lesson.get("teacher_name_snapshot", "")))
+        return (
+            "<div class='lesson'>"
+            f"<div class='time'>{start:%H:%M}–{end:%H:%M}</div>"
+            f"<div class='subject'>{escape(str(lesson.get('subject_name_snapshot', '')))}</div>"
+            f"<div class='teacher'>{teacher}</div>"
+            f"<div class='students'><b>Ученики ({len(participants)}):</b><br>{students}</div>"
+            "</div>"
+        )
+
     def _prepare_schedule_printer(self, printer: QPrinter) -> None:
-        selected = self.calendar_date.date().toPython()
-        selected_end = self.calendar_end.date().toPython()
-        if (selected_end - selected).days >= 7 or len(self.calendar_lessons) >= 20:
-            printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+        printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+        printer.setPageMargins(QMarginsF(8, 8, 8, 8), QPageLayout.Unit.Millimeter)
 
     def load_student_history(self) -> None:
         person_id = self.journal_student.currentData()
