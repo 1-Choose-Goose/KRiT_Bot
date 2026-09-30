@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from krit_management.api import ApiError, ManagementApi, _format_api_error
+from krit_management.api import LOGIN_TIMEOUT, ApiError, ManagementApi, _format_api_error
 
 
 def test_schedule_conflict_is_explained_without_transport_details() -> None:
@@ -89,6 +89,25 @@ def test_request_does_not_expose_http_codes_or_network_internals(monkeypatch) ->
     message = str(exc_info.value)
     assert "Проверьте подключение к сети" in message
     assert "WinError" not in message
+    api.close()
+
+
+def test_login_allows_server_to_finish_starting(monkeypatch) -> None:
+    api = ManagementApi("http://127.0.0.1:1")
+    captured: dict[str, object] = {}
+
+    def request(method: str, path: str, **kwargs):
+        captured.update({"method": method, "path": path, **kwargs})
+        return {"access_token": "test-token"}
+
+    monkeypatch.setattr(api, "_request", request)
+
+    api.login("admin", "admin")
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/auth/login"
+    assert captured["timeout"] is LOGIN_TIMEOUT
+    assert api._client.headers["Authorization"] == "Bearer test-token"
     api.close()
 
 

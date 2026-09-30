@@ -24,8 +24,6 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
       KRIT_TEST_POSTGRES_URL: postgresql+asyncpg://krit_test:krit_test@127.0.0.1:5432/krit_test
-      DATABASE_URL: postgresql+asyncpg://krit_test:krit_test@127.0.0.1:5432/krit_test
-      BOOTSTRAP_ADMIN_PASSWORD: ci-only-strong-password
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,6 +42,9 @@ jobs:
         run: python -m compileall -q bot/src management/src
       - name: Migrate PostgreSQL test database
         run: krit-migrate
+        env:
+          DATABASE_URL: postgresql+asyncpg://krit_test:krit_test@127.0.0.1:5432/krit_test
+          BOOTSTRAP_ADMIN_PASSWORD: ci-only-strong-password
       - name: Server and migration tests
         run: pytest bot/tests -q
       - name: Management tests

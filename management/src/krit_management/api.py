@@ -6,6 +6,8 @@ import httpx
 
 from .timeutils import configure_center_timezone, now_center, parse_center
 
+LOGIN_TIMEOUT = httpx.Timeout(30, connect=8)
+
 
 class ApiError(RuntimeError):
     def __init__(
@@ -199,7 +201,10 @@ class ManagementApi:
 
     def login(self, username: str, password: str) -> None:
         data = self._request(
-            "POST", "/auth/login", json={"username": username, "password": password}
+            "POST",
+            "/auth/login",
+            json={"username": username, "password": password},
+            timeout=LOGIN_TIMEOUT,
         )
         token = data.get("access_token") if isinstance(data, dict) else None
         if not token:
