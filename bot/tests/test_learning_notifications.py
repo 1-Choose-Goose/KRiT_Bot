@@ -55,12 +55,12 @@ async def test_notification_recovery_and_deduplicated_delivery(tmp_path) -> None
                     max_user_id=100,
                 ),
                 NotificationJob(
-                dedupe_key="test:once",
-                event_type="test",
-                recipient_person_id=person.id,
-                scheduled_at=utcnow() - timedelta(minutes=1),
-                status="processing",
-                payload={"text": "Проверка"},
+                    dedupe_key="test:once",
+                    event_type="test",
+                    recipient_person_id=person.id,
+                    scheduled_at=utcnow() - timedelta(minutes=1),
+                    status="processing",
+                    payload={"text": "Проверка"},
                 ),
             ]
         )
@@ -188,15 +188,12 @@ async def test_start_and_finish_notifications_are_role_specific_without_self_cop
         await session.commit()
         jobs = list(
             (
-                await session.scalars(
-                    select(NotificationJob).order_by(NotificationJob.dedupe_key)
-                )
+                await session.scalars(select(NotificationJob).order_by(NotificationJob.dedupe_key))
             ).all()
         )
         assert len(jobs) == 6
         assert not any(
-            f"guardian:{guardian.id}:student:{guardian.id}" in job.dedupe_key
-            for job in jobs
+            f"guardian:{guardian.id}:student:{guardian.id}" in job.dedupe_key for job in jobs
         )
         assert any(
             job.recipient_person_id == guardian.id

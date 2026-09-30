@@ -11,6 +11,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -18,6 +19,7 @@ from sqlalchemy import (
     event,
     or_,
     select,
+    text,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import (
@@ -42,10 +44,22 @@ class Base(DeclarativeBase):
 
 class Person(Base):
     __tablename__ = "persons"
+    __table_args__ = (
+        Index(
+            "uq_persons_active_max_auth_phone",
+            "max_auth_phone",
+            unique=True,
+            sqlite_where=text("max_auth_phone IS NOT NULL AND active = 1 AND archived_at IS NULL"),
+            postgresql_where=text(
+                "max_auth_phone IS NOT NULL AND active IS TRUE AND archived_at IS NULL"
+            ),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     full_name: Mapped[str] = mapped_column(String(250), nullable=False)
-    phone: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, index=True)
+    phone: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    max_auth_phone: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     max_user_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, index=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
@@ -269,7 +283,7 @@ async def bind_max_user_by_phone(
     statement = (
         select(Person)
         .where(
-            or_(Person.id == identity_person_id, Person.phone == phone),
+            or_(Person.id == identity_person_id, Person.max_auth_phone == phone),
             Person.active.is_(True),
             Person.archived_at.is_(None),
         )

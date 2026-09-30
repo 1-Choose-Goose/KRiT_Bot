@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
+from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt, QTimer
 from PySide6.QtGui import QColor, QTextCharFormat
-from PySide6.QtWidgets import QComboBox, QCompleter, QDateEdit, QDateTimeEdit
+from PySide6.QtWidgets import QComboBox, QCompleter, QDateEdit, QDateTimeEdit, QFormLayout
 
 
 def matches_word_prefix(query: str, value: str) -> bool:
@@ -33,6 +33,15 @@ def configure_calendar(editor: QDateEdit | QDateTimeEdit) -> None:
         calendar.setWeekdayTextFormat(day, weekend)
 
 
+def configure_form_layout(form: QFormLayout) -> None:
+    """Apply one responsive, scannable form grid throughout the application."""
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+    form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    form.setHorizontalSpacing(14)
+    form.setVerticalSpacing(9)
+
+
 class _WordPrefixProxy(QSortFilterProxyModel):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -60,6 +69,8 @@ class SearchableComboBox(QComboBox):
         super().__init__(parent)
         self.setEditable(True)
         self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(14)
         self.lineEdit().setPlaceholderText(placeholder)
         self._proxy = _WordPrefixProxy(self)
         self._proxy.setSourceModel(self.model())
@@ -68,9 +79,51 @@ class SearchableComboBox(QComboBox):
         self._completer.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self._completer.setCompletionColumn(self.modelColumn())
+        self._completer.popup().setObjectName("searchCompleterPopup")
+        self._completer.popup().setUniformItemSizes(True)
+        self._completer.activated[str].connect(self._completion_activated)
         self.setCompleter(self._completer)
         self.lineEdit().textEdited.connect(self._search)
-        self.activated.connect(lambda _index: self._proxy.set_query(""))
+        self.lineEdit().editingFinished.connect(self._commit_exact_match)
+        self.activated.connect(self._selection_made)
+        self.currentIndexChanged.connect(
+            lambda _index: QTimer.singleShot(0, self._show_text_from_start)
+        )
+
+    def _selection_made(self, _index: int) -> None:
+        self._proxy.set_query("")
+        self._show_text_from_start()
+
+    def _completion_activated(self, text: str) -> None:
+        index = self._exact_text_index(text)
+        if index >= 0:
+            self.setCurrentIndex(index)
+        self._selection_made(index)
+
+    def _exact_text_index(self, text: str) -> int:
+        normalized = " ".join(text.split()).casefold()
+        for index in range(self.count()):
+            if " ".join(self.itemText(index).split()).casefold() == normalized:
+                return index
+        return -1
+
+    def _commit_exact_match(self) -> None:
+        index = self._exact_text_index(self.currentText())
+        if index >= 0:
+            self.setCurrentIndex(index)
+
+    def currentData(self, role: int = Qt.ItemDataRole.UserRole):  # noqa: N802
+        text = self.currentText()
+        current_index = self.currentIndex()
+        if current_index >= 0 and self.itemText(current_index) == text:
+            return super().currentData(role)
+        exact_index = self._exact_text_index(text)
+        return self.itemData(exact_index, role) if exact_index >= 0 else None
+
+    def _show_text_from_start(self) -> None:
+        editor = self.lineEdit()
+        editor.deselect()
+        editor.setCursorPosition(0)
 
     def _search(self, text: str) -> None:
         self._proxy.set_query(text)

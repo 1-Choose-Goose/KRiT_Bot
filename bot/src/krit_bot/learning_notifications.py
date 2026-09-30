@@ -96,7 +96,7 @@ class LearningNotificationWorker:
                     ).all()
                 )
                 text += "\n\nУченики:\n" + (
-                    "\n".join(student_names) if student_names else "Нет участников"
+                    "\n".join(student_names) if student_names else "пока нет участников"
                 )
             await session.commit()
             job_id = job.id
@@ -118,6 +118,7 @@ class LearningNotificationWorker:
                     job.status = "failed"
                     session.add(
                         AdminNotification(
+                            dedupe_key=f"notification-job:{job.id}:failed",
                             kind="max_notification_failed",
                             title="Не отправлено уведомление MAX",
                             message=(f"Получатель #{job.recipient_person_id}: {str(exc)[:500]}"),

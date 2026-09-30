@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
-    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -45,6 +44,7 @@ from .updates import (
     launch_updater,
     updates_supported,
 )
+from .widgets import matches_word_prefix
 from .workers import ProgressWorker, Worker
 
 ASSETS_DIR = Path(__file__).with_name("assets")
@@ -65,6 +65,7 @@ class MainWindow(QMainWindow):
         self.archived_people: list[dict[str, Any]] = []
         self.attempts: list[dict[str, Any]] = []
         self.people_tables: dict[str, QTableWidget] = {}
+        self.people_empty_labels: dict[str, QLabel] = {}
         self.visible_people: dict[str, list[dict[str, Any]]] = {}
         self.pool = QThreadPool(self)
         self._workers: set[Worker] = set()
@@ -175,15 +176,11 @@ class MainWindow(QMainWindow):
         self.notifications_button.setProperty("kind", "secondary")
         self.notifications_button.clicked.connect(self.open_notification_center)
         layout.addWidget(self.notifications_button)
-        refresh_button = QPushButton("Обновить")
-        refresh_button.setProperty("kind", "secondary")
-        refresh_button.clicked.connect(lambda _checked=False: self.refresh(silent=False))
-        layout.addWidget(refresh_button)
         return card
 
     def _notifications_changed(self, notifications: list[dict[str, Any]]) -> None:
-        self._notifications = notifications
-        unread = [item for item in notifications if not item.get("read_at")]
+        self._notifications = self._deduplicate_notifications(notifications)
+        unread = [item for item in self._notifications if not item.get("read_at")]
         self.notifications_button.setText(
             f"Уведомления ({len(unread)})" if unread else "Уведомления"
         )
@@ -221,7 +218,7 @@ class MainWindow(QMainWindow):
         )
 
     def _show_notification_center(self, result: object) -> None:
-        notifications = result if isinstance(result, list) else []
+        notifications = self._deduplicate_notifications(result if isinstance(result, list) else [])
         dialog = QDialog(self)
         dialog.setWindowTitle("Центр уведомлений")
         dialog.setMinimumSize(760, 460)
@@ -231,7 +228,14 @@ class MainWindow(QMainWindow):
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setStretchLastSection(True)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        table.setColumnWidth(0, 105)
+        table.setColumnWidth(1, 145)
+        table.setColumnWidth(2, 190)
         table.setRowCount(len(notifications))
         for row, item in enumerate(notifications):
             created = datetime.fromisoformat(item["created_at"]).astimezone()
@@ -246,18 +250,45 @@ class MainWindow(QMainWindow):
                 cell.setData(Qt.ItemDataRole.UserRole, item)
                 table.setItem(row, column, cell)
         layout.addWidget(table)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        open_button = buttons.addButton("Открыть занятие", QDialogButtonBox.ButtonRole.ActionRole)
-        read_button = buttons.addButton(
-            "Отметить прочитанным", QDialogButtonBox.ButtonRole.ActionRole
-        )
-        read_all_button = buttons.addButton("Прочитать все", QDialogButtonBox.ButtonRole.ActionRole)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+        resolution_panel = QWidget()
+        resolution_layout = QHBoxLayout(resolution_panel)
+        resolution_layout.setContentsMargins(0, 0, 0, 0)
+        resolution_layout.addWidget(QLabel("В занятии не осталось участвующих учеников"))
+        resolution_layout.addStretch(1)
+        finish_early_button = QPushButton("Завершить досрочно")
+        finish_early_button.setProperty("kind", "danger")
+        keep_active_button = QPushButton("Оставить активным")
+        keep_active_button.setProperty("kind", "secondary")
+        resolution_layout.addWidget(finish_early_button)
+        resolution_layout.addWidget(keep_active_button)
+        resolution_panel.setVisible(False)
+        layout.addWidget(resolution_panel)
+
+        footer = QHBoxLayout()
+        open_button = QPushButton("Открыть занятие")
+        open_button.setProperty("kind", "secondary")
+        footer.addWidget(open_button)
+        footer.addStretch(1)
+        read_button = QPushButton("Прочитать")
+        read_button.setProperty("kind", "secondary")
+        read_all_button = QPushButton("Прочитать все")
+        read_all_button.setProperty("kind", "secondary")
+        close_button = QPushButton("Закрыть")
+        close_button.setProperty("kind", "secondary")
+        footer.addWidget(read_button)
+        footer.addWidget(read_all_button)
+        footer.addWidget(close_button)
+        close_button.clicked.connect(dialog.reject)
+        layout.addLayout(footer)
 
         def selected() -> dict[str, Any] | None:
             row = table.currentRow()
             return table.item(row, 0).data(Qt.ItemDataRole.UserRole) if row >= 0 else None
+
+        def selection_changed() -> None:
+            item = selected()
+            show_resolution = bool(item and item.get("kind") == "lesson_no_active_students")
+            resolution_panel.setVisible(show_resolution)
 
         def open_selected() -> None:
             item = selected()
@@ -277,20 +308,51 @@ class MainWindow(QMainWindow):
                     lambda _result: table.item(row, 0).setText("Прочитано"),
                 )
 
+        def finish_selected_early() -> None:
+            item = selected()
+            if item and item.get("kind") == "lesson_no_active_students" and item.get("lesson_id"):
+                dialog.accept()
+                self.learning_page._finish_lesson_early(int(item["lesson_id"]))
+
+        def keep_selected_active() -> None:
+            item = selected()
+            if item and item.get("kind") == "lesson_no_active_students":
+                read_selected()
+
         open_button.clicked.connect(open_selected)
+        finish_early_button.clicked.connect(finish_selected_early)
+        keep_active_button.clicked.connect(keep_selected_active)
         read_button.clicked.connect(read_selected)
         read_all_button.clicked.connect(
             lambda _checked=False: self._run(
                 self.api.read_all_admin_notifications,
                 lambda _result: [
-                    table.item(row, 0).setText("Прочитано")
-                    for row in range(table.rowCount())
+                    table.item(row, 0).setText("Прочитано") for row in range(table.rowCount())
                 ],
             )
         )
+        table.itemSelectionChanged.connect(selection_changed)
         table.doubleClicked.connect(lambda _index: open_selected())
         dialog.exec()
         self.learning_page.refresh_today()
+
+    @staticmethod
+    def _deduplicate_notifications(
+        notifications: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        seen: set[tuple[object, ...]] = set()
+        for item in notifications:
+            key = (
+                ("lesson", item.get("lesson_id"), item.get("kind"))
+                if item.get("lesson_id") is not None
+                else ("id", item.get("id"))
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(item)
+        return result
 
     def _change_section(self, index: int) -> None:
         if index < 0:
@@ -346,7 +408,10 @@ class MainWindow(QMainWindow):
             lambda _index, key=role_filter, widget=table: self.edit_selected_person(key, widget)
         )
         self.people_tables[role_filter] = table
-        layout.addWidget(table)
+        layout.addWidget(table, 1)
+        empty = self._empty_state("В этом разделе пока нет клиентов")
+        self.people_empty_labels[role_filter] = empty
+        layout.addWidget(empty, 1)
         return page
 
     def _attempts_tab(self) -> QWidget:
@@ -354,14 +419,25 @@ class MainWindow(QMainWindow):
         self.attempts_table = self._table(
             ["Имя в MAX", "Имя пользователя", "ID в MAX", "Попыток", "Действия"]
         )
-        layout.addWidget(self.attempts_table)
+        layout.addWidget(self.attempts_table, 1)
+        self.attempts_empty = self._empty_state("Новых запросов авторизации нет")
+        layout.addWidget(self.attempts_empty, 1)
         return page
 
     def _archive_tab(self) -> QWidget:
         page, layout = self._page()
         self.archive_table = self._table(["ФИО", "Роли", "Телефон", "Действия"])
-        layout.addWidget(self.archive_table)
+        layout.addWidget(self.archive_table, 1)
+        self.archive_empty = self._empty_state("Архив пуст")
+        layout.addWidget(self.archive_empty, 1)
         return page
+
+    @staticmethod
+    def _empty_state(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("emptyState")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        return label
 
     @staticmethod
     def _page() -> tuple[QWidget, QVBoxLayout]:
@@ -384,6 +460,7 @@ class MainWindow(QMainWindow):
         table.verticalHeader().setDefaultSectionSize(56)
         table.horizontalHeader().setHighlightSections(False)
         header = table.horizontalHeader()
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         last_column = len(headers) - 1
@@ -468,20 +545,28 @@ class MainWindow(QMainWindow):
     def _set_values(table: QTableWidget, row: int, values: list[object]) -> None:
         for column, value in enumerate(values):
             item = QTableWidgetItem(str(value))
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             table.setItem(row, column, item)
 
     def _render_people(self) -> None:
         query = self.people_search.text().casefold().strip()
+        query_digits = "".join(character for character in query if character.isdigit())
         status = self.people_status.currentData()
         for role_filter, table in self.people_tables.items():
             visible = []
             for person in self.people:
                 roles = person_roles(person)
-                haystack = f"{person.get('full_name', '')} {person.get('phone', '')}".casefold()
                 if role_filter != "all" and role_filter not in roles:
                     continue
-                if query and query not in haystack:
+                name_matches = matches_word_prefix(query, str(person.get("full_name", "")))
+                phone_digits = "".join(
+                    character for character in str(person.get("phone", "")) if character.isdigit()
+                )
+                if (
+                    query
+                    and not name_matches
+                    and not (query_digits and query_digits in phone_digits)
+                ):
                     continue
                 if status == "active" and not person.get("active"):
                     continue
@@ -493,6 +578,8 @@ class MainWindow(QMainWindow):
                     continue
                 visible.append(person)
             self.visible_people[role_filter] = visible
+            table.setVisible(bool(visible))
+            self.people_empty_labels[role_filter].setVisible(not visible)
             table.setRowCount(len(visible))
             for row, person in enumerate(visible):
                 roles = person_roles(person)
@@ -505,22 +592,28 @@ class MainWindow(QMainWindow):
                         format_phone(person.get("phone")),
                     ],
                 )
-                actions = [
-                    ("Изменить", "secondary", lambda item=person: self.edit_person(item)),
-                    ("В архив", "warning", lambda item=person: self.archive_person(item)),
-                ]
-                if {"student", "teacher"}.intersection(roles):
-                    actions.insert(
-                        1,
-                        (
-                            "Журнал",
-                            "secondary",
-                            lambda item=person: self.open_person_journal(item),
-                        ),
-                    )
-                table.setCellWidget(row, 3, self._actions(actions))
+                table.setCellWidget(
+                    row,
+                    3,
+                    self._actions(
+                        [
+                            (
+                                "Карточка",
+                                "secondary",
+                                lambda item=person: self.edit_person(item),
+                            ),
+                            (
+                                "В архив",
+                                "warning",
+                                lambda item=person: self.archive_person(item),
+                            ),
+                        ]
+                    ),
+                )
 
     def _render_attempts(self) -> None:
+        self.attempts_table.setVisible(bool(self.attempts))
+        self.attempts_empty.setVisible(not self.attempts)
         self.attempts_table.setRowCount(len(self.attempts))
         for row, attempt in enumerate(self.attempts):
             self._set_values(
@@ -548,6 +641,8 @@ class MainWindow(QMainWindow):
             )
 
     def _render_archive(self) -> None:
+        self.archive_table.setVisible(bool(self.archived_people))
+        self.archive_empty.setVisible(not self.archived_people)
         self.archive_table.setRowCount(len(self.archived_people))
         for row, person in enumerate(self.archived_people):
             self._set_values(
@@ -580,7 +675,7 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(container)
         layout.setContentsMargins(3, 3, 3, 3)
         layout.setSpacing(6)
-        layout.addStretch(1)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         for text, kind, callback in actions:
             button = QPushButton(text)
             button.setProperty("kind", kind)
@@ -590,23 +685,28 @@ class MainWindow(QMainWindow):
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             button.clicked.connect(lambda _checked=False, fn=callback: fn())
             layout.addWidget(button)
-        layout.addStretch(1)
         return container
 
     def open_person_journal(self, person: dict[str, Any]) -> None:
-        self.main_nav.setCurrentRow(1)
-        self.learning_page.tabs.setCurrentIndex(3)
-        roles = person_roles(person)
-        if "student" in roles:
-            index = self.learning_page.journal_student.findData(person.get("id"))
-            if index >= 0:
-                self.learning_page.journal_student.setCurrentIndex(index)
-                self.learning_page.load_student_history()
-        elif "teacher" in roles:
-            index = self.learning_page.journal_teacher.findData(person.get("id"))
-            if index >= 0:
-                self.learning_page.journal_teacher.setCurrentIndex(index)
-                self.learning_page.load_teacher_history()
+        dialog = PersonDialog(
+            person,
+            self,
+            available_people=self.people,
+            open_related=self.edit_person,
+            load_learning_history=self._load_person_history,
+            open_lesson=self._open_lesson_from_person,
+        )
+        history_index = next(
+            (
+                index
+                for index in range(dialog.sections.count())
+                if dialog.sections.tabText(index) == "Учебный процесс"
+            ),
+            -1,
+        )
+        if history_index >= 0:
+            dialog.sections.setCurrentIndex(history_index)
+        dialog.exec()
 
     def add_person(self) -> None:
         dialog = PersonDialog(
@@ -675,9 +775,9 @@ class MainWindow(QMainWindow):
     def _open_lesson_from_person(self, lesson_id: int) -> None:
         self._run(
             lambda: self.api.learning_lesson(lesson_id),
-            lambda lesson: self.learning_page.open_lesson(lesson)
-            if isinstance(lesson, dict)
-            else None,
+            lambda lesson: (
+                self.learning_page.open_lesson(lesson) if isinstance(lesson, dict) else None
+            ),
         )
 
     def _create_with_relations(
@@ -743,7 +843,33 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Cancel,
         )
         if answer == QMessageBox.StandardButton.Yes:
-            self._run(lambda: self.api.archive_person(int(person["id"])), lambda _: self.refresh())
+
+            def failed(message: str) -> None:
+                if "can_resolve_student_dependencies" not in message:
+                    self._show_error(message)
+                    return
+                confirm = QMessageBox.warning(
+                    self,
+                    "Будущие занятия",
+                    "У ученика есть будущие занятия или активные группы. "
+                    "Исключить его из будущих занятий и архивировать?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if confirm == QMessageBox.StandardButton.Yes:
+                    self._run(
+                        lambda: self.api.archive_person(
+                            int(person["id"]),
+                            resolve_future_student_dependencies=True,
+                        ),
+                        lambda _: self.refresh(),
+                    )
+
+            self._run(
+                lambda: self.api.archive_person(int(person["id"])),
+                lambda _: self.refresh(),
+                failed,
+            )
 
     def restore_person(self, person: dict[str, Any]) -> None:
         self._run(lambda: self.api.restore_person(int(person["id"])), lambda _: self.refresh())
@@ -897,6 +1023,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         self._closing = True
         self.refresh_timer.stop()
+        self.notification_timer.stop()
+        self.learning_page.shutdown()
         self.pool.clear()
         self.pool.waitForDone(16000)
         self._workers.clear()

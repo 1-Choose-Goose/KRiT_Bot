@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .widgets import matches_word_prefix
+from .widgets import configure_form_layout, matches_word_prefix
 
 ROLE_LABELS = {"student": "Ученик", "parent": "Родитель", "teacher": "Учитель"}
 ATTENDANCE_LABELS = {
@@ -57,6 +58,7 @@ class LoginDialog(QDialog):
         title.setObjectName("dialogTitle")
         layout.addWidget(title)
         form = QFormLayout()
+        configure_form_layout(form)
         self.username = QLineEdit("admin")
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
@@ -114,9 +116,7 @@ class PersonPickerDialog(QDialog):
         for person in self.people:
             full_name = str(person.get("full_name", ""))
             phone = str(person.get("phone", ""))
-            if query and not (
-                matches_word_prefix(query, full_name) or query in phone.casefold()
-            ):
+            if query and not (matches_word_prefix(query, full_name) or query in phone.casefold()):
                 continue
             item = QListWidgetItem(f"{person.get('full_name', '')}   {person.get('phone', '')}")
             item.setData(Qt.ItemDataRole.UserRole, person)
@@ -153,8 +153,8 @@ class PersonDialog(QDialog):
             "student": [dict(item) for item in self.person.get("students", [])],
         }
         self.setWindowTitle("Карточка клиента")
-        self.setMinimumSize(760, 480)
-        self.resize(820, 520)
+        self.setMinimumSize(840, 520)
+        self.resize(960, 600)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 22)
         layout.setSpacing(14)
@@ -167,6 +167,7 @@ class PersonDialog(QDialog):
         main_layout = QVBoxLayout(main_page)
         main_layout.setContentsMargins(8, 12, 8, 8)
         form = QFormLayout()
+        configure_form_layout(form)
         self.full_name = QLineEdit(str(self.person.get("full_name", "")))
         self.phone = QLineEdit()
         self.phone.setInputMask("+7 (000) 000-00-00;_")
@@ -174,6 +175,15 @@ class PersonDialog(QDialog):
         if len(digits) == 11 and digits[0] in {"7", "8"}:
             digits = digits[1:]
         self.phone.setText(digits[:10])
+        self.max_auth_phone = QLineEdit()
+        self.max_auth_phone.setInputMask("+7 (000) 000-00-00;_")
+        auth_digits = "".join(
+            c for c in str(self.person.get("max_auth_phone") or "") if c.isdigit()
+        )
+        if len(auth_digits) == 11 and auth_digits[0] in {"7", "8"}:
+            auth_digits = auth_digits[1:]
+        self.max_auth_phone.setText(auth_digits[:10])
+        self.max_auth_phone.setPlaceholderText("Оставьте пустым, если личного номера нет")
         roles = person_roles(self.person)
         self.role_checks: dict[str, QCheckBox] = {}
         roles_widget = QWidget()
@@ -194,6 +204,7 @@ class PersonDialog(QDialog):
         self.active.setChecked(bool(self.person.get("active", True)))
         form.addRow("ФИО", self.full_name)
         form.addRow("Телефон", self.phone)
+        form.addRow("Личный телефон для входа в MAX", self.max_auth_phone)
         form.addRow("Роли", roles_widget)
         form.addRow("ID в MAX", self.max_user_id)
         form.addRow("Статус MAX", self.authorization)
@@ -236,11 +247,9 @@ class PersonDialog(QDialog):
             learning_page = QWidget()
             learning_layout = QVBoxLayout(learning_page)
             learning_layout.setContentsMargins(8, 12, 8, 8)
-            self.learning_status = QLabel(
-                "История загрузится при открытии этого раздела."
-            )
+            self.learning_status = QLabel("История загрузится при открытии этого раздела.")
             learning_layout.addWidget(self.learning_status)
-            self.learning_history = QTableWidget(0, 8)
+            self.learning_history = QTableWidget(0, 7)
             self.learning_history.setHorizontalHeaderLabels(
                 [
                     "Роль",
@@ -250,20 +259,28 @@ class PersonDialog(QDialog):
                     "План",
                     "Факт",
                     "Посещение",
-                    "Отмена",
                 ]
             )
             self.learning_history.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             self.learning_history.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
             self.learning_history.verticalHeader().setVisible(False)
-            self.learning_history.horizontalHeader().setStretchLastSection(True)
+            learning_header = self.learning_history.horizontalHeader()
+            for column in range(7):
+                learning_header.setSectionResizeMode(
+                    column,
+                    QHeaderView.ResizeMode.Stretch
+                    if column in {2, 3, 6}
+                    else QHeaderView.ResizeMode.ResizeToContents,
+                )
             self.learning_history.itemDoubleClicked.connect(self._open_history_lesson)
             learning_layout.addWidget(self.learning_history, 1)
             self.presence_history = QTableWidget(0, 2)
             self.presence_history.setHorizontalHeaderLabels(["Приход в клуб", "Уход из клуба"])
             self.presence_history.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             self.presence_history.verticalHeader().setVisible(False)
-            self.presence_history.horizontalHeader().setStretchLastSection(True)
+            self.presence_history.horizontalHeader().setSectionResizeMode(
+                QHeaderView.ResizeMode.Stretch
+            )
             learning_layout.addWidget(self.presence_history)
             self.sections.addTab(learning_page, "Учебный процесс")
         layout.addWidget(self.sections, 1)
@@ -296,8 +313,7 @@ class PersonDialog(QDialog):
         rows: list[tuple[str, dict[str, Any]]] = []
         rows.extend(("Ученик", item) for item in result.get("student", {}).get("lessons", []))
         rows.extend(
-            ("Преподаватель", item)
-            for item in result.get("teacher", {}).get("lessons", [])
+            ("Преподаватель", item) for item in result.get("teacher", {}).get("lessons", [])
         )
         rows.sort(key=lambda pair: str(pair[1].get("start_at", "")), reverse=True)
         self.learning_history.setRowCount(len(rows))
@@ -326,16 +342,14 @@ class PersonDialog(QDialog):
                 }.get(lesson.get("cancelled_by"), "неизвестно кем")
                 cancelled_at = lesson.get("cancelled_at")
                 when = (
-                    datetime.fromisoformat(cancelled_at).astimezone().strftime(
-                        "%d.%m.%Y %H:%M"
-                    )
+                    datetime.fromisoformat(cancelled_at).astimezone().strftime("%d.%m.%Y %H:%M")
                     if cancelled_at
                     else "время не указано"
                 )
                 cancellation = (
-                    f"{actor}, {when}: "
-                    f"{lesson.get('cancellation_reason') or 'без причины'}"
+                    f"{actor}, {when}: {lesson.get('cancellation_reason') or 'без причины'}"
                 )
+                attendance = f"Отменено {actor}"
             values = [
                 role,
                 f"{start:%d.%m.%Y}",
@@ -347,11 +361,12 @@ class PersonDialog(QDialog):
                 f"{start:%H:%M}–{end:%H:%M}",
                 fact,
                 attendance,
-                cancellation,
             ]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
                 cell.setData(Qt.ItemDataRole.UserRole, lesson.get("id"))
+                if cancellation != "—":
+                    cell.setToolTip(cancellation)
                 self.learning_history.setItem(row, column, cell)
         presence = result.get("student", {}).get("presence", [])
         self.presence_history.setRowCount(len(presence))
@@ -364,9 +379,7 @@ class PersonDialog(QDialog):
                     else "—"
                 )
                 self.presence_history.setItem(row, column, QTableWidgetItem(text_value))
-        self.learning_status.setText(
-            "Дважды щёлкните по занятию, чтобы открыть его карточку."
-        )
+        self.learning_status.setText("Дважды щёлкните по занятию, чтобы открыть его карточку.")
 
     def _open_history_lesson(self, item: QTableWidgetItem) -> None:
         lesson_id = item.data(Qt.ItemDataRole.UserRole)
@@ -378,6 +391,12 @@ class PersonDialog(QDialog):
         return str(value) if value else None
 
     def _role_changed(self) -> None:
+        if (
+            not self.person.get("id")
+            and not self.max_auth_phone.text().strip()
+            and (self.role_checks["parent"].isChecked() or self.role_checks["teacher"].isChecked())
+        ):
+            self.max_auth_phone.setText(self.phone.text())
         previous = self._target_role()
         targets = []
         if self.role_checks["student"].isChecked():
@@ -473,9 +492,11 @@ class PersonDialog(QDialog):
 
     def payload(self) -> dict[str, Any]:
         digits = "".join(c for c in self.phone.text() if c.isdigit())
+        auth_digits = "".join(c for c in self.max_auth_phone.text() if c.isdigit())
         return {
             "full_name": " ".join(self.full_name.text().split()),
             "phone": "+" + digits,
+            "max_auth_phone": "+" + auth_digits if len(auth_digits) == 11 else None,
             "roles": [role for role, check in self.role_checks.items() if check.isChecked()],
             "active": self.active.isChecked(),
         }

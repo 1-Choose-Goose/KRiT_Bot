@@ -29,16 +29,29 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
             )
             headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
 
-            async def person(name: str, phone: str, roles: list[str]) -> int:
+            async def person(
+                name: str, phone: str, roles: list[str], *, active: bool = True
+            ) -> int:
                 response = await client.post(
                     "/api/v1/people",
                     headers=headers,
-                    json={"full_name": name, "phone": phone, "roles": roles},
+                    json={
+                        "full_name": name,
+                        "phone": phone,
+                        "roles": roles,
+                        "active": active,
+                    },
                 )
                 assert response.status_code == 201, response.text
                 return int(response.json()["id"])
 
             teacher = await person("Иванова Мария Сергеевна", "+79000000001", ["teacher", "parent"])
+            teacher_without_bot_access = await person(
+                "Быков Валерий Андреевич",
+                "+79000000007",
+                ["teacher"],
+                active=True,
+            )
             student_one = await person("Петров Иван Олегович", "+79000000002", ["student"])
             student_two = await person("Сидорова Анна Ильинична", "+79000000003", ["student"])
             student_three = await person("Орлов Пётр Андреевич", "+79000000004", ["student"])
@@ -46,7 +59,11 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
             subject_response = await client.post(
                 "/api/v1/learning/subjects",
                 headers=headers,
-                json={"name": "Робототехника", "color": "#2563eb"},
+                json={
+                    "name": "Робототехника",
+                    "color": "#2563eb",
+                    "teacher_ids": [teacher, teacher_without_bot_access],
+                },
             )
             room_response = await client.post(
                 "/api/v1/learning/rooms",
@@ -70,6 +87,53 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
             assert created.status_code == 201, created.text
             lesson_id = created.json()["id"]
             assert len(created.json()["participants"]) == 2
+
+            group_response = await client.post(
+                "/api/v1/learning/groups",
+                headers=headers,
+                json={
+                    "name": "Группа робототехники",
+                    "subject_id": subject,
+                    "default_teacher_id": teacher,
+                    "default_duration_minutes": 60,
+                    "active": True,
+                },
+            )
+            assert group_response.status_code == 201, group_response.text
+            group_id = group_response.json()["id"]
+            membership_response = await client.post(
+                f"/api/v1/learning/groups/{group_id}/memberships",
+                headers=headers,
+                json={
+                    "person_id": student_one,
+                    "start_at": (datetime.now(UTC) - timedelta(days=2)).isoformat(),
+                    "end_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+                },
+            )
+            assert membership_response.status_code == 201, membership_response.text
+
+            references = await client.get("/api/v1/learning/reference-data", headers=headers)
+            assert references.status_code == 200
+            reference_teachers = {item["id"] for item in references.json()["teachers"]}
+            assert teacher_without_bot_access in reference_teachers
+            assert teacher_without_bot_access in references.json()["subjects"][0]["teacher_ids"]
+            group_reference = next(
+                item for item in references.json()["groups"] if item["id"] == group_id
+            )
+            assert [item["person_id"] for item in group_reference["memberships"]] == [student_one]
+
+            inactive_teacher_lesson = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **base,
+                    "teacher_id": teacher_without_bot_access,
+                    "start_at": (end + timedelta(hours=2)).isoformat(),
+                    "end_at": (end + timedelta(hours=3)).isoformat(),
+                    "participant_ids": [],
+                },
+            )
+            assert inactive_teacher_lesson.status_code == 201, inactive_teacher_lesson.text
 
             too_many = await client.post(
                 "/api/v1/learning/lessons",
@@ -192,6 +256,16 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
                 "+79000000005",
                 ["student", "teacher"],
             )
+            subject_update = await client.put(
+                f"/api/v1/learning/subjects/{subject}",
+                headers=headers,
+                json={
+                    "name": "Робототехника",
+                    "color": "#2563eb",
+                    "teacher_ids": [teacher, dual_role],
+                },
+            )
+            assert subject_update.status_code == 200, subject_update.text
             room_two = (
                 await client.post(
                     "/api/v1/learning/rooms",
@@ -252,6 +326,26 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
                 },
             )
             assert cannot_teach.status_code == 409
+
+            unrelated_teacher = await person(
+                "Учитель Другого Предмета",
+                "+79000000006",
+                ["teacher"],
+            )
+            not_qualified = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **base,
+                    "teacher_id": unrelated_teacher,
+                    "room_id": room_two,
+                    "start_at": (reverse_start + timedelta(days=2)).isoformat(),
+                    "end_at": (reverse_start + timedelta(days=2, hours=1)).isoformat(),
+                    "participant_ids": [],
+                },
+            )
+            assert not_qualified.status_code == 422
+            assert "не закреплён" in not_qualified.text
 
             archived = await client.post(f"/api/v1/people/{student_one}/archive", headers=headers)
             assert archived.status_code == 200

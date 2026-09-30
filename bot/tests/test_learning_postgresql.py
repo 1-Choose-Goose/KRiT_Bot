@@ -20,8 +20,9 @@ POSTGRES_URL = os.getenv("KRIT_TEST_POSTGRES_URL")
     reason="KRIT_TEST_POSTGRES_URL is required for the PostgreSQL concurrency test",
 )
 @pytest.mark.asyncio
-async def test_concurrent_room_booking_allows_only_one_lesson() -> None:
-    """Verify the PostgreSQL advisory lock closes the empty-result race."""
+@pytest.mark.parametrize("conflict_kind", ["room", "teacher", "student"])
+async def test_concurrent_booking_allows_only_one_lesson(conflict_kind: str) -> None:
+    """Verify PostgreSQL advisory locks close all person/resource empty-result races."""
     suffix = str(uuid4().int)[-10:]
     settings = Settings(
         database_url=str(POSTGRES_URL),
@@ -55,11 +56,16 @@ async def test_concurrent_room_booking_allows_only_one_lesson() -> None:
             teacher_two = await person(
                 f"Преподаватель Два {suffix}", f"+78{suffix[:9]}", ["teacher"]
             )
+            student = await person(f"Ученик Один {suffix}", f"+77{suffix[:9]}", ["student"])
             subject = (
                 await client.post(
                     "/api/v1/learning/subjects",
                     headers=headers,
-                    json={"name": f"Предмет {suffix}", "color": "#2563eb"},
+                    json={
+                        "name": f"Предмет {suffix}",
+                        "color": "#2563eb",
+                        "teacher_ids": [teacher_one, teacher_two],
+                    },
                 )
             ).json()["id"]
             room = (
@@ -67,6 +73,13 @@ async def test_concurrent_room_booking_allows_only_one_lesson() -> None:
                     "/api/v1/learning/rooms",
                     headers=headers,
                     json={"name": f"Кабинет {suffix}", "capacity": 10},
+                )
+            ).json()["id"]
+            room_two = (
+                await client.post(
+                    "/api/v1/learning/rooms",
+                    headers=headers,
+                    json={"name": f"Кабинет второй {suffix}", "capacity": 10},
                 )
             ).json()["id"]
             start = datetime.now(UTC) + timedelta(days=60)
@@ -78,16 +91,28 @@ async def test_concurrent_room_booking_allows_only_one_lesson() -> None:
                 "participant_ids": [],
             }
 
+            first_payload = {
+                **payload,
+                "teacher_id": teacher_one,
+                "room_id": room,
+                "participant_ids": [student] if conflict_kind == "student" else [],
+            }
+            second_payload = {
+                **payload,
+                "teacher_id": teacher_one if conflict_kind == "teacher" else teacher_two,
+                "room_id": room if conflict_kind == "room" else room_two,
+                "participant_ids": [student] if conflict_kind == "student" else [],
+            }
             first, second = await asyncio.gather(
                 client.post(
                     "/api/v1/learning/lessons",
                     headers=headers,
-                    json={**payload, "teacher_id": teacher_one},
+                    json=first_payload,
                 ),
                 client.post(
                     "/api/v1/learning/lessons",
                     headers=headers,
-                    json={**payload, "teacher_id": teacher_two},
+                    json=second_payload,
                 ),
             )
             assert sorted((first.status_code, second.status_code)) == [201, 409]

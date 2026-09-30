@@ -74,11 +74,12 @@ async def test_only_authorized_user_receives_echo() -> None:
     sessions = build_session_factory(engine)
     async with sessions() as session:
         person = Person(
-                full_name="Иван Иванов",
-                phone="+79990000000",
-                role_links=[PersonRole(role="student")],
-                active=True,
-            )
+            full_name="Иван Иванов",
+            phone="+79990000000",
+            max_auth_phone="+79990000000",
+            role_links=[PersonRole(role="student")],
+            active=True,
+        )
         session.add(person)
         await session.flush()
         session.add(
@@ -107,11 +108,11 @@ async def test_duplicate_message_is_ignored() -> None:
     sessions = build_session_factory(engine)
     async with sessions() as session:
         person = Person(
-                full_name="Иван Иванов",
-                phone="+79990000000",
-                role_links=[PersonRole(role="student")],
-                active=True,
-            )
+            full_name="Иван Иванов",
+            phone="+79990000000",
+            role_links=[PersonRole(role="student")],
+            active=True,
+        )
         session.add(person)
         await session.flush()
         session.add(
@@ -142,6 +143,7 @@ async def test_verified_contact_links_user_once() -> None:
             Person(
                 full_name="Иван Иванов",
                 phone="+79990000000",
+                max_auth_phone="+79990000000",
                 role_links=[PersonRole(role="student")],
                 active=True,
             )

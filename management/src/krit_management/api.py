@@ -52,8 +52,14 @@ class ManagementApi:
     def update_person(self, person_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("PUT", f"/people/{person_id}", json=payload)
 
-    def archive_person(self, person_id: int) -> dict[str, Any]:
-        return self._request("POST", f"/people/{person_id}/archive")
+    def archive_person(
+        self, person_id: int, *, resolve_future_student_dependencies: bool = False
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/people/{person_id}/archive",
+            json={"resolve_future_student_dependencies": resolve_future_student_dependencies},
+        )
 
     def restore_person(self, person_id: int) -> dict[str, Any]:
         return self._request("POST", f"/people/{person_id}/restore")
@@ -95,12 +101,30 @@ class ManagementApi:
         return data if isinstance(data, list) else []
 
     def create_learning_item(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._request("POST", f"/learning/{kind}", json=payload)
+        result = self._request("POST", f"/learning/{kind}", json=payload)
+        self._verify_subject_assignments(kind, payload, result)
+        return result
 
     def update_learning_item(
         self, kind: str, item_id: int, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        return self._request("PUT", f"/learning/{kind}/{item_id}", json=payload)
+        result = self._request("PUT", f"/learning/{kind}/{item_id}", json=payload)
+        self._verify_subject_assignments(kind, payload, result)
+        return result
+
+    @staticmethod
+    def _verify_subject_assignments(kind: str, payload: dict[str, Any], result: object) -> None:
+        if kind != "subjects" or "teacher_ids" not in payload:
+            return
+        if not isinstance(result, dict) or "teacher_ids" not in result:
+            raise ApiError(
+                "Сервер ещё не поддерживает закрепление преподавателей за предметами. "
+                "Обновите серверную часть программы и повторите сохранение."
+            )
+        requested = {int(value) for value in payload.get("teacher_ids") or []}
+        saved = {int(value) for value in result.get("teacher_ids") or []}
+        if requested != saved:
+            raise ApiError("Сервер сохранил не всех выбранных преподавателей")
 
     def create_lesson(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/learning/lessons", json=payload)
@@ -155,12 +179,8 @@ class ManagementApi:
             json=payload,
         )
 
-    def correct_actual_time(
-        self, lesson_id: int, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        return self._request(
-            "POST", f"/learning/lessons/{lesson_id}/correct-time", json=payload
-        )
+    def correct_actual_time(self, lesson_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", f"/learning/lessons/{lesson_id}/correct-time", json=payload)
 
     def read_admin_notification(self, notification_id: int) -> dict[str, Any]:
         return self._request("POST", f"/learning/admin-notifications/{notification_id}/read")
@@ -192,6 +212,27 @@ class ManagementApi:
         return self._request(
             "POST",
             f"/learning/lessons/{lesson_id}/participants/{person_id}/restore",
+        )
+
+    def leave_lesson_early(self, lesson_id: int, person_id: int, reason: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/learning/lessons/{lesson_id}/participants/{person_id}/leave-early",
+            json={"reason": reason},
+        )
+
+    def finish_lesson_early(
+        self, lesson_id: int, reason: str, public_comment: str = ""
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/learning/lessons/{lesson_id}/finish-early",
+            json={"reason": reason, "public_comment": public_comment or None},
+        )
+
+    def transition_lesson_teacher(self, lesson_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request(
+            "POST", f"/learning/lessons/{lesson_id}/teacher-transition", json=payload
         )
 
     def free_slots(

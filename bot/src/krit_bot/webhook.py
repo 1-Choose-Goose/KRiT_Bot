@@ -14,7 +14,7 @@ from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pwdlib import PasswordHash
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from .config import Settings
@@ -33,7 +33,15 @@ from .db import (
 )
 from .handler import EchoHandler
 from .learning import create_learning_router
-from .learning_models import PersonMaxIdentity
+from .learning_models import (
+    AuditEvent,
+    GroupMembership,
+    Lesson,
+    LessonParticipant,
+    NotificationJob,
+    PersonMaxIdentity,
+    StudyGroup,
+)
 from .learning_notifications import LearningNotificationWorker
 from .max_api import MaxApiClient
 from .polling import run_polling
@@ -64,14 +72,20 @@ class TokenView(BaseModel):
 class PersonPayload(BaseModel):
     full_name: str = Field(min_length=3, max_length=250)
     phone: str = Field(min_length=10, max_length=32)
+    max_auth_phone: str | None = Field(default=None, max_length=32)
     roles: list[str] = Field(default_factory=list, min_length=1)
     active: bool = True
+
+
+class ArchivePersonPayload(BaseModel):
+    resolve_future_student_dependencies: bool = False
 
 
 class RelatedPersonView(BaseModel):
     id: int
     full_name: str
     phone: str
+    max_auth_phone: str | None
     max_user_id: int | None
     active: bool
 
@@ -80,6 +94,7 @@ class PersonView(BaseModel):
     id: int
     full_name: str
     phone: str
+    max_auth_phone: str | None
     roles: list[str]
     active: bool
     max_user_id: int | None
@@ -111,6 +126,7 @@ def as_related(person: Person) -> RelatedPersonView:
             "id": person.id,
             "full_name": person.full_name,
             "phone": person.phone,
+            "max_auth_phone": person.max_auth_phone,
             "max_user_id": person.max_identity.max_user_id if person.max_identity else None,
             "active": person.active,
         }
@@ -122,6 +138,7 @@ def as_person_view(person: Person) -> PersonView:
         id=person.id,
         full_name=person.full_name,
         phone=person.phone,
+        max_auth_phone=person.max_auth_phone,
         roles=sorted(link.role for link in person.role_links),
         active=person.active,
         max_user_id=person.max_identity.max_user_id if person.max_identity else None,
@@ -131,7 +148,7 @@ def as_person_view(person: Person) -> PersonView:
     )
 
 
-def normalized_person_data(payload: PersonPayload) -> tuple[list[str], str]:
+def normalized_person_data(payload: PersonPayload) -> tuple[list[str], str, str | None]:
     roles = sorted(set(payload.roles))
     if not roles or not set(roles).issubset(ROLES):
         raise HTTPException(status_code=422, detail="Unknown role")
@@ -139,7 +156,13 @@ def normalized_person_data(payload: PersonPayload) -> tuple[list[str], str]:
         phone = normalize_phone(payload.phone)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Invalid phone") from exc
-    return roles, phone
+    max_auth_phone = None
+    if payload.max_auth_phone and payload.max_auth_phone.strip():
+        try:
+            max_auth_phone = normalize_phone(payload.max_auth_phone)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid MAX authorization phone") from exc
+    return roles, phone, max_auth_phone
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -415,6 +438,80 @@ def create_app(settings: Settings) -> FastAPI:
             )
             return [as_person_view(person) for person in people]
 
+    async def learning_dependencies(session: Any, person_id: int) -> dict[str, list[int]]:
+        now = utcnow()
+        teacher_lessons = list(
+            (
+                await session.scalars(
+                    select(Lesson.id).where(
+                        Lesson.teacher_id == person_id,
+                        Lesson.status.in_(["planned", "scheduled"]),
+                        Lesson.end_at > now,
+                    )
+                )
+            ).all()
+        )
+        default_groups = list(
+            (
+                await session.scalars(
+                    select(StudyGroup.id).where(
+                        StudyGroup.default_teacher_id == person_id,
+                        StudyGroup.active.is_(True),
+                    )
+                )
+            ).all()
+        )
+        student_lessons = list(
+            (
+                await session.scalars(
+                    select(LessonParticipant.id)
+                    .join(Lesson, Lesson.id == LessonParticipant.lesson_id)
+                    .where(
+                        LessonParticipant.person_id == person_id,
+                        LessonParticipant.attendance_status != "excused",
+                        Lesson.status.in_(["planned", "scheduled"]),
+                        Lesson.end_at > now,
+                    )
+                )
+            ).all()
+        )
+        memberships = list(
+            (
+                await session.scalars(
+                    select(GroupMembership.id).where(
+                        GroupMembership.person_id == person_id,
+                        GroupMembership.start_at <= now,
+                        or_(GroupMembership.end_at.is_(None), GroupMembership.end_at > now),
+                    )
+                )
+            ).all()
+        )
+        return {
+            "teacher_lessons": teacher_lessons,
+            "default_groups": default_groups,
+            "student_lessons": student_lessons,
+            "memberships": memberships,
+        }
+
+    def dependency_conflict(
+        dependencies: dict[str, list[int]], roles: set[str]
+    ) -> dict[str, Any] | None:
+        relevant = {
+            "teacher_lessons": dependencies["teacher_lessons"] if "teacher" in roles else [],
+            "default_groups": dependencies["default_groups"] if "teacher" in roles else [],
+            "student_lessons": dependencies["student_lessons"] if "student" in roles else [],
+            "memberships": dependencies["memberships"] if "student" in roles else [],
+        }
+        if not any(relevant.values()):
+            return None
+        return {
+            "code": "person_has_future_learning_dependencies",
+            "message": "Сначала разрешите будущие обязательства в учебном процессе",
+            "dependencies": {
+                key: {"count": len(ids), "ids": ids} for key, ids in relevant.items() if ids
+            },
+        }
+
     @app.post(
         "/api/v1/people",
         response_model=PersonView,
@@ -422,11 +519,12 @@ def create_app(settings: Settings) -> FastAPI:
         dependencies=[Depends(require_management_token)],
     )
     async def create_person(payload: PersonPayload) -> PersonView:
-        roles, phone = normalized_person_data(payload)
+        roles, phone, max_auth_phone = normalized_person_data(payload)
         async with sessions() as session:
             person = Person(
                 full_name=" ".join(payload.full_name.split()),
                 phone=phone,
+                max_auth_phone=max_auth_phone,
                 active=payload.active,
             )
             current_roles = {link.role: link for link in person.role_links}
@@ -441,7 +539,8 @@ def create_app(settings: Settings) -> FastAPI:
                 await session.commit()
             except IntegrityError as exc:
                 raise HTTPException(
-                    status_code=409, detail="Карточка с таким телефоном уже существует"
+                    status_code=409,
+                    detail="Этот телефон для авторизации MAX уже используется",
                 ) from exc
             await session.refresh(person)
             return as_person_view(person)
@@ -494,18 +593,25 @@ def create_app(settings: Settings) -> FastAPI:
         dependencies=[Depends(require_management_token)],
     )
     async def update_person(person_id: int, payload: PersonPayload) -> PersonView:
-        roles, phone = normalized_person_data(payload)
+        roles, phone, max_auth_phone = normalized_person_data(payload)
         async with sessions() as session:
             person = await session.get(Person, person_id)
             if person is None or person.archived_at is not None:
                 raise HTTPException(status_code=404)
             person.full_name = " ".join(payload.full_name.split())
             person.phone = phone
+            person.max_auth_phone = max_auth_phone
             if person.guardian_links and "student" not in roles:
                 raise HTTPException(status_code=409, detail="У клиента есть связанные родители")
             if person.student_links and "parent" not in roles:
                 raise HTTPException(status_code=409, detail="У клиента есть связанные ученики")
             current_roles = {link.role: link for link in person.role_links}
+            removed_roles = set(current_roles) - set(roles)
+            if removed_roles & {"student", "teacher"}:
+                dependencies = await learning_dependencies(session, person_id)
+                conflict = dependency_conflict(dependencies, removed_roles)
+                if conflict:
+                    raise HTTPException(status_code=409, detail=conflict)
             for role, link in current_roles.items():
                 if role not in roles:
                     await session.delete(link)
@@ -518,7 +624,8 @@ def create_app(settings: Settings) -> FastAPI:
                 await session.commit()
             except IntegrityError as exc:
                 raise HTTPException(
-                    status_code=409, detail="Карточка с таким телефоном уже существует"
+                    status_code=409,
+                    detail="Этот телефон для авторизации MAX уже используется",
                 ) from exc
             await session.refresh(person)
             return as_person_view(person)
@@ -526,15 +633,85 @@ def create_app(settings: Settings) -> FastAPI:
     @app.post(
         "/api/v1/people/{person_id}/archive",
         response_model=PersonView,
-        dependencies=[Depends(require_management_token)],
     )
-    async def archive_person(person_id: int) -> PersonView:
+    async def archive_person(
+        person_id: int,
+        payload: ArchivePersonPayload | None = None,
+        admin_id: int = Depends(require_management_token),
+    ) -> PersonView:
         async with sessions() as session:
             person = await session.get(Person, person_id)
             if person is None or person.archived_at is not None:
                 raise HTTPException(status_code=404)
-            person.archived_at = utcnow()
-            person.updated_at = utcnow()
+            dependencies = await learning_dependencies(session, person_id)
+            teacher_conflict = dependency_conflict(dependencies, {"teacher"})
+            if teacher_conflict:
+                raise HTTPException(status_code=409, detail=teacher_conflict)
+            student_conflict = dependency_conflict(dependencies, {"student"})
+            resolve_student = bool(payload and payload.resolve_future_student_dependencies)
+            if student_conflict and not resolve_student:
+                student_conflict["can_resolve_student_dependencies"] = True
+                raise HTTPException(status_code=409, detail=student_conflict)
+
+            archived_at = utcnow()
+            if student_conflict:
+                membership_ids = dependencies["memberships"]
+                participant_ids = dependencies["student_lessons"]
+                if membership_ids:
+                    await session.execute(
+                        update(GroupMembership)
+                        .where(GroupMembership.id.in_(membership_ids))
+                        .values(end_at=archived_at)
+                    )
+                if participant_ids:
+                    await session.execute(
+                        update(LessonParticipant)
+                        .where(LessonParticipant.id.in_(participant_ids))
+                        .values(
+                            attendance_status="excused",
+                            cancelled_at=archived_at,
+                            cancelled_by="administrator",
+                            cancelled_by_admin_id=admin_id,
+                            cancellation_reason="Архивирование карточки клиента",
+                        )
+                    )
+                    lesson_ids = list(
+                        (
+                            await session.scalars(
+                                select(LessonParticipant.lesson_id).where(
+                                    LessonParticipant.id.in_(participant_ids)
+                                )
+                            )
+                        ).all()
+                    )
+                    await session.execute(
+                        update(NotificationJob)
+                        .where(
+                            NotificationJob.lesson_id.in_(lesson_ids),
+                            NotificationJob.status.in_(["pending", "retry"]),
+                            or_(
+                                NotificationJob.recipient_person_id == person_id,
+                                NotificationJob.dedupe_key.like(
+                                    f"lesson:%:reminder:%student:{person_id}"
+                                ),
+                            ),
+                        )
+                        .values(status="cancelled", updated_at=archived_at)
+                    )
+                session.add(
+                    AuditEvent(
+                        actor_admin_id=admin_id,
+                        action="person.future_learning_resolved",
+                        entity_type="person",
+                        entity_id=person_id,
+                        details={
+                            "memberships": membership_ids,
+                            "lesson_participants": participant_ids,
+                        },
+                    )
+                )
+            person.archived_at = archived_at
+            person.updated_at = archived_at
             await session.commit()
             await session.refresh(person)
             return as_person_view(person)

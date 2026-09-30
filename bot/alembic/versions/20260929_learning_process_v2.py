@@ -34,9 +34,7 @@ def upgrade() -> None:
                 ["id"],
                 ondelete="SET NULL",
             )
-            batch.create_index(
-                "ix_learning_groups_default_teacher_id", ["default_teacher_id"]
-            )
+            batch.create_index("ix_learning_groups_default_teacher_id", ["default_teacher_id"])
         if "default_duration_minutes" not in group_columns:
             batch.add_column(
                 sa.Column(

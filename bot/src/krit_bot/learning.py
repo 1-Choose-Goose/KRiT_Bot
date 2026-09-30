@@ -7,7 +7,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -20,10 +22,12 @@ from .learning_models import (
     Lesson,
     LessonParticipant,
     LessonSeries,
+    LessonTeacherSegment,
     NotificationJob,
     Room,
     StudyGroup,
     Subject,
+    SubjectTeacher,
 )
 
 
@@ -34,6 +38,7 @@ class NamedPayload(BaseModel):
 
 class SubjectPayload(NamedPayload):
     color: str = Field(default="#2563eb", pattern=r"^#[0-9a-fA-F]{6}$")
+    teacher_ids: list[int] | None = None
 
 
 class RoomPayload(NamedPayload):
@@ -101,6 +106,30 @@ class CancelPayload(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class EarlyCompletionPayload(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+    public_comment: str | None = Field(default=None, max_length=500)
+
+
+class EarlyLeavePayload(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class TeacherTransitionPayload(BaseModel):
+    action: Literal["substitute", "finish_early"]
+    reason: str = Field(min_length=3, max_length=500)
+    replacement_teacher_id: int | None = None
+    public_comment: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_replacement(self) -> TeacherTransitionPayload:
+        if self.action == "substitute" and self.replacement_teacher_id is None:
+            raise ValueError("Для замены выберите нового преподавателя")
+        if self.action == "finish_early" and self.replacement_teacher_id is not None:
+            raise ValueError("При завершении занятия замена не назначается")
+        return self
+
+
 class ParticipantCancelPayload(BaseModel):
     cancelled_by: Literal["student", "guardian", "administrator"] = "administrator"
     cancelled_by_person_id: int | None = None
@@ -152,6 +181,91 @@ def _display_timezone(name: str) -> timezone | ZoneInfo:
 
 def _model(item: Any, *fields: str) -> dict[str, Any]:
     return {field: getattr(item, field) for field in fields}
+
+
+def _unique_admin_notifications(
+    items: list[AdminNotification],
+) -> list[AdminNotification]:
+    result: list[AdminNotification] = []
+    seen: set[tuple[object, ...]] = set()
+    for item in items:
+        key = (
+            ("lesson", item.lesson_id, item.kind)
+            if item.lesson_id is not None
+            else ("key", item.dedupe_key)
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+async def _teacher_segments(session: AsyncSession, lesson_id: int) -> list[LessonTeacherSegment]:
+    return list(
+        (
+            await session.scalars(
+                select(LessonTeacherSegment)
+                .where(LessonTeacherSegment.lesson_id == lesson_id)
+                .order_by(LessonTeacherSegment.started_at, LessonTeacherSegment.id)
+            )
+        ).all()
+    )
+
+
+async def _add_admin_notification(
+    session: AsyncSession,
+    *,
+    dedupe_key: str,
+    kind: str,
+    title: str,
+    message: str,
+    lesson_id: int | None,
+) -> bool:
+    values = {
+        "dedupe_key": dedupe_key,
+        "kind": kind,
+        "title": title,
+        "message": message,
+        "lesson_id": lesson_id,
+        "created_at": utcnow(),
+    }
+    existing = await session.execute(
+        AdminNotification.__table__.update()
+        .where(AdminNotification.dedupe_key == dedupe_key)
+        .values(title=title, message=message, lesson_id=lesson_id)
+    )
+    if existing.rowcount:
+        return False
+    if lesson_id is not None:
+        semantic_existing = await session.execute(
+            AdminNotification.__table__.update()
+            .where(
+                AdminNotification.lesson_id == lesson_id,
+                AdminNotification.kind == kind,
+            )
+            .values(title=title, message=message)
+        )
+        if semantic_existing.rowcount:
+            return False
+    dialect = session.bind.dialect.name if session.bind is not None else ""
+    if dialect == "postgresql":
+        result = await session.execute(
+            pg_insert(AdminNotification).values(**values).on_conflict_do_nothing()
+        )
+        return bool(result.rowcount)
+    if dialect == "sqlite":
+        result = await session.execute(
+            sqlite_insert(AdminNotification).values(**values).on_conflict_do_nothing()
+        )
+        return bool(result.rowcount)
+    try:
+        async with session.begin_nested():
+            session.add(AdminNotification(**values))
+            await session.flush()
+        return True
+    except IntegrityError:
+        return False
 
 
 async def _participants_for(
@@ -219,9 +333,43 @@ async def _references(
     )
     if is_teacher is None:
         raise HTTPException(422, "У выбранного человека нет роли учителя")
+    qualification = await session.get(
+        SubjectTeacher,
+        {"subject_id": subject.id, "teacher_id": teacher.id},
+    )
+    if qualification is None:
+        raise HTTPException(422, "Преподаватель не закреплён за выбранным предметом")
     if payload.group_id is not None and (group is None or not group.active):
         raise HTTPException(422, "Группа недоступна")
     return subject, teacher, room, group
+
+
+async def _replace_subject_teachers(
+    session: AsyncSession, subject_id: int, teacher_ids: list[int]
+) -> list[int]:
+    unique_ids = sorted(set(teacher_ids))
+    if unique_ids:
+        valid_ids = set(
+            (
+                await session.scalars(
+                    select(PersonRole.person_id)
+                    .join(Person, Person.id == PersonRole.person_id)
+                    .where(
+                        PersonRole.person_id.in_(unique_ids),
+                        PersonRole.role == "teacher",
+                        Person.active.is_(True),
+                        Person.archived_at.is_(None),
+                    )
+                )
+            ).all()
+        )
+        if valid_ids != set(unique_ids):
+            raise HTTPException(422, "Один или несколько преподавателей недоступны")
+    await session.execute(delete(SubjectTeacher).where(SubjectTeacher.subject_id == subject_id))
+    session.add_all(
+        [SubjectTeacher(subject_id=subject_id, teacher_id=teacher_id) for teacher_id in unique_ids]
+    )
+    return unique_ids
 
 
 async def _conflicts(
@@ -313,10 +461,49 @@ async def _conflicts(
                     "message": "Ученик уже занят",
                 }
             )
+    segment_query = (
+        select(LessonTeacherSegment, Lesson)
+        .join(Lesson, Lesson.id == LessonTeacherSegment.lesson_id)
+        .where(
+            Lesson.status == "in_progress",
+            LessonTeacherSegment.started_at < end_at,
+            or_(
+                LessonTeacherSegment.ended_at.is_(None),
+                LessonTeacherSegment.ended_at > start_at,
+            ),
+            LessonTeacherSegment.teacher_person_id.in_(checked_people),
+        )
+    )
+    if exclude_lesson_id is not None:
+        segment_query = segment_query.where(Lesson.id != exclude_lesson_id)
+    if exclude_lesson_ids:
+        segment_query = segment_query.where(Lesson.id.not_in(exclude_lesson_ids))
+    segment_rows = (await session.execute(segment_query)).all()
+    existing_keys = {
+        (entry.get("kind"), entry.get("lesson_id"), entry.get("person_id")) for entry in result
+    }
+    for segment, lesson in segment_rows:
+        kind = "teacher" if segment.teacher_person_id == teacher_id else "person"
+        key = (kind, lesson.id, None if kind == "teacher" else segment.teacher_person_id)
+        if key in existing_keys:
+            continue
+        result.append(
+            {
+                "kind": kind,
+                "lesson_id": lesson.id,
+                "person_id": segment.teacher_person_id,
+                "start_at": _db_utc(segment.started_at).isoformat(),
+                "message": "Человек уже занят как фактический преподаватель",
+            }
+        )
     return result
 
 
-def _lesson_view(item: Lesson, participants: list[LessonParticipant]) -> dict[str, Any]:
+def _lesson_view(
+    item: Lesson,
+    participants: list[LessonParticipant],
+    teacher_segments: list[LessonTeacherSegment] | None = None,
+) -> dict[str, Any]:
     now = utcnow()
     ready = bool(participants) and all(p.attendance_status != "expected" for p in participants)
     computed = item.status
@@ -339,6 +526,9 @@ def _lesson_view(item: Lesson, participants: list[LessonParticipant]) -> dict[st
             "actual_end_at",
             "status",
             "cancelled_reason",
+            "completion_type",
+            "completion_reason",
+            "completion_public_comment",
             "teacher_name_snapshot",
             "room_name_snapshot",
             "subject_name_snapshot",
@@ -348,6 +538,25 @@ def _lesson_view(item: Lesson, participants: list[LessonParticipant]) -> dict[st
         ),
         "computed_status": computed,
         "ready": ready,
+        "active_participant_count": sum(
+            participant.attendance_status != "excused" for participant in participants
+        ),
+        "excused_participant_count": sum(
+            participant.attendance_status == "excused" for participant in participants
+        ),
+        "teacher_segments": [
+            _model(
+                segment,
+                "id",
+                "teacher_person_id",
+                "teacher_name_snapshot",
+                "started_at",
+                "ended_at",
+                "segment_type",
+                "reason",
+            )
+            for segment in (teacher_segments or [])
+        ],
         "participants": [
             _model(
                 p,
@@ -364,6 +573,7 @@ def _lesson_view(item: Lesson, participants: list[LessonParticipant]) -> dict[st
                 "cancelled_by_person_id",
                 "cancelled_by_admin_id",
                 "cancellation_reason",
+                "early_leave_reason",
             )
             for p in participants
         ],
@@ -378,8 +588,6 @@ async def _queue_lesson_notifications(
 ) -> None:
     active_participants = [item for item in participants if item.attendance_status != "excused"]
     participant_ids = {item.person_id for item in active_participants}
-    if not participant_ids:
-        return
     people = {
         item.id: item
         for item in (
@@ -495,7 +703,15 @@ async def _queue_lesson_state_notifications(
     event: Literal["started", "finished"],
     center_timezone: str,
 ) -> None:
-    active = [item for item in participants if item.attendance_status != "excused"]
+    if event == "started":
+        active = [item for item in participants if item.attendance_status in {"present", "late"}]
+    else:
+        active = [
+            item
+            for item in participants
+            if item.attendance_status in {"present", "late", "left_early"}
+            or item.arrived_at is not None
+        ]
     ids = {item.person_id for item in active}
     if not ids:
         return
@@ -532,11 +748,22 @@ async def _queue_lesson_state_notifications(
                 f"Кабинет: {lesson.room_name_snapshot}"
             )
         else:
+            heading = (
+                "Занятие завершено досрочно"
+                if lesson.completion_type == "early"
+                else "Занятие завершено"
+            )
+            public_comment = (
+                f"\nКомментарий: {lesson.completion_public_comment}"
+                if lesson.completion_public_comment
+                else ""
+            )
             student_text = (
-                "Занятие завершено\n\n"
+                f"{heading}\n\n"
                 f"{lesson.subject_name_snapshot}\n"
                 f"Преподаватель: {lesson.teacher_name_snapshot}\n"
                 f"Фактически: {actual_start:%H:%M}–{actual_end:%H:%M}"
+                f"{public_comment}"
             )
         jobs = [(f"student:{person.id}", person.id, student_text)]
         name_parts = person.full_name.split()
@@ -550,11 +777,22 @@ async def _queue_lesson_state_notifications(
                     f"Кабинет: {lesson.room_name_snapshot}"
                 )
             else:
+                heading = (
+                    f"Занятие {first_name} завершено досрочно."
+                    if lesson.completion_type == "early"
+                    else f"Занятие {first_name} завершено."
+                )
+                public_comment = (
+                    f"\nКомментарий: {lesson.completion_public_comment}"
+                    if lesson.completion_public_comment
+                    else ""
+                )
                 text_value = (
-                    f"Занятие {first_name} завершено.\n\n"
+                    f"{heading}\n\n"
                     f"{lesson.subject_name_snapshot}\n"
                     f"Преподаватель: {lesson.teacher_name_snapshot}\n"
                     f"Фактически: {actual_start:%H:%M}–{actual_end:%H:%M}"
+                    f"{public_comment}"
                 )
             jobs.append((f"guardian:{guardian_id}:student:{person.id}", guardian_id, text_value))
         for suffix, recipient_id, text_value in jobs:
@@ -665,9 +903,7 @@ async def _ensure_admin_notifications(session: AsyncSession, now: datetime) -> N
                 f"Кабинет {lesson.room_name_snapshot}\n"
                 f"Прибыли {int(arrived or 0)} из {int(expected or 0)}"
             )
-        elif lesson.status in {"planned", "scheduled"} and start_at + timedelta(
-            minutes=5
-        ) <= now:
+        elif lesson.status in {"planned", "scheduled"} and start_at + timedelta(minutes=5) <= now:
             kind = "lesson_start_overdue"
             title = "Занятие не начато"
             message = (
@@ -685,21 +921,19 @@ async def _ensure_admin_notifications(session: AsyncSession, now: datetime) -> N
             )
         if kind is None:
             continue
-        exists = await session.scalar(
-            select(AdminNotification.id).where(
-                AdminNotification.kind == kind,
-                AdminNotification.lesson_id == lesson.id,
-            )
+        suffix = {
+            "lesson_starts_soon": "starting_soon",
+            "lesson_start_overdue": "not_started",
+            "lesson_finish_overdue": "not_finished",
+        }[kind]
+        await _add_admin_notification(
+            session,
+            dedupe_key=f"lesson:{lesson.id}:{suffix}",
+            kind=kind,
+            title=title,
+            message=message,
+            lesson_id=lesson.id,
         )
-        if exists is None:
-            session.add(
-                AdminNotification(
-                    kind=kind,
-                    title=title,
-                    message=message,
-                    lesson_id=lesson.id,
-                )
-            )
 
 
 def create_learning_router(
@@ -741,23 +975,79 @@ def create_learning_router(
                     )
                 ).all()
             )
+            subject_teacher_rows = (
+                await session.execute(select(SubjectTeacher.subject_id, SubjectTeacher.teacher_id))
+            ).all()
+            guardian_rows = (
+                await session.execute(
+                    select(
+                        StudentGuardian.student_id,
+                        Person.id,
+                        Person.full_name,
+                    )
+                    .join(Person, Person.id == StudentGuardian.guardian_id)
+                    .where(Person.archived_at.is_(None))
+                )
+            ).all()
+            membership_rows = (
+                await session.execute(
+                    select(
+                        GroupMembership.group_id,
+                        GroupMembership.person_id,
+                        GroupMembership.start_at,
+                        GroupMembership.end_at,
+                    ).order_by(GroupMembership.group_id, GroupMembership.start_at)
+                )
+            ).all()
+        teachers_by_subject: dict[int, list[int]] = {}
+        for subject_id, teacher_id in subject_teacher_rows:
+            teachers_by_subject.setdefault(int(subject_id), []).append(int(teacher_id))
+        guardians_by_student: dict[int, list[dict[str, Any]]] = {}
+        for student_id, guardian_id, full_name in guardian_rows:
+            guardians_by_student.setdefault(int(student_id), []).append(
+                {"id": int(guardian_id), "full_name": str(full_name)}
+            )
+        memberships_by_group: dict[int, list[dict[str, Any]]] = {}
+        for group_id, person_id, start_at, end_at in membership_rows:
+            memberships_by_group.setdefault(int(group_id), []).append(
+                {
+                    "person_id": int(person_id),
+                    "start_at": start_at.isoformat(),
+                    "end_at": end_at.isoformat() if end_at else None,
+                }
+            )
         return {
-            "subjects": [_model(x, "id", "name", "color", "active") for x in subjects],
+            "subjects": [
+                {
+                    **_model(x, "id", "name", "color", "active"),
+                    "teacher_ids": sorted(teachers_by_subject.get(x.id, [])),
+                }
+                for x in subjects
+            ],
             "rooms": [_model(x, "id", "name", "capacity", "active") for x in rooms],
             "groups": [
-                _model(
-                    x,
-                    "id",
-                    "name",
-                    "subject_id",
-                    "default_teacher_id",
-                    "default_duration_minutes",
-                    "active",
-                )
+                {
+                    **_model(
+                        x,
+                        "id",
+                        "name",
+                        "subject_id",
+                        "default_teacher_id",
+                        "default_duration_minutes",
+                        "active",
+                    ),
+                    "memberships": memberships_by_group.get(x.id, []),
+                }
                 for x in groups
             ],
             "teachers": [_model(x, "id", "full_name", "phone", "active") for x in teachers],
-            "students": [_model(x, "id", "full_name", "phone", "active") for x in students],
+            "students": [
+                {
+                    **_model(x, "id", "full_name", "phone", "active"),
+                    "guardians": guardians_by_student.get(x.id, []),
+                }
+                for x in students
+            ],
         }
 
     @router.post("/subjects", status_code=status.HTTP_201_CREATED)
@@ -768,10 +1058,17 @@ def create_learning_router(
             )
             session.add(item)
             try:
+                await session.flush()
+                teacher_ids = await _replace_subject_teachers(
+                    session, item.id, payload.teacher_ids or []
+                )
                 await session.commit()
             except IntegrityError as exc:
                 raise HTTPException(409, "Предмет с таким названием уже существует") from exc
-            return _model(item, "id", "name", "color", "active")
+            return {
+                **_model(item, "id", "name", "color", "active"),
+                "teacher_ids": teacher_ids,
+            }
 
     @router.put("/subjects/{item_id}")
     async def update_subject(item_id: int, payload: SubjectPayload) -> dict[str, Any]:
@@ -785,8 +1082,38 @@ def create_learning_router(
                 payload.active,
                 utcnow(),
             )
+            if payload.teacher_ids is None:
+                teacher_ids = sorted(
+                    (
+                        await session.scalars(
+                            select(SubjectTeacher.teacher_id).where(
+                                SubjectTeacher.subject_id == item.id
+                            )
+                        )
+                    ).all()
+                )
+            else:
+                requested_ids = set(payload.teacher_ids)
+                invalid_group = await session.scalar(
+                    select(StudyGroup.id).where(
+                        StudyGroup.subject_id == item.id,
+                        StudyGroup.default_teacher_id.is_not(None),
+                        StudyGroup.default_teacher_id.not_in(requested_ids)
+                        if requested_ids
+                        else StudyGroup.default_teacher_id.is_not(None),
+                    )
+                )
+                if invalid_group is not None:
+                    raise HTTPException(
+                        409,
+                        "Сначала измените преподавателя по умолчанию в связанных группах",
+                    )
+                teacher_ids = await _replace_subject_teachers(session, item.id, payload.teacher_ids)
             await session.commit()
-            return _model(item, "id", "name", "color", "active")
+            return {
+                **_model(item, "id", "name", "color", "active"),
+                "teacher_ids": teacher_ids,
+            }
 
     @router.post("/rooms", status_code=status.HTTP_201_CREATED)
     async def create_room(payload: RoomPayload) -> dict[str, Any]:
@@ -824,14 +1151,33 @@ def create_learning_router(
             if payload.subject_id and await session.get(Subject, payload.subject_id) is None:
                 raise HTTPException(422, "Предмет не найден")
             if payload.default_teacher_id is not None:
+                if payload.subject_id is None:
+                    raise HTTPException(422, "Для преподавателя группы выберите предмет")
+                teacher = await session.get(Person, payload.default_teacher_id)
                 teacher_role = await session.scalar(
                     select(PersonRole.person_id).where(
                         PersonRole.person_id == payload.default_teacher_id,
                         PersonRole.role == "teacher",
                     )
                 )
-                if teacher_role is None:
+                if (
+                    teacher_role is None
+                    or teacher is None
+                    or not teacher.active
+                    or teacher.archived_at is not None
+                ):
                     raise HTTPException(422, "Преподаватель группы не найден")
+                if (
+                    await session.get(
+                        SubjectTeacher,
+                        {
+                            "subject_id": payload.subject_id,
+                            "teacher_id": payload.default_teacher_id,
+                        },
+                    )
+                    is None
+                ):
+                    raise HTTPException(422, "Преподаватель не закреплён за предметом группы")
             item = StudyGroup(
                 name=" ".join(payload.name.split()),
                 subject_id=payload.subject_id,
@@ -861,14 +1207,33 @@ def create_learning_router(
             if item is None:
                 raise HTTPException(404)
             if payload.default_teacher_id is not None:
+                if payload.subject_id is None:
+                    raise HTTPException(422, "Для преподавателя группы выберите предмет")
+                teacher = await session.get(Person, payload.default_teacher_id)
                 teacher_role = await session.scalar(
                     select(PersonRole.person_id).where(
                         PersonRole.person_id == payload.default_teacher_id,
                         PersonRole.role == "teacher",
                     )
                 )
-                if teacher_role is None:
+                if (
+                    teacher_role is None
+                    or teacher is None
+                    or not teacher.active
+                    or teacher.archived_at is not None
+                ):
                     raise HTTPException(422, "Преподаватель группы не найден")
+                if (
+                    await session.get(
+                        SubjectTeacher,
+                        {
+                            "subject_id": payload.subject_id,
+                            "teacher_id": payload.default_teacher_id,
+                        },
+                    )
+                    is None
+                ):
+                    raise HTTPException(422, "Преподаватель не закреплён за предметом группы")
             item.name, item.subject_id, item.default_teacher_id = (
                 " ".join(payload.name.split()),
                 payload.subject_id,
@@ -912,11 +1277,18 @@ def create_learning_router(
     @router.post("/groups/{group_id}/memberships", status_code=status.HTTP_201_CREATED)
     async def add_membership(group_id: int, payload: MembershipPayload) -> dict[str, Any]:
         async with sessions() as session:
-            if (
-                await session.get(StudyGroup, group_id) is None
-                or await session.get(Person, payload.person_id) is None
-            ):
+            group = await session.get(StudyGroup, group_id)
+            person = await session.get(Person, payload.person_id)
+            if group is None or person is None:
                 raise HTTPException(404)
+            student_role = await session.scalar(
+                select(PersonRole.person_id).where(
+                    PersonRole.person_id == payload.person_id,
+                    PersonRole.role == "student",
+                )
+            )
+            if student_role is None or not person.active or person.archived_at is not None:
+                raise HTTPException(422, "В группу можно добавить только активного ученика")
             overlap = await session.scalar(
                 select(GroupMembership.id).where(
                     GroupMembership.group_id == group_id,
@@ -990,9 +1362,7 @@ def create_learning_router(
                         )
                     )
                 )
-            items = list(
-                (await session.scalars(query.order_by(Lesson.start_at))).all()
-            )
+            items = list((await session.scalars(query.order_by(Lesson.start_at))).all())
             ids = [x.id for x in items]
             participants = (
                 list(
@@ -1063,6 +1433,7 @@ def create_learning_router(
                     )
                 ).all()
             )
+            alerts = _unique_admin_notifications(alerts)
             await session.commit()
         by_lesson: dict[int, list[LessonParticipant]] = {}
         for participant in participants:
@@ -1092,18 +1463,17 @@ def create_learning_router(
             participants = list(
                 (
                     await session.scalars(
-                        select(LessonParticipant).where(
-                            LessonParticipant.lesson_id == lesson_id
-                        )
+                        select(LessonParticipant).where(LessonParticipant.lesson_id == lesson_id)
                     )
                 ).all()
             )
-            return _lesson_view(item, participants)
+            return _lesson_view(item, participants, await _teacher_segments(session, lesson_id))
 
     async def save_lesson(
         session: AsyncSession,
         payload: LessonPayload,
         *,
+        admin_id: int | None = None,
         series_id: int | None = None,
         exclude_id: int | None = None,
         conflict_exclude_ids: set[int] | None = None,
@@ -1156,10 +1526,28 @@ def create_learning_router(
             )
             session.add(item)
             await session.flush()
+            participant_links = [
+                LessonParticipant(
+                    lesson_id=item.id,
+                    person_id=person.id,
+                    person_name_snapshot=person.full_name,
+                )
+                for person in participants
+            ]
+            session.add_all(participant_links)
         else:
             item = await session.get(Lesson, exclude_id)
-            if item is None or item.status in {"completed", "cancelled"}:
-                raise HTTPException(409, "Завершённое или отменённое занятие изменять нельзя")
+            if item is None:
+                raise HTTPException(404)
+            if item.status not in {"planned", "scheduled"}:
+                raise HTTPException(
+                    409,
+                    {
+                        "code": "lesson_structural_update_forbidden",
+                        "message": "План занятия можно изменять только до его начала",
+                        "status": item.status,
+                    },
+                )
             item.subject_id, item.teacher_id, item.room_id, item.group_id = (
                 subject.id,
                 teacher.id,
@@ -1177,9 +1565,63 @@ def create_learning_router(
                 room.name,
                 subject.name,
             )
-            await session.execute(
-                LessonParticipant.__table__.delete().where(LessonParticipant.lesson_id == item.id)
+            current_participants = list(
+                (
+                    await session.scalars(
+                        select(LessonParticipant).where(LessonParticipant.lesson_id == item.id)
+                    )
+                ).all()
             )
+            current_by_person = {entry.person_id: entry for entry in current_participants}
+            desired_by_person = {person.id: person for person in participants}
+            for person_id, participant in current_by_person.items():
+                if person_id in desired_by_person:
+                    continue
+                has_history = any(
+                    (
+                        participant.attendance_status != "expected",
+                        participant.arrived_at is not None,
+                        participant.left_at is not None,
+                        participant.cancelled_at is not None,
+                        participant.cancellation_reason is not None,
+                        participant.early_leave_reason is not None,
+                    )
+                )
+                if has_history:
+                    continue
+                session.add(
+                    AuditEvent(
+                        actor_admin_id=admin_id,
+                        action="participant.plan_removed",
+                        entity_type="lesson_participant",
+                        entity_id=participant.id,
+                        details={
+                            "lesson_id": item.id,
+                            "person_id": participant.person_id,
+                            "before": {"attendance_status": participant.attendance_status},
+                        },
+                    )
+                )
+                await session.delete(participant)
+            participant_links = [
+                entry
+                for entry in current_participants
+                if entry.person_id in desired_by_person
+                or entry.attendance_status != "expected"
+                or entry.arrived_at is not None
+                or entry.left_at is not None
+                or entry.cancelled_at is not None
+            ]
+            for person_id, person in desired_by_person.items():
+                if person_id in current_by_person:
+                    continue
+                link = LessonParticipant(
+                    lesson_id=item.id,
+                    person_id=person.id,
+                    person_name_snapshot=person.full_name,
+                )
+                session.add(link)
+                participant_links.append(link)
             await session.execute(
                 NotificationJob.__table__.update()
                 .where(
@@ -1188,15 +1630,7 @@ def create_learning_router(
                 )
                 .values(status="cancelled")
             )
-        participant_links = [
-            LessonParticipant(
-                lesson_id=item.id,
-                person_id=person.id,
-                person_name_snapshot=person.full_name,
-            )
-            for person in participants
-        ]
-        session.add_all(participant_links)
+        await session.flush()
         await _queue_lesson_notifications(session, item, participant_links, center_timezone)
         return item
 
@@ -1225,7 +1659,7 @@ def create_learning_router(
         admin_id: int = Depends(require_management_token),
     ) -> dict[str, Any]:
         async with sessions() as session:
-            item = await save_lesson(session, payload)
+            item = await save_lesson(session, payload, admin_id=admin_id)
             item.created_by_admin_id = admin_id
             session.add(
                 AuditEvent(
@@ -1258,9 +1692,7 @@ def create_learning_router(
             existing_participants = list(
                 (
                     await session.scalars(
-                        select(LessonParticipant).where(
-                            LessonParticipant.lesson_id == lesson_id
-                        )
+                        select(LessonParticipant).where(LessonParticipant.lesson_id == lesson_id)
                     )
                 ).all()
             )
@@ -1274,7 +1706,7 @@ def create_learning_router(
                 "participant_ids": [item.person_id for item in existing_participants],
                 "notes": existing.notes,
             }
-            item = await save_lesson(session, payload, exclude_id=lesson_id)
+            item = await save_lesson(session, payload, admin_id=admin_id, exclude_id=lesson_id)
             session.add(
                 AuditEvent(
                     actor_admin_id=admin_id,
@@ -1338,7 +1770,9 @@ def create_learning_router(
                     participant_ids=payload.participant_ids,
                     notes=payload.notes,
                 )
-                item = await save_lesson(session, lesson_payload, series_id=series.id)
+                item = await save_lesson(
+                    session, lesson_payload, admin_id=admin_id, series_id=series.id
+                )
                 item.created_by_admin_id = admin_id
                 created.append(item.id)
             session.add(
@@ -1383,7 +1817,7 @@ def create_learning_router(
                 if anchor is None:
                     raise HTTPException(404, "Исходное занятие не входит в серию")
                 lessons = [item for item in lessons if item.start_at >= anchor.start_at]
-            lessons = [item for item in lessons if item.status not in {"completed", "cancelled"}]
+            lessons = [item for item in lessons if item.status in {"planned", "scheduled"}]
             if not lessons:
                 raise HTTPException(409, "В выбранной части серии нет изменяемых занятий")
             series.subject_id = payload.subject_id
@@ -1416,6 +1850,7 @@ def create_learning_router(
                 await save_lesson(
                     session,
                     lesson_payload,
+                    admin_id=admin_id,
                     exclude_id=existing.id,
                     conflict_exclude_ids=target_ids,
                 )
@@ -1431,6 +1866,58 @@ def create_learning_router(
             )
             await session.commit()
             return {"id": series.id, "lesson_ids": changed}
+
+    async def complete_lesson(
+        session: AsyncSession,
+        item: Lesson,
+        participants: list[LessonParticipant],
+        *,
+        admin_id: int,
+        completion_type: Literal["normal", "early"],
+        reason: str | None = None,
+        public_comment: str | None = None,
+    ) -> None:
+        if item.status != "in_progress":
+            raise HTTPException(409, "Занятие не идёт")
+        actual_end = utcnow()
+        for participant in participants:
+            if participant.attendance_status == "expected":
+                participant.attendance_status = "absent"
+            elif participant.attendance_status in {"present", "late"}:
+                participant.left_at = actual_end
+        for segment in await _teacher_segments(session, item.id):
+            if segment.ended_at is None:
+                segment.ended_at = actual_end
+        item.status = "completed"
+        item.actual_end_at = actual_end
+        item.updated_at = actual_end
+        item.completion_type = completion_type
+        item.completion_reason = reason.strip() if reason else None
+        item.completion_public_comment = (
+            public_comment.strip() if public_comment and public_comment.strip() else None
+        )
+        session.add(
+            AuditEvent(
+                actor_admin_id=admin_id,
+                action=(
+                    "lesson.finished_early" if completion_type == "early" else "lesson.finished"
+                ),
+                entity_type="lesson",
+                entity_id=item.id,
+                details={
+                    "completion_type": completion_type,
+                    "reason": item.completion_reason,
+                    "public_comment": item.completion_public_comment,
+                },
+            )
+        )
+        await _queue_lesson_state_notifications(
+            session,
+            item,
+            participants,
+            event="finished",
+            center_timezone=center_timezone,
+        )
 
     @router.post("/lessons/{lesson_id}/start")
     async def start_lesson(
@@ -1484,16 +1971,25 @@ def create_learning_router(
                     participant.attendance_status = "present"
                     participant.arrived_at = item.actual_start_at
                     participant.late_minutes = 0
-            if missing:
+            if not await _teacher_segments(session, item.id):
                 session.add(
-                    AdminNotification(
-                        kind="lesson_missing_participants",
-                        title="Не все участники пришли",
-                        message=(
-                            f"{item.subject_name_snapshot}: отсутствуют " + ", ".join(missing)
-                        ),
+                    LessonTeacherSegment(
                         lesson_id=item.id,
+                        teacher_person_id=item.teacher_id,
+                        teacher_name_snapshot=item.teacher_name_snapshot,
+                        started_at=item.actual_start_at,
+                        segment_type="primary",
+                        created_by_admin_id=admin_id,
                     )
+                )
+            if missing:
+                await _add_admin_notification(
+                    session,
+                    dedupe_key=f"lesson:{item.id}:missing_participants",
+                    kind="lesson_missing_participants",
+                    title="Не все участники пришли",
+                    message=(f"{item.subject_name_snapshot}: отсутствуют " + ", ".join(missing)),
+                    lesson_id=item.id,
                 )
             session.add(
                 AuditEvent(
@@ -1512,8 +2008,9 @@ def create_learning_router(
                 center_timezone=center_timezone,
             )
             await session.commit()
+            segments = await _teacher_segments(session, item.id)
             return {
-                **_lesson_view(item, participants),
+                **_lesson_view(item, participants, segments),
                 "warnings": (
                     [
                         {
@@ -1547,8 +2044,6 @@ def create_learning_router(
                     ).all()
                 )
                 return _lesson_view(item, participants)
-            if item.status != "in_progress":
-                raise HTTPException(409, "Занятие не идёт")
             participants = list(
                 (
                     await session.scalars(
@@ -1556,30 +2051,189 @@ def create_learning_router(
                     )
                 ).all()
             )
-            actual_end = utcnow()
-            for participant in participants:
-                if participant.attendance_status == "expected":
-                    participant.attendance_status = "absent"
-                elif participant.attendance_status in {"present", "late"}:
-                    participant.left_at = actual_end
-            item.status, item.actual_end_at, item.updated_at = "completed", actual_end, actual_end
-            session.add(
-                AuditEvent(
-                    actor_admin_id=admin_id,
-                    action="lesson.finished",
-                    entity_type="lesson",
-                    entity_id=item.id,
-                )
-            )
-            await _queue_lesson_state_notifications(
+            await complete_lesson(
                 session,
                 item,
                 participants,
-                event="finished",
-                center_timezone=center_timezone,
+                admin_id=admin_id,
+                completion_type="normal",
             )
             await session.commit()
-            return _lesson_view(item, participants)
+            return _lesson_view(item, participants, await _teacher_segments(session, item.id))
+
+    @router.post("/lessons/{lesson_id}/finish-early")
+    async def finish_lesson_early(
+        lesson_id: int,
+        payload: EarlyCompletionPayload,
+        admin_id: int = Depends(require_management_token),
+    ) -> dict[str, Any]:
+        async with sessions() as session:
+            item = await session.get(Lesson, lesson_id, with_for_update=True)
+            if item is None:
+                raise HTTPException(404)
+            participants = list(
+                (
+                    await session.scalars(
+                        select(LessonParticipant).where(LessonParticipant.lesson_id == lesson_id)
+                    )
+                ).all()
+            )
+            await complete_lesson(
+                session,
+                item,
+                participants,
+                admin_id=admin_id,
+                completion_type="early",
+                reason=payload.reason,
+                public_comment=payload.public_comment,
+            )
+            await session.commit()
+            return _lesson_view(item, participants, await _teacher_segments(session, item.id))
+
+    @router.post("/lessons/{lesson_id}/teacher-transition")
+    async def teacher_transition(
+        lesson_id: int,
+        payload: TeacherTransitionPayload,
+        admin_id: int = Depends(require_management_token),
+    ) -> dict[str, Any]:
+        async with sessions() as session:
+            lesson = await session.get(Lesson, lesson_id, with_for_update=True)
+            if lesson is None:
+                raise HTTPException(404)
+            participants = list(
+                (
+                    await session.scalars(
+                        select(LessonParticipant).where(LessonParticipant.lesson_id == lesson_id)
+                    )
+                ).all()
+            )
+            if lesson.status != "in_progress":
+                raise HTTPException(409, "Смена преподавателя доступна только во время занятия")
+            if payload.action == "finish_early":
+                await complete_lesson(
+                    session,
+                    lesson,
+                    participants,
+                    admin_id=admin_id,
+                    completion_type="early",
+                    reason=payload.reason,
+                    public_comment=payload.public_comment,
+                )
+                await session.commit()
+                return _lesson_view(
+                    lesson, participants, await _teacher_segments(session, lesson.id)
+                )
+
+            replacement_id = int(payload.replacement_teacher_id or 0)
+            replacement = await session.get(Person, replacement_id)
+            teacher_role = await session.scalar(
+                select(PersonRole.person_id).where(
+                    PersonRole.person_id == replacement_id,
+                    PersonRole.role == "teacher",
+                )
+            )
+            if (
+                replacement is None
+                or teacher_role is None
+                or not replacement.active
+                or replacement.archived_at is not None
+            ):
+                raise HTTPException(422, "Новый преподаватель недоступен")
+            if any(entry.person_id == replacement_id for entry in participants):
+                raise HTTPException(409, "Участник занятия не может быть его преподавателем")
+            qualification = await session.get(
+                SubjectTeacher,
+                {"subject_id": lesson.subject_id, "teacher_id": replacement_id},
+            )
+            if qualification is None:
+                raise HTTPException(422, "Преподаватель не закреплён за этим предметом")
+            replacement_at = utcnow()
+            expected_end = max(_db_utc(lesson.end_at), replacement_at + timedelta(minutes=1))
+            conflicts = await _conflicts(
+                session,
+                start_at=replacement_at,
+                end_at=expected_end,
+                teacher_id=replacement_id,
+                room_id=-1,
+                participant_ids=set(),
+                exclude_lesson_id=lesson.id,
+            )
+            if conflicts:
+                raise HTTPException(
+                    409,
+                    {
+                        "message": "Новый преподаватель занят",
+                        "conflicts": conflicts,
+                    },
+                )
+            segments = await _teacher_segments(session, lesson.id)
+            current = next(
+                (segment for segment in reversed(segments) if segment.ended_at is None), None
+            )
+            if current is None:
+                raise HTTPException(409, "У занятия отсутствует активный преподаватель")
+            if current.teacher_person_id == replacement_id:
+                raise HTTPException(409, "Этот преподаватель уже ведёт занятие")
+            current.ended_at = replacement_at
+            current.reason = payload.reason.strip()
+            replacement_segment = LessonTeacherSegment(
+                lesson_id=lesson.id,
+                teacher_person_id=replacement.id,
+                teacher_name_snapshot=replacement.full_name,
+                started_at=replacement_at,
+                segment_type="substitute",
+                reason=payload.reason.strip(),
+                created_by_admin_id=admin_id,
+            )
+            session.add(replacement_segment)
+            active_names = [
+                entry.person_name_snapshot
+                for entry in participants
+                if entry.attendance_status not in {"excused", "absent", "left_early"}
+            ]
+            local_end = expected_end.astimezone(_display_timezone(center_timezone))
+            students_text = (
+                "\n".join(f"• {name}" for name in active_names)
+                if active_names
+                else "пока нет участников"
+            )
+            session.add(
+                NotificationJob(
+                    dedupe_key=(
+                        f"lesson:{lesson.id}:teacher_replacement:"
+                        f"{replacement.id}:{replacement_at.isoformat()}"
+                    ),
+                    event_type="lesson_teacher_replacement",
+                    lesson_id=lesson.id,
+                    recipient_person_id=replacement.id,
+                    scheduled_at=replacement_at,
+                    payload={
+                        "text": (
+                            "Вам назначена замена.\n\n"
+                            f"{lesson.subject_name_snapshot}\n"
+                            f"Сегодня до {local_end:%H:%M}\n"
+                            f"Кабинет: {lesson.room_name_snapshot}\n\n"
+                            f"Ученики:\n{students_text}"
+                        )
+                    },
+                )
+            )
+            session.add(
+                AuditEvent(
+                    actor_admin_id=admin_id,
+                    action="lesson.teacher_replaced",
+                    entity_type="lesson",
+                    entity_id=lesson.id,
+                    details={
+                        "before_teacher_id": current.teacher_person_id,
+                        "replacement_teacher_id": replacement.id,
+                        "replacement_at": replacement_at.isoformat(),
+                        "reason": payload.reason.strip(),
+                    },
+                )
+            )
+            await session.commit()
+            return _lesson_view(lesson, participants, await _teacher_segments(session, lesson.id))
 
     @router.post("/lessons/{lesson_id}/cancel")
     async def cancel_lesson(
@@ -1602,8 +2256,11 @@ def create_learning_router(
                     ).all()
                 )
                 return _lesson_view(item, participants)
-            if item.status == "completed":
-                raise HTTPException(409, "Завершённое занятие отменить нельзя")
+            if item.status not in {"planned", "scheduled"}:
+                raise HTTPException(
+                    409,
+                    "Отменить можно только занятие, которое фактически не начиналось",
+                )
             item.status, item.cancelled_reason, item.updated_at = (
                 "cancelled",
                 payload.reason,
@@ -1673,20 +2330,39 @@ def create_learning_router(
         payload: AttendancePayload,
         admin_id: int = Depends(require_management_token),
     ) -> dict[str, Any]:
-        allowed = {"expected", "present", "late", "absent", "left_early", "excused"}
+        allowed = {"expected", "present", "late", "absent"}
         if payload.status not in allowed:
             raise HTTPException(422, "Неизвестный статус посещения")
         async with sessions() as session:
+            lesson = await session.get(Lesson, lesson_id)
             item = await session.scalar(
                 select(LessonParticipant).where(
                     LessonParticipant.lesson_id == lesson_id,
                     LessonParticipant.person_id == person_id,
                 )
             )
-            if item is None:
+            if lesson is None or item is None:
                 raise HTTPException(404)
+            if lesson.status in {"completed", "cancelled"}:
+                raise HTTPException(
+                    409,
+                    "После завершения занятия используйте специальную корректировку",
+                )
+            if item.attendance_status == "excused":
+                raise HTTPException(409, "Сначала явно восстановите отменённое участие")
+            if item.attendance_status == "left_early":
+                raise HTTPException(
+                    409, "Досрочно завершённое участие изменяется только корректировкой"
+                )
             before = {"status": item.attendance_status, "note": item.note}
+            became_active = (
+                lesson.status == "in_progress"
+                and item.attendance_status not in {"present", "late"}
+                and payload.status in {"present", "late"}
+            )
             item.attendance_status, item.note = payload.status, payload.note
+            if payload.status in {"present", "late"} and item.arrived_at is None:
+                item.arrived_at = utcnow()
             session.add(
                 AuditEvent(
                     actor_admin_id=admin_id,
@@ -1699,6 +2375,14 @@ def create_learning_router(
                     },
                 )
             )
+            if became_active:
+                await _queue_lesson_state_notifications(
+                    session,
+                    lesson,
+                    [item],
+                    event="started",
+                    center_timezone=center_timezone,
+                )
             await session.commit()
             return _model(
                 item,
@@ -1710,6 +2394,87 @@ def create_learning_router(
                 "late_minutes",
                 "note",
             )
+
+    @router.post("/lessons/{lesson_id}/participants/{person_id}/leave-early")
+    async def participant_leave_early(
+        lesson_id: int,
+        person_id: int,
+        payload: EarlyLeavePayload,
+        admin_id: int = Depends(require_management_token),
+    ) -> dict[str, Any]:
+        async with sessions() as session:
+            lesson = await session.get(Lesson, lesson_id, with_for_update=True)
+            participant = await session.scalar(
+                select(LessonParticipant)
+                .where(
+                    LessonParticipant.lesson_id == lesson_id,
+                    LessonParticipant.person_id == person_id,
+                )
+                .with_for_update()
+            )
+            if lesson is None or participant is None:
+                raise HTTPException(404)
+            if lesson.status != "in_progress":
+                raise HTTPException(409, "Досрочный уход фиксируется только во время занятия")
+            if participant.attendance_status not in {"present", "late"}:
+                raise HTTPException(409, "Ученик фактически не участвует в занятии")
+            before = {
+                "attendance_status": participant.attendance_status,
+                "left_at": participant.left_at.isoformat() if participant.left_at else None,
+            }
+            participant.attendance_status = "left_early"
+            participant.left_at = utcnow()
+            participant.early_leave_reason = payload.reason.strip()
+            session.add(
+                AuditEvent(
+                    actor_admin_id=admin_id,
+                    action="participant.left_early",
+                    entity_type="lesson_participant",
+                    entity_id=participant.id,
+                    details={
+                        "before": before,
+                        "after": {
+                            "attendance_status": "left_early",
+                            "left_at": participant.left_at.isoformat(),
+                        },
+                        "reason": participant.early_leave_reason,
+                    },
+                )
+            )
+            active_count = await session.scalar(
+                select(func.count(LessonParticipant.id)).where(
+                    LessonParticipant.lesson_id == lesson_id,
+                    LessonParticipant.attendance_status.in_(["present", "late"]),
+                )
+            )
+            no_active_students = int(active_count or 0) == 0
+            if no_active_students:
+                await _add_admin_notification(
+                    session,
+                    dedupe_key=f"lesson:{lesson.id}:no_active_students",
+                    kind="lesson_no_active_students",
+                    title="В занятии больше нет участвующих учеников",
+                    message=(
+                        f"{lesson.subject_name_snapshot}\n"
+                        f"{lesson.room_name_snapshot}\n"
+                        f"Преподаватель: {lesson.teacher_name_snapshot}"
+                    ),
+                    lesson_id=lesson.id,
+                )
+            await session.commit()
+            return {
+                **_model(
+                    participant,
+                    "id",
+                    "person_id",
+                    "attendance_status",
+                    "arrived_at",
+                    "left_at",
+                    "early_leave_reason",
+                ),
+                "lesson_status": lesson.status,
+                "warning": "no_active_students" if no_active_students else None,
+            }
 
     @router.post(
         "/lessons/{lesson_id}/participants/{person_id}",
@@ -1821,16 +2586,24 @@ def create_learning_router(
         cancellation: ParticipantCancelPayload | None = None,
     ) -> dict[str, Any]:
         async with sessions() as session:
+            lesson = await session.get(Lesson, lesson_id)
             participant = await session.scalar(
                 select(LessonParticipant).where(
                     LessonParticipant.lesson_id == lesson_id,
                     LessonParticipant.person_id == person_id,
                 )
             )
-            if participant is None:
+            if participant is None or lesson is None:
                 raise HTTPException(404)
+            if lesson.status in {"completed", "cancelled"}:
+                raise HTTPException(409, "Состав завершённого занятия изменять нельзя")
+            if state == "excused" and (
+                participant.attendance_status != "expected" or participant.arrived_at is not None
+            ):
+                raise HTTPException(409, "Нельзя отменить уже начавшееся участие")
+            if state == "expected" and participant.attendance_status != "excused":
+                raise HTTPException(409, "Восстановить можно только отменённое участие")
             participant.attendance_status = state
-            lesson = await session.get(Lesson, lesson_id)
             if state == "excused":
                 if cancellation is None:
                     raise HTTPException(422, "Укажите причину отмены")
@@ -2032,9 +2805,7 @@ def create_learning_router(
                 "actual_start_at": lesson.actual_start_at.isoformat()
                 if lesson.actual_start_at
                 else None,
-                "actual_end_at": lesson.actual_end_at.isoformat()
-                if lesson.actual_end_at
-                else None,
+                "actual_end_at": lesson.actual_end_at.isoformat() if lesson.actual_end_at else None,
             }
             lesson.actual_start_at = _aware(payload.actual_start_at)
             lesson.actual_end_at = _aware(payload.actual_end_at)
@@ -2056,9 +2827,7 @@ def create_learning_router(
             participants = list(
                 (
                     await session.scalars(
-                        select(LessonParticipant).where(
-                            LessonParticipant.lesson_id == lesson_id
-                        )
+                        select(LessonParticipant).where(LessonParticipant.lesson_id == lesson_id)
                     )
                 ).all()
             )
@@ -2102,6 +2871,8 @@ def create_learning_router(
                 )
             ).all()
             for participant, lesson in active_participants:
+                if participant.attendance_status != "expected":
+                    continue
                 participant.arrived_at = now
                 participant.late_minutes = max(
                     0, int((now - _db_utc(lesson.start_at)).total_seconds() // 60)
@@ -2169,7 +2940,12 @@ def create_learning_router(
             ).all()
             warnings = []
             for participant, lesson in active:
+                if participant.attendance_status not in {"present", "late"}:
+                    continue
                 participant.left_at, participant.attendance_status = now, "left_early"
+                participant.early_leave_reason = (
+                    participant.early_leave_reason or "Уход из клуба во время занятия"
+                )
                 warnings.append(
                     {
                         "kind": "active_lesson",
@@ -2177,6 +2953,25 @@ def create_learning_router(
                         "message": "Участник ушёл во время занятия",
                     }
                 )
+                active_count = await session.scalar(
+                    select(func.count(LessonParticipant.id)).where(
+                        LessonParticipant.lesson_id == lesson.id,
+                        LessonParticipant.attendance_status.in_(["present", "late"]),
+                    )
+                )
+                if int(active_count or 0) == 0:
+                    await _add_admin_notification(
+                        session,
+                        dedupe_key=f"lesson:{lesson.id}:no_active_students",
+                        kind="lesson_no_active_students",
+                        title="В занятии больше нет участвующих учеников",
+                        message=(
+                            f"{lesson.subject_name_snapshot}\n"
+                            f"{lesson.room_name_snapshot}\n"
+                            f"Преподаватель: {lesson.teacher_name_snapshot}"
+                        ),
+                        lesson_id=lesson.id,
+                    )
             session.add(
                 AuditEvent(
                     actor_admin_id=admin_id,
@@ -2256,36 +3051,94 @@ def create_learning_router(
     @router.get("/history/teacher/{person_id}")
     async def teacher_history(person_id: int) -> dict[str, Any]:
         async with sessions() as session:
-            lessons = list(
+            segment_rows = (
+                await session.execute(
+                    select(LessonTeacherSegment, Lesson)
+                    .join(Lesson, Lesson.id == LessonTeacherSegment.lesson_id)
+                    .where(LessonTeacherSegment.teacher_person_id == person_id)
+                    .order_by(LessonTeacherSegment.started_at.desc())
+                )
+            ).all()
+            planned = list(
                 (
                     await session.scalars(
                         select(Lesson)
-                        .where(Lesson.teacher_id == person_id)
+                        .where(
+                            Lesson.teacher_id == person_id,
+                            Lesson.status.in_(["planned", "scheduled"]),
+                        )
                         .order_by(Lesson.start_at.desc())
                     )
                 ).all()
             )
-            ids = [item.id for item in lessons]
-            participants = (
-                list(
-                    (
-                        await session.scalars(
-                            select(LessonParticipant).where(LessonParticipant.lesson_id.in_(ids))
-                        )
-                    ).all()
+            factual = []
+            for segment, lesson in segment_rows:
+                segment_end = segment.ended_at or lesson.actual_end_at
+                duration = (
+                    max(
+                        0,
+                        int(
+                            (_db_utc(segment_end) - _db_utc(segment.started_at)).total_seconds()
+                            // 60
+                        ),
+                    )
+                    if segment_end is not None
+                    else None
                 )
-                if ids
-                else []
+                factual.append(
+                    {
+                        **_model(
+                            lesson,
+                            "id",
+                            "start_at",
+                            "end_at",
+                            "status",
+                            "subject_name_snapshot",
+                            "teacher_name_snapshot",
+                            "room_name_snapshot",
+                            "completion_type",
+                        ),
+                        "actual_start_at": segment.started_at,
+                        "actual_end_at": segment_end,
+                        "teacher_segment_id": segment.id,
+                        "teacher_segment_type": segment.segment_type,
+                        "teacher_segment_reason": segment.reason,
+                        "teacher_segment_minutes": duration,
+                        "actual_teacher_name": segment.teacher_name_snapshot,
+                    }
+                )
+            planned_views = [
+                {
+                    **_model(
+                        lesson,
+                        "id",
+                        "start_at",
+                        "end_at",
+                        "actual_start_at",
+                        "actual_end_at",
+                        "status",
+                        "subject_name_snapshot",
+                        "teacher_name_snapshot",
+                        "room_name_snapshot",
+                        "completion_type",
+                    ),
+                    "teacher_segment_type": "planned",
+                    "teacher_segment_minutes": None,
+                    "actual_teacher_name": None,
+                }
+                for lesson in planned
+            ]
+            lessons = sorted(
+                [*factual, *planned_views],
+                key=lambda value: _db_utc(value["start_at"]),
+                reverse=True,
             )
-            by_lesson: dict[int, list[LessonParticipant]] = {}
-            for participant in participants:
-                by_lesson.setdefault(participant.lesson_id, []).append(participant)
             return {
-                "lessons": [_lesson_view(item, by_lesson.get(item.id, [])) for item in lessons],
+                "lessons": lessons,
                 "summary": {
                     "total": len(lessons),
-                    "completed": sum(item.status == "completed" for item in lessons),
-                    "cancelled": sum(item.status == "cancelled" for item in lessons),
+                    "completed": sum(item["status"] == "completed" for item in lessons),
+                    "cancelled": sum(item["status"] == "cancelled" for item in lessons),
                 },
             }
 
@@ -2316,9 +3169,7 @@ def create_learning_router(
                         )
                     )
                 )
-            lessons = list(
-                (await session.scalars(query.order_by(Lesson.start_at))).all()
-            )
+            lessons = list((await session.scalars(query.order_by(Lesson.start_at))).all())
             counts = (
                 dict(
                     (
@@ -2327,7 +3178,10 @@ def create_learning_router(
                                 LessonParticipant.lesson_id,
                                 func.count(LessonParticipant.id),
                             )
-                            .where(LessonParticipant.lesson_id.in_([item.id for item in lessons]))
+                            .where(
+                                LessonParticipant.lesson_id.in_([item.id for item in lessons]),
+                                LessonParticipant.attendance_status != "excused",
+                            )
                             .group_by(LessonParticipant.lesson_id)
                         )
                     ).all()
@@ -2373,6 +3227,7 @@ def create_learning_router(
                     )
                 ).all()
             )
+            items = _unique_admin_notifications(items)
             await session.commit()
         return [
             _model(
@@ -2394,7 +3249,22 @@ def create_learning_router(
             item = await session.get(AdminNotification, notification_id)
             if item is None:
                 raise HTTPException(404)
-            item.read_at = utcnow()
+            now = utcnow()
+            if item.lesson_id is not None:
+                duplicates = list(
+                    (
+                        await session.scalars(
+                            select(AdminNotification).where(
+                                AdminNotification.lesson_id == item.lesson_id,
+                                AdminNotification.kind == item.kind,
+                            )
+                        )
+                    ).all()
+                )
+                for duplicate in duplicates:
+                    duplicate.read_at = now
+            else:
+                item.read_at = now
             await session.commit()
         return {"read": True}
 
@@ -2473,8 +3343,7 @@ def create_learning_router(
                 conflict = False
                 for lesson in busy:
                     if not (
-                        _db_utc(lesson.start_at) < candidate_end
-                        and _db_utc(lesson.end_at) > cursor
+                        _db_utc(lesson.start_at) < candidate_end and _db_utc(lesson.end_at) > cursor
                     ):
                         continue
                     lesson_people = participants_by_lesson.get(lesson.id, set())

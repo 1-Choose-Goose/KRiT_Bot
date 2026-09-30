@@ -31,6 +31,9 @@ QListWidget#mainNavigation::item:selected {
     background: #1b56c9; color: white; font-weight: 650;
 }
 QFrame#workspaceHeader { background: transparent; border: 0; }
+QFrame#controlPanel {
+    background: #f8faff; border: 1px solid #e1e7f0; border-radius: 9px;
+}
 QTabWidget#clientTabs::pane {
     background: white; border: 1px solid #dfe5ee; border-radius: 10px;
     top: -1px;
@@ -88,6 +91,9 @@ QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QAbstractSpinBox {
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus,
 QComboBox:focus, QAbstractSpinBox:focus { border: 1px solid #1b63db; }
 QLineEdit:read-only { background: #f4f6f9; color: #697386; }
+QLineEdit:disabled, QComboBox:disabled, QAbstractSpinBox:disabled {
+    background: #f2f4f7; color: #8b95a5; border-color: #e0e5ec;
+}
 QTextEdit, QPlainTextEdit { color: #172033; padding: 8px; }
 QAbstractSpinBox { padding-right: 28px; }
 QComboBox { padding-right: 30px; }
@@ -98,10 +104,57 @@ QComboBox::drop-down, QDateEdit::drop-down, QDateTimeEdit::drop-down {
 QComboBox::down-arrow, QDateEdit::down-arrow, QDateTimeEdit::down-arrow {
     image: url("%s"); width: 14px; height: 14px;
 }
+QComboBox::down-arrow:disabled, QDateEdit::down-arrow:disabled,
+QDateTimeEdit::down-arrow:disabled {
+    image: url("%s");
+}
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border; subcontrol-position: top right;
+    width: 28px; border: 0; border-left: 1px solid #e1e6ee;
+    border-bottom: 1px solid #e1e6ee; border-top-right-radius: 7px;
+    background: transparent;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border; subcontrol-position: bottom right;
+    width: 28px; border: 0; border-left: 1px solid #e1e6ee;
+    border-bottom-right-radius: 7px; background: transparent;
+}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+    background: #eef3fb;
+}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url("%s"); width: 12px; height: 12px;
+}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url("%s"); width: 12px; height: 12px;
+}
+QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled {
+    image: url("%s");
+}
+QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {
+    image: url("%s");
+}
 QComboBox QAbstractItemView {
     background: white; border: 1px solid #ccd5e2; border-radius: 7px;
     padding: 4px; outline: 0; selection-background-color: #e6efff;
     selection-color: #172033;
+}
+QComboBoxPrivateContainer {
+    background: white; border: 1px solid #ccd5e2; border-radius: 7px;
+}
+QComboBoxPrivateContainer QAbstractItemView,
+QAbstractItemView#searchCompleterPopup {
+    background: white; color: #172033; border: 1px solid #ccd5e2;
+    border-radius: 7px; padding: 4px; outline: 0;
+    selection-background-color: #e6efff; selection-color: #172033;
+}
+QAbstractItemView#searchCompleterPopup::item {
+    min-height: 28px; padding: 3px 8px; border-radius: 5px;
+}
+QAbstractItemView#searchCompleterPopup::item:hover,
+QAbstractItemView#searchCompleterPopup::item:selected {
+    background: #e6efff; color: #172033;
 }
 QCalendarWidget { background: white; border: 1px solid #ccd5e2; }
 QCalendarWidget QWidget#qt_calendar_navigationbar {
@@ -112,6 +165,8 @@ QCalendarWidget QToolButton {
     min-height: 24px; padding: 3px 8px; font-weight: 650;
 }
 QCalendarWidget QToolButton:hover { background: #e6efff; color: #164db3; }
+QCalendarWidget QToolButton#qt_calendar_prevmonth { qproperty-icon: url("%s"); }
+QCalendarWidget QToolButton#qt_calendar_nextmonth { qproperty-icon: url("%s"); }
 QCalendarWidget QSpinBox {
     background: white; color: #172033; border: 1px solid #ccd5e2;
     border-radius: 5px; padding: 3px 6px;
@@ -124,12 +179,37 @@ QCalendarWidget QAbstractItemView {
     selection-background-color: #1b63db; selection-color: white;
 }
 QCalendarWidget QAbstractItemView:disabled { color: #a4adba; }
+QScrollBar:vertical {
+    background: #f0f3f7; width: 12px; margin: 0; border: 0;
+}
+QScrollBar::handle:vertical {
+    background: #b5bfcc; min-height: 30px; border-radius: 5px; margin: 2px;
+}
+QScrollBar:horizontal {
+    background: #f0f3f7; height: 12px; margin: 0; border: 0;
+}
+QScrollBar::handle:horizontal {
+    background: #b5bfcc; min-width: 30px; border-radius: 5px; margin: 2px;
+}
+QScrollBar::handle:hover { background: #8f9cad; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; border: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 QHeaderView::section {
     background: #f2f5f9; color: #445066; border: 0;
     border-bottom: 1px solid #dfe5ee; padding: 8px; font-weight: 650;
 }
 QLabel#pageTitle { font-size: 24px; font-weight: 750; color: #15213a; }
 QLabel#sectionTitle { font-size: 17px; font-weight: 700; color: #1c2942; }
+QLabel#controlGroupLabel { color: #34435a; font-weight: 700; }
+QLabel#supportingText { color: #687386; padding: 1px 2px; }
+QLabel#formError {
+    color: #9f2635; background: #fdecef; border: 1px solid #efc5cb;
+    border-radius: 7px; padding: 8px 10px;
+}
+QLabel#emptyState {
+    color: #7b8798; background: #fafbfc; border: 1px dashed #d9e0ea;
+    border-radius: 8px; font-size: 14px;
+}
 QLabel#dialogTitle { font-size: 20px; font-weight: 750; color: #15213a; }
 QLabel#placeholder { color: #8590a3; font-size: 16px; }
 QLabel#connectionStatus {
@@ -157,10 +237,37 @@ QCheckBox::indicator:checked {
     background: #1b63db;
     image: url("%s");
 }
+QCheckBox::indicator:disabled {
+    border-color: #c5ccd7;
+    background: #f2f4f7;
+}
+QCheckBox::indicator:checked:disabled {
+    border-color: #7fa7e8;
+    background: #7fa7e8;
+    image: url("%s");
+}
 """
 
 ASSETS_DIR = Path(__file__).with_name("assets")
 APP_ICON = ASSETS_DIR / "app_icon.ico"
+
+
+def build_stylesheet() -> str:
+    def asset(name: str) -> str:
+        return (ASSETS_DIR / name).as_posix()
+
+    controls = STYLESHEET % (
+        asset("combo_chevron.svg"),
+        asset("chevron_down_disabled.svg"),
+        asset("chevron_up.svg"),
+        asset("combo_chevron.svg"),
+        asset("chevron_up_disabled.svg"),
+        asset("chevron_down_disabled.svg"),
+        asset("chevron_left.svg"),
+        asset("chevron_right.svg"),
+    )
+    check_asset = asset("checkbox_check.svg")
+    return controls + CHECKBOX_STYLESHEET % (check_asset, check_asset)
 
 
 def configure_windows_identity() -> None:
@@ -180,9 +287,7 @@ def run() -> None:
     app.setApplicationName("KRiT Management")
     app.setApplicationDisplayName("КРиТ · управление")
     app.setWindowIcon(QIcon(str(APP_ICON)))
-    chevron = (ASSETS_DIR / "combo_chevron.svg").as_posix()
-    checkmark = (ASSETS_DIR / "checkbox_check.svg").as_posix()
-    app.setStyleSheet(STYLESHEET % chevron + CHECKBOX_STYLESHEET % checkmark)
+    app.setStyleSheet(build_stylesheet())
 
     api = ManagementApi(API_URL)
     while True:

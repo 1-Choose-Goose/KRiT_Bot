@@ -43,6 +43,18 @@ class Subject(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class SubjectTeacher(Base):
+    __tablename__ = "learning_subject_teachers"
+    __table_args__ = (Index("ix_subject_teacher_teacher_id", "teacher_id"),)
+    subject_id: Mapped[int] = mapped_column(
+        ForeignKey("learning_subjects.id", ondelete="CASCADE"), primary_key=True
+    )
+    teacher_id: Mapped[int] = mapped_column(
+        ForeignKey("persons.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Room(Base):
     __tablename__ = "learning_rooms"
     __table_args__ = (CheckConstraint("capacity > 0", name="ck_room_capacity_positive"),)
@@ -146,6 +158,9 @@ class Lesson(Base):
     actual_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="planned")
     cancelled_reason: Mapped[str | None] = mapped_column(String(500))
+    completion_type: Mapped[str | None] = mapped_column(String(16))
+    completion_reason: Mapped[str | None] = mapped_column(String(500))
+    completion_public_comment: Mapped[str | None] = mapped_column(String(500))
     teacher_name_snapshot: Mapped[str] = mapped_column(String(250), nullable=False)
     room_name_snapshot: Mapped[str] = mapped_column(String(120), nullable=False)
     subject_name_snapshot: Mapped[str] = mapped_column(String(160), nullable=False)
@@ -193,6 +208,38 @@ class LessonParticipant(Base):
         ForeignKey("admin_users.id", ondelete="SET NULL"), index=True
     )
     cancellation_reason: Mapped[str | None] = mapped_column(String(500))
+    early_leave_reason: Mapped[str | None] = mapped_column(String(500))
+
+
+class LessonTeacherSegment(Base):
+    __tablename__ = "learning_lesson_teacher_segments"
+    __table_args__ = (
+        CheckConstraint(
+            "ended_at IS NULL OR ended_at >= started_at", name="ck_teacher_segment_period"
+        ),
+        CheckConstraint(
+            "segment_type IN ('primary','substitute')",
+            name="ck_teacher_segment_type",
+        ),
+        Index("ix_teacher_segment_lesson_period", "lesson_id", "started_at"),
+        Index("ix_teacher_segment_teacher_period", "teacher_person_id", "started_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lesson_id: Mapped[int] = mapped_column(
+        ForeignKey("learning_lessons.id", ondelete="CASCADE"), index=True
+    )
+    teacher_person_id: Mapped[int] = mapped_column(
+        ForeignKey("persons.id", ondelete="RESTRICT"), index=True
+    )
+    teacher_name_snapshot: Mapped[str] = mapped_column(String(250), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    segment_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(500))
+    created_by_admin_id: Mapped[int | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ClubPresenceSession(Base):
@@ -247,7 +294,12 @@ class NotificationJob(Base):
 
 class AdminNotification(Base):
     __tablename__ = "learning_admin_notifications"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_admin_notification_dedupe"),
+        UniqueConstraint("lesson_id", "kind", name="uq_admin_notification_lesson_kind"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dedupe_key: Mapped[str] = mapped_column(String(180), nullable=False)
     kind: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)

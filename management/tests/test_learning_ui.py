@@ -5,11 +5,26 @@ from datetime import UTC, datetime, timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSizeF
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtCore import QDate, QSizeF
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QDialog,
+    QPushButton,
+    QStyle,
+    QStyleOptionSpinBox,
+    QTableWidget,
+)
 
+from krit_management.api import ApiError, ManagementApi
 from krit_management.dialogs import PersonDialog
-from krit_management.learning_page import LessonDialog
+from krit_management.learning_page import (
+    FreeSlotDialog,
+    LearningPage,
+    LessonDialog,
+    ReferenceDialog,
+)
+from krit_management.main import build_stylesheet
 from krit_management.widgets import SearchableComboBox
 from krit_management.window import MainWindow
 
@@ -60,7 +75,66 @@ def test_main_window_loads_learning_calendar_without_worker_argument_error() -> 
         "Родители",
         "Все",
     ]
+    assert window.learning_page.calendar_date.displayFormat() == "dd.MM.yyyy"
+    assert window.learning_page.calendar_end.displayFormat() == "dd.MM.yyyy"
+    assert window.learning_page.calendar_table.horizontalScrollBar().maximum() == 0
+    assert all(button.text() != "Обновить" for button in window.findChildren(QPushButton))
+    assert window.refresh_timer.isActive()
+    assert window.learning_page.live_timer.isActive()
     window.close()
+    app.processEvents()
+    assert not window.refresh_timer.isActive()
+    assert not window.notification_timer.isActive()
+    assert not window.learning_page.live_timer.isActive()
+    assert window.learning_page._closing is True
+
+
+def test_reference_edit_is_available_from_rows_without_duplicate_button() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeApi())  # type: ignore[arg-type]
+    assert window.learning_page.pool.waitForDone(3_000)
+    assert window.pool.waitForDone(3_000)
+    app.processEvents()
+
+    reference_buttons = window.learning_page.reference_tabs.findChildren(QPushButton)
+    assert all(button.text() != "Изменить" for button in reference_buttons)
+    assert all(
+        "Дважды щёлкните" in table.toolTip()
+        for table in window.learning_page.reference_tables.values()
+    )
+    window.close()
+    app.processEvents()
+
+
+def test_spinbox_arrows_use_the_shared_vertical_control_style() -> None:
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(build_stylesheet())
+    dialog = ReferenceDialog("rooms", {"name": "Кабинет №1", "capacity": 12})
+    dialog.show()
+    app.processEvents()
+
+    option = QStyleOptionSpinBox()
+    dialog.capacity.initStyleOption(option)
+    up = dialog.capacity.style().subControlRect(
+        QStyle.ComplexControl.CC_SpinBox,
+        option,
+        QStyle.SubControl.SC_SpinBoxUp,
+        dialog.capacity,
+    )
+    down = dialog.capacity.style().subControlRect(
+        QStyle.ComplexControl.CC_SpinBox,
+        option,
+        QStyle.SubControl.SC_SpinBoxDown,
+        dialog.capacity,
+    )
+
+    assert up.x() == down.x()
+    assert up.width() == down.width()
+    assert 28 <= up.width() <= 29
+    assert up.top() < down.top()
+    assert "%s" not in app.styleSheet()
+    assert "QCheckBox::indicator:checked:disabled" in app.styleSheet()
+    dialog.close()
     app.processEvents()
 
 
@@ -77,6 +151,129 @@ def test_archive_action_buttons_are_not_clipped() -> None:
         for button in buttons
     )
     actions.deleteLater()
+    app.processEvents()
+
+
+def test_person_action_buttons_fit_actions_column_without_duplicate_learning_action() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeApi())  # type: ignore[arg-type]
+    assert window.learning_page.pool.waitForDone(3_000)
+    assert window.pool.waitForDone(3_000)
+    window.people = [
+        {
+            "id": 1,
+            "full_name": "Алексеев Александр",
+            "phone": "+79000000001",
+            "roles": ["student"],
+            "active": True,
+        }
+    ]
+    window._render_people()
+    actions = window.people_tables["student"].cellWidget(0, 3)
+    layout = actions.layout()
+    buttons = actions.findChildren(QPushButton)
+    occupied_width = (
+        sum(button.width() for button in buttons)
+        + layout.spacing() * (len(buttons) - 1)
+        + layout.contentsMargins().left()
+        + layout.contentsMargins().right()
+    )
+
+    assert occupied_width <= 330
+    assert [button.text() for button in buttons] == ["Карточка", "В архив"]
+    assert all(button.text() != "Обучение" for button in buttons)
+    window.close()
+    app.processEvents()
+
+
+def test_notification_center_deduplicates_and_uses_non_overlapping_footer(
+    monkeypatch,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeApi())  # type: ignore[arg-type]
+    assert window.learning_page.pool.waitForDone(3_000)
+    assert window.pool.waitForDone(3_000)
+    notifications = [
+        {
+            "id": notification_id,
+            "kind": "lesson_starts_soon",
+            "title": "Занятие через 10 минут",
+            "message": "Русский язык\nПрибыли 1 из 3",
+            "lesson_id": 77,
+            "created_at": "2026-09-29T10:50:00+05:00",
+            "read_at": None,
+        }
+        for notification_id in (1, 2)
+    ]
+    assert len(window._deduplicate_notifications(notifications)) == 1
+    monkeypatch.setattr(QDialog, "exec", lambda _dialog: QDialog.DialogCode.Rejected)
+
+    window._show_notification_center(notifications)
+    dialog = next(
+        child
+        for child in window.findChildren(QDialog)
+        if child.windowTitle() == "Центр уведомлений"
+    )
+    table = dialog.findChild(QTableWidget)
+    buttons = dialog.findChildren(QPushButton)
+
+    assert table.rowCount() == 1
+    assert {button.text() for button in buttons} >= {
+        "Открыть занятие",
+        "Прочитать",
+        "Прочитать все",
+        "Закрыть",
+    }
+    assert all(button.text() != "Отметить прочитанным" for button in buttons)
+    dialog.deleteLater()
+    window.close()
+    app.processEvents()
+
+
+def test_today_table_shows_current_participant_count() -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page._today_loaded(
+        {
+            "alerts": [],
+            "present": [],
+            "lessons": [
+                {
+                    "id": 1,
+                    "start_at": "2026-09-29T16:00:00+05:00",
+                    "end_at": "2026-09-29T17:00:00+05:00",
+                    "subject_name_snapshot": "Русский язык",
+                    "teacher_name_snapshot": "Рябова Галина Викторовна",
+                    "room_name_snapshot": "Кабинет №1",
+                    "participants": [
+                        {"person_id": 1, "attendance_status": "present"},
+                        {"person_id": 2, "attendance_status": "absent"},
+                        {"person_id": 3, "attendance_status": "late"},
+                    ],
+                    "status": "planned",
+                }
+            ],
+        }
+    )
+
+    assert page.today_lessons.horizontalHeaderItem(4).text() == "Участники"
+    assert page.today_lessons.item(0, 4).text() == "3"
+    page.shutdown()
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_lesson_dialog_gives_participant_list_more_space() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = LessonDialog(
+        {"subjects": [], "teachers": [], "rooms": [], "groups": [], "students": []}
+    )
+
+    assert dialog.minimumWidth() >= 800
+    assert dialog.height() >= 840
+    assert dialog.students.minimumHeight() >= 290
+    dialog.deleteLater()
     app.processEvents()
 
 
@@ -107,6 +304,7 @@ def test_dense_schedule_is_paginated_and_html_escaped() -> None:
 
 def test_searchable_combo_matches_prefix_of_surname_or_name() -> None:
     app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(build_stylesheet())
     combo = SearchableComboBox()
     combo.addItems(
         [
@@ -123,7 +321,160 @@ def test_searchable_combo_matches_prefix_of_surname_or_name() -> None:
     combo._search("мар")
     assert combo._proxy.rowCount() == 1
     assert combo._proxy.index(0, 0).data() == "Смирнова Мария Алексеевна"
+    assert combo.completer().popup().objectName() == "searchCompleterPopup"
+    assert "QAbstractItemView#searchCompleterPopup" in app.styleSheet()
     combo.deleteLater()
+
+    data_combo = SearchableComboBox()
+    data_combo.addItem("Не выбран", None)
+    data_combo.addItem("Быков Валерий Андреевич", 42)
+    data_combo.setEditText("Быков Валерий Андреевич")
+    assert data_combo.currentData() == 42
+    data_combo.deleteLater()
+    app.processEvents()
+
+
+def test_group_teacher_typed_from_search_is_saved_as_identifier() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = ReferenceDialog(
+        "groups",
+        {"name": "Группа №15"},
+        references={
+            "subjects": [{"id": 1, "name": "Информатика"}],
+            "teachers": [{"id": 42, "full_name": "Быков Валерий Андреевич"}],
+        },
+    )
+    dialog.group_subject.setEditText("Информатика")
+    dialog.group_teacher.setEditText("Быков Валерий Андреевич")
+
+    payload = dialog.payload()
+
+    assert payload["subject_id"] == 1
+    assert payload["default_teacher_id"] == 42
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_subject_assignments_filter_teachers_in_group_and_lesson() -> None:
+    app = QApplication.instance() or QApplication([])
+    references = {
+        "subjects": [
+            {"id": 1, "name": "Информатика", "teacher_ids": [10]},
+            {"id": 2, "name": "Математика", "teacher_ids": [11]},
+        ],
+        "teachers": [
+            {
+                "id": 10,
+                "full_name": "Быков Валерий Андреевич",
+                "active": False,
+            },
+            {"id": 11, "full_name": "Иванова Мария Сергеевна"},
+        ],
+        "rooms": [{"id": 20, "name": "Кабинет №1"}],
+        "groups": [],
+        "students": [],
+    }
+    lesson = LessonDialog(references)
+    assert lesson.teacher.findData(10) >= 0
+    assert lesson.teacher.findData(11) == -1
+    lesson.subject.setCurrentIndex(lesson.subject.findData(2))
+    app.processEvents()
+    assert lesson.teacher.findData(10) == -1
+    assert lesson.teacher.findData(11) >= 0
+
+    group = ReferenceDialog("groups", {"name": "Группа"}, references=references)
+    group.group_subject.setCurrentIndex(group.group_subject.findData(1))
+    app.processEvents()
+    assert group.group_teacher.findData(10) >= 0
+    assert group.group_teacher.findData(11) == -1
+    lesson.deleteLater()
+    group.deleteLater()
+    app.processEvents()
+
+
+def test_subject_table_uses_visible_color_swatch_and_reports_old_server() -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page._references_loaded(
+        {
+            "subjects": [{"id": 1, "name": "Информатика", "color": "#c00000", "active": True}],
+            "rooms": [],
+            "groups": [],
+            "students": [],
+            "teachers": [],
+        }
+    )
+    table = page.reference_tables["subjects"]
+
+    assert table.cellWidget(0, 1) is not None
+    assert table.item(0, 2).text() == "Требуется обновление сервера"
+
+    try:
+        ManagementApi._verify_subject_assignments(
+            "subjects", {"teacher_ids": [10]}, {"id": 1, "name": "Информатика"}
+        )
+    except ApiError as exc:
+        assert "не поддерживает" in str(exc)
+    else:
+        raise AssertionError("Старый сервер должен быть обнаружен")
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_subject_dialog_uses_palette_button_and_saves_teacher_ids() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = ReferenceDialog(
+        "subjects",
+        {
+            "name": "Информатика",
+            "color": "#2563eb",
+            "teacher_ids": [10],
+        },
+        references={
+            "teachers": [
+                {"id": 10, "full_name": "Быков Валерий Андреевич"},
+                {"id": 11, "full_name": "Иванова Мария Сергеевна"},
+            ]
+        },
+    )
+
+    payload = dialog.payload()
+
+    assert dialog.color_button.text() == "Выбрать цвет"
+    assert payload["color"] == "#2563eb"
+    assert payload["teacher_ids"] == [10]
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_double_clicking_present_person_selects_departure_target() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeApi())  # type: ignore[arg-type]
+    assert window.learning_page.pool.waitForDone(3_000)
+    assert window.pool.waitForDone(3_000)
+    app.processEvents()
+    page = window.learning_page
+    page.presence_person.addItem("Пупкин Иван Пупкович", 77)
+    page._today_loaded(
+        {
+            "lessons": [],
+            "alerts": [],
+            "present": [
+                {
+                    "person_id": 77,
+                    "person_name": "Пупкин Иван Пупкович",
+                    "arrived_at": datetime.now(UTC).isoformat(),
+                }
+            ],
+        }
+    )
+
+    page._select_present_person(0)
+
+    assert page.presence_person.currentData() == 77
+    assert page.departure_button.isEnabled()
+    window.close()
     app.processEvents()
 
 
@@ -174,5 +525,283 @@ def test_group_defaults_fill_new_lesson_without_changing_override_support() -> N
 
     assert dialog.subject.currentData() == 1
     assert dialog.teacher.currentData() == 2
-    assert dialog.start.dateTime().secsTo(dialog.end.dateTime()) == 90 * 60
+    assert dialog.duration.value() == 90
+    assert dialog.end_display.text() == dialog._end_datetime().toString("HH:mm")
     dialog.deleteLater()
+
+
+def test_group_selection_loads_members_and_keeps_extra_student_available() -> None:
+    app = QApplication.instance() or QApplication([])
+    references = {
+        "subjects": [{"id": 1, "name": "Математика"}],
+        "teachers": [{"id": 2, "full_name": "Иванов Иван Иванович"}],
+        "rooms": [{"id": 3, "name": "Кабинет 2"}],
+        "groups": [
+            {
+                "id": 4,
+                "name": "Группа А",
+                "subject_id": 1,
+                "default_teacher_id": 2,
+                "default_duration_minutes": 60,
+                "memberships": [
+                    {
+                        "person_id": 10,
+                        "start_at": "2020-01-01T00:00:00",
+                        "end_at": None,
+                    },
+                    {
+                        "person_id": 11,
+                        "start_at": "2020-01-01T00:00:00+05:00",
+                        "end_at": None,
+                    },
+                ],
+            }
+        ],
+        "students": [
+            {"id": 10, "full_name": "Алексеев Александр Фёдорович"},
+            {"id": 11, "full_name": "Андреева Милана Олеговна"},
+            {"id": 12, "full_name": "Белов Степан Алексеевич"},
+        ],
+    }
+    dialog = LessonDialog(references)
+    dialog.group.setCurrentIndex(dialog.group.findData(4))
+    app.processEvents()
+
+    group_checks = [
+        dialog.students.cellWidget(row, 0).findChild(QCheckBox) for row in range(2)
+    ]
+    extra = dialog.students.cellWidget(2, 0).findChild(QCheckBox)
+    assert all(check.isChecked() and not check.isEnabled() for check in group_checks)
+    assert [dialog.students.item(row, 2).text() for row in range(2)] == [
+        "Из группы",
+        "Из группы",
+    ]
+    assert extra.isEnabled() and not extra.isChecked()
+    extra.setChecked(True)
+    assert dialog.payload()["participant_ids"] == [10, 11, 12]
+    assert dialog.participant_count.text() == "Из группы: 2 · доп.: 1"
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_repeat_count_is_shown_only_for_repeating_lessons() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = LessonDialog(
+        {"subjects": [], "teachers": [], "rooms": [], "groups": [], "students": []}
+    )
+
+    assert dialog.occurrences.isHidden()
+    dialog.repeat.setChecked(True)
+    app.processEvents()
+    assert not dialog.occurrences.isHidden()
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_lesson_payload_contains_timezone_and_calculated_end() -> None:
+    app = QApplication.instance() or QApplication([])
+    references = {
+        "subjects": [{"id": 1, "name": "Информатика"}],
+        "teachers": [{"id": 2, "full_name": "Воронцов Борис Александрович"}],
+        "rooms": [{"id": 3, "name": "Кабинет №1"}],
+        "groups": [],
+        "students": [],
+    }
+    dialog = LessonDialog(references)
+    dialog.duration.setValue(60)
+    payload = dialog.payload()
+    start = datetime.fromisoformat(payload["start_at"])
+    end = datetime.fromisoformat(payload["end_at"])
+
+    assert start.utcoffset() is not None
+    assert end.utcoffset() is not None
+    assert end - start == timedelta(minutes=60)
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_lesson_participant_search_keeps_hidden_selections() -> None:
+    app = QApplication.instance() or QApplication([])
+    references = {
+        "subjects": [],
+        "teachers": [],
+        "rooms": [],
+        "groups": [],
+        "students": [
+            {"id": 1, "full_name": "Алексеев Александр Фёдорович"},
+            {"id": 2, "full_name": "Белов Степан Алексеевич"},
+            {"id": 3, "full_name": "Смирнова Мария Олеговна"},
+        ],
+    }
+    dialog = LessonDialog(references)
+    first = dialog.students.cellWidget(0, 0).findChild(QCheckBox)
+    first.setChecked(True)
+    dialog.student_search.setText("мар")
+    app.processEvents()
+
+    assert dialog.students.isRowHidden(0)
+    assert dialog.students.isRowHidden(1)
+    assert not dialog.students.isRowHidden(2)
+    assert first.isChecked()
+    assert dialog.participant_count.text() == "Выбрано: 1"
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_free_slot_student_search_keeps_selected_students() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = FreeSlotDialog(
+        {
+            "teachers": [],
+            "rooms": [],
+            "students": [
+                {"id": 1, "full_name": "Алексеев Александр Фёдорович"},
+                {"id": 2, "full_name": "Смирнова Мария Олеговна"},
+            ],
+        }
+    )
+    first = dialog.students.cellWidget(0, 0)
+    first.setChecked(True)
+    dialog.student_search.setText("мар")
+    app.processEvents()
+
+    assert dialog.students.isRowHidden(0)
+    assert not dialog.students.isRowHidden(1)
+    assert first.isChecked()
+    assert dialog.student_count.text() == "Выбрано: 1"
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_lesson_error_preserves_form_and_schedules_same_dialog_again() -> None:
+    app = QApplication.instance() or QApplication([])
+    references = {
+        "subjects": [{"id": 1, "name": "Информатика"}],
+        "teachers": [{"id": 2, "full_name": "Воронцов Борис Александрович"}],
+        "rooms": [{"id": 3, "name": "Кабинет №1"}],
+        "groups": [],
+        "students": [{"id": 4, "full_name": "Пупкин Иван Пупкович"}],
+    }
+    dialog = LessonDialog(references)
+    dialog.notes.setPlainText("Сохранённая заметка")
+    participant = dialog.students.cellWidget(0, 0).findChild(QCheckBox)
+    participant.setChecked(True)
+    retried: list[LessonDialog] = []
+
+    LearningPage._restore_lesson_dialog(
+        dialog,
+        "Ошибка соединения",
+        lambda: retried.append(dialog),
+    )
+    app.processEvents()
+
+    assert retried == [dialog]
+    assert not dialog.error_label.isHidden()
+    assert dialog.notes.toPlainText() == "Сохранённая заметка"
+    assert participant.isChecked()
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_custom_calendar_range_shows_date_and_excludes_excused_from_count() -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.calendar_date.setDate(QDate(2026, 10, 5))
+    page.calendar_end.setDate(QDate(2026, 10, 8))
+    page._calendar_loaded(
+        [
+            {
+                "start_at": "2026-10-06T14:00:00+05:00",
+                "subject_name_snapshot": "Математика",
+                "teacher_name_snapshot": "Иванов И.И.",
+                "room_name_snapshot": "Кабинет 2",
+                "status": "planned",
+                "active_participant_count": 6,
+                "excused_participant_count": 1,
+                "participants": [{}] * 7,
+            }
+        ]
+    )
+
+    assert page.calendar_table.item(0, 0).text().startswith("06.10 ")
+    assert page.calendar_table.item(0, 4).text() == "6 участников · отменено: 1"
+    page.shutdown()
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_multirole_person_history_loads_student_and_teacher_together() -> None:
+    app = QApplication.instance() or QApplication([])
+    loaded_roles: list[str] = []
+
+    def load(_person_id: int, roles: list[str], callback) -> None:
+        loaded_roles.extend(roles)
+        callback({"student": {"lessons": [], "presence": []}, "teacher": {"lessons": []}})
+
+    dialog = PersonDialog(
+        {
+            "id": 12,
+            "full_name": "Жуков Георгий Романович",
+            "phone": "+79000000012",
+            "roles": ["student", "teacher"],
+        },
+        load_learning_history=load,
+    )
+    dialog.sections.setCurrentIndex(2)
+    app.processEvents()
+
+    assert set(loaded_roles) == {"student", "teacher"}
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_person_payload_separates_contact_and_max_authorization_phone() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = PersonDialog(
+        {
+            "full_name": "Сидорова Мария Ивановна",
+            "phone": "+79991112233",
+            "max_auth_phone": "+79990000001",
+            "roles": ["parent"],
+        }
+    )
+
+    payload = dialog.payload()
+
+    assert payload["phone"] == "+79991112233"
+    assert payload["max_auth_phone"] == "+79990000001"
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_main_client_search_uses_name_prefixes_and_phone_digit_substring() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeApi())  # type: ignore[arg-type]
+    assert window.pool.waitForDone(3_000)
+    window.people = [
+        {
+            "id": 1,
+            "full_name": "Алексеев Александр Фёдорович",
+            "phone": "+79001234567",
+            "roles": ["student"],
+            "active": True,
+            "max_user_id": None,
+        },
+        {
+            "id": 2,
+            "full_name": "Белов Степан Иванович",
+            "phone": "+79007654321",
+            "roles": ["student"],
+            "active": True,
+            "max_user_id": None,
+        },
+    ]
+    window.people_search.setText("ал фё")
+    window._render_people()
+    assert [item["id"] for item in window.visible_people["student"]] == [1]
+    window.people_search.setText("7654")
+    window._render_people()
+    assert [item["id"] for item in window.visible_people["student"]] == [2]
+    window.close()
+    app.processEvents()

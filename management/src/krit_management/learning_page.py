@@ -6,10 +6,12 @@ from html import escape
 from typing import Any
 
 from PySide6.QtCore import QDate, QDateTime, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QPageLayout, QTextDocument
+from PySide6.QtGui import QColor, QPageLayout, QTextDocument
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter, QPrintPreviewDialog
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDateEdit,
     QDateTimeEdit,
@@ -17,7 +19,10 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -33,7 +38,12 @@ from PySide6.QtWidgets import (
 )
 
 from .api import ManagementApi
-from .widgets import SearchableComboBox, configure_calendar
+from .widgets import (
+    SearchableComboBox,
+    configure_calendar,
+    configure_form_layout,
+    matches_word_prefix,
+)
 from .workers import Worker
 
 STATUS_LABELS = {
@@ -54,6 +64,42 @@ ATTENDANCE_LABELS = {
 }
 
 
+def _participant_counts(lesson: dict[str, Any]) -> tuple[int, int]:
+    participants = lesson.get("participants")
+    participant_rows = participants if isinstance(participants, list) else []
+    derived_active = sum(
+        item.get("attendance_status") != "excused"
+        for item in participant_rows
+        if isinstance(item, dict)
+    )
+    derived_excused = sum(
+        item.get("attendance_status") == "excused"
+        for item in participant_rows
+        if isinstance(item, dict)
+    )
+    active_value = lesson.get("active_participant_count")
+    excused_value = lesson.get("excused_participant_count")
+    active = derived_active if active_value is None else int(active_value)
+    excused = derived_excused if excused_value is None else int(excused_value)
+    return active, excused
+
+
+def _participant_summary(lesson: dict[str, Any]) -> str:
+    active, excused = _participant_counts(lesson)
+    return f"{active}" + (f" · {excused} отмен." if excused else "")
+
+
+def _participant_details(lesson: dict[str, Any]) -> str:
+    count, excused = _participant_counts(lesson)
+    suffix = "участник"
+    if count % 10 in {2, 3, 4} and count % 100 not in {12, 13, 14}:
+        suffix = "участника"
+    elif count % 10 != 1 or count % 100 == 11:
+        suffix = "участников"
+    result = f"{count} {suffix}"
+    return result + (f" · отменено: {excused}" if excused else "")
+
+
 def _button(text: str, callback: Callable[[], None], kind: str = "secondary") -> QPushButton:
     result = QPushButton(text)
     result.setProperty("kind", kind)
@@ -61,15 +107,55 @@ def _button(text: str, callback: Callable[[], None], kind: str = "secondary") ->
     return result
 
 
-def _table(headers: list[str]) -> QTableWidget:
+def _table(
+    headers: list[str],
+    *,
+    stretch: tuple[int, ...] = (),
+    compact: tuple[int, ...] = (),
+    fixed: dict[int, int] | None = None,
+) -> QTableWidget:
     table = QTableWidget(0, len(headers))
     table.setHorizontalHeaderLabels(headers)
     table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
     table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
     table.verticalHeader().setVisible(False)
     table.verticalHeader().setDefaultSectionSize(48)
-    table.horizontalHeader().setStretchLastSection(True)
+    table.setAlternatingRowColors(True)
+    table.setShowGrid(False)
+    table.setWordWrap(False)
+    header = table.horizontalHeader()
+    header.setHighlightSections(False)
+    header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    header.setStretchLastSection(False)
+    header.setMinimumSectionSize(72)
+    for column in range(len(headers)):
+        mode = QHeaderView.ResizeMode.Interactive
+        if column in stretch:
+            mode = QHeaderView.ResizeMode.Stretch
+        elif column in compact:
+            mode = QHeaderView.ResizeMode.ResizeToContents
+        if fixed and column in fixed:
+            mode = QHeaderView.ResizeMode.Fixed
+        header.setSectionResizeMode(column, mode)
+        if fixed and column in fixed:
+            table.setColumnWidth(column, fixed[column])
     return table
+
+
+def _teachers_for_subject(references: dict[str, Any], subject_id: object) -> list[dict[str, Any]]:
+    # Person.active controls MAX bot access, not whether a teacher may work in
+    # the learning module. Archived people are already excluded by the API.
+    teachers = list(references.get("teachers", []))
+    if subject_id is None:
+        return teachers
+    subject = next(
+        (item for item in references.get("subjects", []) if item.get("id") == subject_id),
+        None,
+    )
+    if subject is None or "teacher_ids" not in subject:
+        return teachers
+    allowed = set(subject.get("teacher_ids") or [])
+    return [item for item in teachers if item.get("id") in allowed]
 
 
 class ReferenceDialog(QDialog):
@@ -88,13 +174,25 @@ class ReferenceDialog(QDialog):
         titles = {"subjects": "Предмет", "rooms": "Кабинет", "groups": "Группа"}
         self.setWindowTitle(titles[kind])
         self.setMinimumWidth(420)
+        if kind == "subjects":
+            self.setMinimumSize(620, 520)
         layout = QVBoxLayout(self)
+        self.error_label = QLabel()
+        self.error_label.setObjectName("formError")
+        self.error_label.setWordWrap(True)
+        self.error_label.hide()
+        layout.addWidget(self.error_label)
         form = QFormLayout()
+        configure_form_layout(form)
         self.name = QLineEdit(str(self.item.get("name", "")))
         self.capacity = QSpinBox()
         self.capacity.setRange(1, 1000)
         self.capacity.setValue(int(self.item.get("capacity", 12)))
-        self.color = QLineEdit(str(self.item.get("color", "#2563eb")))
+        self.color_value = str(self.item.get("color", "#2563eb"))
+        self.color_button = QPushButton()
+        self.color_button.setProperty("kind", "secondary")
+        self.color_button.clicked.connect(self._choose_color)
+        self._update_color_button()
         self.active = QCheckBox("Используется")
         self.active.setChecked(bool(self.item.get("active", True)))
         self.group_subject = SearchableComboBox(placeholder="Предмет")
@@ -103,17 +201,46 @@ class ReferenceDialog(QDialog):
             self.group_subject.addItem(subject.get("name", ""), subject.get("id"))
         self.group_teacher = SearchableComboBox(placeholder="Фамилия или имя")
         self.group_teacher.addItem("Не выбран", None)
-        for teacher in self.references.get("teachers", []):
-            self.group_teacher.addItem(teacher.get("full_name", ""), teacher.get("id"))
         self.group_duration = QSpinBox()
         self.group_duration.setRange(5, 1440)
         self.group_duration.setSuffix(" мин")
         self.group_duration.setValue(int(self.item.get("default_duration_minutes", 60)))
+        self.subject_teacher_search = QLineEdit()
+        self.subject_teacher_search.setPlaceholderText("Поиск по фамилии или имени…")
+        self.subject_teacher_search.setClearButtonEnabled(True)
+        self.subject_teacher_search.textChanged.connect(self._filter_subject_teachers)
+        self.subject_teachers = QTableWidget(0, 2)
+        self.subject_teachers.setHorizontalHeaderLabels(["Выбрать", "Преподаватель"])
+        self.subject_teachers.verticalHeader().setVisible(False)
+        self.subject_teachers.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.subject_teachers.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Fixed
+        )
+        self.subject_teachers.setColumnWidth(0, 90)
+        self.subject_teachers.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        selected_teacher_ids = set(self.item.get("teacher_ids") or [])
+        teachers = self.references.get("teachers", [])
+        self.subject_teachers.setRowCount(len(teachers))
+        for row, teacher in enumerate(teachers):
+            check = QCheckBox()
+            check.setChecked(teacher.get("id") in selected_teacher_ids)
+            check.setProperty("teacher_id", teacher.get("id"))
+            holder = QWidget()
+            holder_layout = QHBoxLayout(holder)
+            holder_layout.setContentsMargins(0, 0, 0, 0)
+            holder_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            holder_layout.addWidget(check)
+            self.subject_teachers.setCellWidget(row, 0, holder)
+            self.subject_teachers.setItem(
+                row, 1, QTableWidgetItem(str(teacher.get("full_name", "")))
+            )
         form.addRow("Название", self.name)
         if kind == "rooms":
             form.addRow("Вместимость", self.capacity)
         if kind == "subjects":
-            form.addRow("Цвет", self.color)
+            form.addRow("Цвет в календаре", self.color_button)
         if kind == "groups":
             form.addRow("Предмет", self.group_subject)
             form.addRow("Преподаватель", self.group_teacher)
@@ -121,19 +248,91 @@ class ReferenceDialog(QDialog):
             self.group_subject.setCurrentIndex(
                 max(0, self.group_subject.findData(self.item.get("subject_id")))
             )
-            self.group_teacher.setCurrentIndex(
-                max(0, self.group_teacher.findData(self.item.get("default_teacher_id")))
-            )
+            self._reload_group_teachers(preferred=self.item.get("default_teacher_id"))
+            self.group_subject.currentIndexChanged.connect(self._reload_group_teachers)
         form.addRow("", self.active)
         layout.addLayout(form)
+        if kind == "subjects":
+            teacher_label = QLabel("Преподаватели, которые могут вести предмет")
+            teacher_label.setObjectName("controlGroupLabel")
+            layout.addWidget(teacher_label)
+            layout.addWidget(self.subject_teacher_search)
+            layout.addWidget(self.subject_teachers, 1)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("Сохранить")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._accept_if_valid)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _accept_if_valid(self) -> None:
+        if not self.name.text().strip():
+            self.error_label.setText("Укажите название.")
+            self.error_label.show()
+            return
+        if self.kind == "groups":
+            invalid = []
+            for label, field in (
+                ("предмет", self.group_subject),
+                ("преподавателя", self.group_teacher),
+            ):
+                if field.currentText() != "Не выбран" and field.currentData() is None:
+                    invalid.append(label)
+            if invalid:
+                self.error_label.setText("Выберите значение из списка: " + ", ".join(invalid) + ".")
+                self.error_label.show()
+                return
+        self.error_label.hide()
+        self.accept()
+
+    def _choose_color(self) -> None:
+        selected = QColorDialog.getColor(
+            QColor(self.color_value), self, "Цвет предмета в календаре"
+        )
+        if selected.isValid():
+            self.color_value = selected.name()
+            self._update_color_button()
+
+    def _update_color_button(self) -> None:
+        color = QColor(self.color_value)
+        text_color = "#ffffff" if color.lightness() < 145 else "#172033"
+        self.color_button.setText("Выбрать цвет")
+        self.color_button.setStyleSheet(
+            f"background: {color.name()}; color: {text_color}; border: 1px solid #aeb9c8;"
+        )
+        self.color_button.setToolTip("Нажмите, чтобы выбрать цвет из палитры")
+
+    def _filter_subject_teachers(self, text: str) -> None:
+        for row in range(self.subject_teachers.rowCount()):
+            item = self.subject_teachers.item(row, 1)
+            self.subject_teachers.setRowHidden(
+                row, item is None or not matches_word_prefix(text, item.text())
+            )
+
+    def _reload_group_teachers(
+        self, _index: int | None = None, *, preferred: object = None
+    ) -> None:
+        current = preferred if preferred is not None else self.group_teacher.currentData()
+        teachers = _teachers_for_subject(self.references, self.group_subject.currentData())
+        self.group_teacher.blockSignals(True)
+        self.group_teacher.clear()
+        self.group_teacher.addItem("Не выбран", None)
+        for teacher in teachers:
+            self.group_teacher.addItem(teacher.get("full_name", ""), teacher.get("id"))
+        selected = self.group_teacher.findData(current)
+        self.group_teacher.setCurrentIndex(selected if selected >= 0 else 0)
+        self.group_teacher.blockSignals(False)
+
+    def _subject_teacher_ids(self) -> list[int]:
+        result = []
+        for row in range(self.subject_teachers.rowCount()):
+            holder = self.subject_teachers.cellWidget(row, 0)
+            check = holder.findChild(QCheckBox) if holder else None
+            if check and check.isChecked():
+                result.append(int(check.property("teacher_id")))
+        return result
 
     def payload(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -143,7 +342,8 @@ class ReferenceDialog(QDialog):
         if self.kind == "rooms":
             result["capacity"] = self.capacity.value()
         elif self.kind == "subjects":
-            result["color"] = self.color.text().strip()
+            result["color"] = self.color_value
+            result["teacher_ids"] = self._subject_teacher_ids()
         elif self.kind == "groups":
             result["subject_id"] = self.group_subject.currentData()
             result["default_teacher_id"] = self.group_teacher.currentData()
@@ -158,34 +358,59 @@ class LessonDialog(QDialog):
         super().__init__(parent)
         self.references = references
         self.lesson = lesson or {}
+        self._group_member_ids: set[int] = set()
         self.setWindowTitle("Занятие")
-        self.setMinimumSize(680, 680)
-        self.resize(720, 700)
+        self.setMinimumSize(800, 740)
+        self.resize(880, 840)
         layout = QVBoxLayout(self)
+        self.error_label = QLabel()
+        self.error_label.setObjectName("formError")
+        self.error_label.setWordWrap(True)
+        self.error_label.hide()
+        layout.addWidget(self.error_label)
         form = QFormLayout()
+        configure_form_layout(form)
         self.subject = self._combo(references.get("subjects", []), "name")
-        self.teacher = self._combo(references.get("teachers", []), "full_name")
+        self.teacher = self._combo([], "full_name", empty="Выберите преподавателя")
         self.room = self._combo(references.get("rooms", []), "name")
         self.group = self._combo(references.get("groups", []), "name", empty="Без группы")
         now = datetime.now().astimezone().replace(second=0, microsecond=0)
         rounded = now + timedelta(minutes=(30 - now.minute % 30) % 30)
         self.start = QDateTimeEdit(QDateTime(rounded))
-        self.end = QDateTimeEdit(QDateTime(rounded + timedelta(hours=1)))
-        for editor in (self.start, self.end):
-            editor.setCalendarPopup(True)
-            configure_calendar(editor)
-            editor.setDisplayFormat("dd.MM.yyyy HH:mm")
-        self.students = QTableWidget(0, 2)
-        self.students.setHorizontalHeaderLabels(["Выбрать", "Ученик"])
+        self.start.setCalendarPopup(True)
+        configure_calendar(self.start)
+        self.start.setDisplayFormat("dd.MM.yyyy HH:mm")
+        self.duration = QSpinBox()
+        self.duration.setRange(5, 1440)
+        self.duration.setSingleStep(5)
+        self.duration.setSuffix(" мин")
+        self.duration.setValue(60)
+        self.end_display = QLineEdit()
+        self.end_display.setReadOnly(True)
+        self.end_display.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.end_display.setAccessibleName("Рассчитанное время окончания занятия")
+        self.start.dateTimeChanged.connect(self._update_end_display)
+        self.duration.valueChanged.connect(self._update_end_display)
+        self.students = QTableWidget(0, 3)
+        self.students.setHorizontalHeaderLabels(["Выбрать", "Ученик", "Источник"])
         self.students.verticalHeader().setVisible(False)
-        self.students.horizontalHeader().setStretchLastSection(True)
+        self.students.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.students.setColumnWidth(0, 90)
+        self.students.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.students.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.students.setColumnWidth(2, 125)
+        self.students.setMinimumHeight(290)
         selected = {p.get("person_id") for p in self.lesson.get("participants", [])}
+        self._manual_participant_ids = {int(person_id) for person_id in selected if person_id}
         all_students = references.get("students", [])
         self.students.setRowCount(len(all_students))
         for row, person in enumerate(all_students):
             check = QCheckBox()
             check.setChecked(person.get("id") in selected)
             check.setProperty("person_id", person.get("id"))
+            check.toggled.connect(
+                lambda checked, widget=check: self._student_checkbox_toggled(widget, checked)
+            )
             holder = QWidget()
             holder_layout = QHBoxLayout(holder)
             holder_layout.setContentsMargins(0, 0, 0, 0)
@@ -193,45 +418,69 @@ class LessonDialog(QDialog):
             holder_layout.addWidget(check)
             self.students.setCellWidget(row, 0, holder)
             self.students.setItem(row, 1, QTableWidgetItem(person.get("full_name", "")))
+            self.students.setItem(row, 2, QTableWidgetItem("Вручную" if check.isChecked() else "—"))
+        self.student_search = QLineEdit()
+        self.student_search.setPlaceholderText("Введите фамилию или имя…")
+        self.student_search.setClearButtonEnabled(True)
+        self.student_search.setAccessibleName("Поиск участников занятия")
+        self.student_search.textChanged.connect(self._filter_students)
+        self.selected_only = QCheckBox("Только выбранные")
+        self.selected_only.toggled.connect(self._filter_students)
+        self.participant_count = QLabel()
+        self.participant_count.setObjectName("supportingText")
         self.notes = QTextEdit(str(self.lesson.get("notes") or ""))
-        self.notes.setMaximumHeight(80)
+        self.notes.setMaximumHeight(72)
         self.repeat = QCheckBox("Повторять еженедельно")
         self.occurrences = QSpinBox()
         self.occurrences.setRange(2, 104)
         self.occurrences.setValue(4)
-        self.occurrences.setEnabled(False)
-        self.repeat.toggled.connect(self.occurrences.setEnabled)
         form.addRow("Предмет", self.subject)
-        form.addRow("Учитель", self.teacher)
+        form.addRow("Преподаватель", self.teacher)
         form.addRow("Кабинет", self.room)
         form.addRow("Группа", self.group)
         form.addRow("Начало", self.start)
-        form.addRow("Окончание", self.end)
+        form.addRow("Продолжительность", self.duration)
+        form.addRow("Окончание", self.end_display)
         if not self.lesson:
             form.addRow("", self.repeat)
             form.addRow("Количество занятий", self.occurrences)
+            form.setRowVisible(self.occurrences, False)
+            self.repeat.toggled.connect(
+                lambda checked: form.setRowVisible(self.occurrences, checked)
+            )
         layout.addLayout(form)
-        layout.addWidget(QLabel("Участники"))
+        participant_header = QHBoxLayout()
+        participant_label = QLabel("Участники")
+        participant_label.setObjectName("controlGroupLabel")
+        participant_header.addWidget(participant_label)
+        participant_header.addWidget(self.student_search, 1)
+        participant_header.addWidget(self.selected_only)
+        participant_header.addWidget(self.participant_count)
+        layout.addLayout(participant_header)
         layout.addWidget(self.students, 1)
         layout.addWidget(QLabel("Заметка"))
         layout.addWidget(self.notes)
         self._select(self.subject, self.lesson.get("subject_id"))
-        self._select(self.teacher, self.lesson.get("teacher_id"))
+        self._reload_lesson_teachers(preferred=self.lesson.get("teacher_id"))
+        self.subject.currentIndexChanged.connect(self._reload_lesson_teachers)
         self._select(self.room, self.lesson.get("room_id"))
         self._select(self.group, self.lesson.get("group_id"))
-        if not self.lesson:
-            self.group.currentIndexChanged.connect(self._apply_group_defaults)
         if self.lesson.get("start_at"):
-            self.start.setDateTime(
-                QDateTime.fromString(self.lesson["start_at"], Qt.DateFormat.ISODate)
-            )
-            self.end.setDateTime(QDateTime.fromString(self.lesson["end_at"], Qt.DateFormat.ISODate))
+            self.set_period(self.lesson["start_at"], self.lesson["end_at"])
+        else:
+            self._update_end_display()
+        initial_group_ids = self._active_group_member_ids()
+        self._manual_participant_ids.difference_update(initial_group_ids)
+        self._refresh_group_participants()
+        self.group.currentIndexChanged.connect(self._apply_group_defaults)
+        self.start.dateTimeChanged.connect(self._refresh_group_participants)
+        self._student_selection_changed()
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("Сохранить")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._accept_if_valid)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
@@ -242,11 +491,151 @@ class LessonDialog(QDialog):
             None,
         )
         if group is None:
+            self._refresh_group_participants()
             return
         self._select(self.subject, group.get("subject_id"))
-        self._select(self.teacher, group.get("default_teacher_id"))
+        self._reload_lesson_teachers(preferred=group.get("default_teacher_id"))
         duration = int(group.get("default_duration_minutes") or 60)
-        self.end.setDateTime(self.start.dateTime().addSecs(duration * 60))
+        self.duration.setValue(duration)
+        self._refresh_group_participants()
+
+    def _active_group_member_ids(self) -> set[int]:
+        group_id = self.group.currentData()
+        group = next(
+            (item for item in self.references.get("groups", []) if item.get("id") == group_id),
+            None,
+        )
+        if group is None:
+            return set()
+        lesson_start = self.start.dateTime().toPython().astimezone()
+        result: set[int] = set()
+        for membership in group.get("memberships", []):
+            starts_at = datetime.fromisoformat(str(membership["start_at"])).astimezone()
+            ends_at = (
+                datetime.fromisoformat(str(membership["end_at"])).astimezone()
+                if membership.get("end_at")
+                else None
+            )
+            if starts_at <= lesson_start and (ends_at is None or lesson_start < ends_at):
+                result.add(int(membership["person_id"]))
+        return result
+
+    def _refresh_group_participants(self, _value: object = None) -> None:
+        self._group_member_ids = self._active_group_member_ids()
+        for row in range(self.students.rowCount()):
+            holder = self.students.cellWidget(row, 0)
+            check = holder.findChild(QCheckBox) if holder else None
+            if check is None:
+                continue
+            person_id = int(check.property("person_id"))
+            from_group = person_id in self._group_member_ids
+            check.blockSignals(True)
+            check.setChecked(from_group or person_id in self._manual_participant_ids)
+            check.setEnabled(not from_group)
+            check.setToolTip(
+                "Участник группы добавляется автоматически"
+                if from_group
+                else "Дополнительный участник занятия"
+            )
+            check.blockSignals(False)
+            source = self.students.item(row, 2)
+            if source is not None:
+                source.setText(
+                    "Из группы"
+                    if from_group
+                    else "Дополнительно"
+                    if check.isChecked()
+                    else "—"
+                )
+        self._student_selection_changed()
+
+    def _student_checkbox_toggled(self, check: QCheckBox, checked: bool) -> None:
+        person_id = int(check.property("person_id"))
+        if checked:
+            self._manual_participant_ids.add(person_id)
+        else:
+            self._manual_participant_ids.discard(person_id)
+        self._refresh_group_participants()
+
+    def _reload_lesson_teachers(
+        self, _index: int | None = None, *, preferred: object = None
+    ) -> None:
+        current = preferred if preferred is not None else self.teacher.currentData()
+        teachers = _teachers_for_subject(self.references, self.subject.currentData())
+        self.teacher.blockSignals(True)
+        self.teacher.clear()
+        self.teacher.addItem("Выберите преподавателя", None)
+        for teacher in teachers:
+            self.teacher.addItem(teacher.get("full_name", ""), teacher.get("id"))
+        selected = self.teacher.findData(current)
+        self.teacher.setCurrentIndex(selected if selected >= 0 else 0)
+        self.teacher.blockSignals(False)
+
+    def set_period(self, start_at: str, end_at: str) -> None:
+        start = QDateTime.fromString(start_at, Qt.DateFormat.ISODate)
+        end = QDateTime.fromString(end_at, Qt.DateFormat.ISODate)
+        if start.isValid():
+            self.start.setDateTime(start)
+        if start.isValid() and end.isValid():
+            self.duration.setValue(max(5, start.secsTo(end) // 60))
+        self._update_end_display()
+
+    def _end_datetime(self) -> QDateTime:
+        return self.start.dateTime().addSecs(self.duration.value() * 60)
+
+    def _update_end_display(self, _value: object = None) -> None:
+        end = self._end_datetime()
+        if end.date() == self.start.date():
+            text = end.toString("HH:mm")
+        else:
+            text = end.toString("dd.MM.yyyy HH:mm")
+        self.end_display.setText(text)
+
+    def _filter_students(self, _value: object = None) -> None:
+        query = self.student_search.text()
+        selected_only = self.selected_only.isChecked()
+        for row in range(self.students.rowCount()):
+            item = self.students.item(row, 1)
+            holder = self.students.cellWidget(row, 0)
+            check = holder.findChild(QCheckBox) if holder else None
+            matches = item is not None and matches_word_prefix(query, item.text())
+            hide_selected = bool(selected_only and not check.isChecked())
+            self.students.setRowHidden(row, not matches or hide_selected)
+
+    def _student_selection_changed(self, _checked: bool = False) -> None:
+        selected = 0
+        for row in range(self.students.rowCount()):
+            holder = self.students.cellWidget(row, 0)
+            check = holder.findChild(QCheckBox) if holder else None
+            selected += int(bool(check and check.isChecked()))
+        extras = max(0, selected - len(self._group_member_ids))
+        if self._group_member_ids:
+            self.participant_count.setText(
+                f"Из группы: {len(self._group_member_ids)} · доп.: {extras}"
+            )
+        else:
+            self.participant_count.setText(f"Выбрано: {selected}")
+        if self.selected_only.isChecked():
+            self._filter_students()
+
+    def _accept_if_valid(self) -> None:
+        missing = []
+        for label, field in (
+            ("предмет", self.subject),
+            ("преподавателя", self.teacher),
+            ("кабинет", self.room),
+        ):
+            if field.currentData() is None:
+                missing.append(label)
+        if missing:
+            self.show_error("Выберите " + ", ".join(missing) + ".")
+            return
+        self.error_label.hide()
+        self.accept()
+
+    def show_error(self, message: str) -> None:
+        self.error_label.setText(f"Не удалось сохранить занятие. {message}")
+        self.error_label.show()
 
     @staticmethod
     def _combo(items: list[dict[str, Any]], label: str, empty: str | None = None) -> QComboBox:
@@ -272,28 +661,28 @@ class LessonDialog(QDialog):
             check = self.students.cellWidget(row, 0).findChild(QCheckBox)
             if check and check.isChecked():
                 participant_ids.append(int(check.property("person_id")))
+        start = self.start.dateTime().toPython().astimezone()
+        end = self._end_datetime().toPython().astimezone()
         return {
             "subject_id": self.subject.currentData(),
             "teacher_id": self.teacher.currentData(),
             "room_id": self.room.currentData(),
             "group_id": self.group.currentData(),
-            "start_at": self.start.dateTime().toString(Qt.DateFormat.ISODate),
-            "end_at": self.end.dateTime().toString(Qt.DateFormat.ISODate),
+            "start_at": start.isoformat(),
+            "end_at": end.isoformat(),
             "participant_ids": participant_ids,
             "notes": self.notes.toPlainText().strip() or None,
         }
 
     def series_payload(self) -> dict[str, Any]:
         payload = self.payload()
-        start = self.start.dateTime().toPython()
-        end = self.end.dateTime().toPython()
         return {
             "subject_id": payload["subject_id"],
             "teacher_id": payload["teacher_id"],
             "room_id": payload["room_id"],
             "group_id": payload["group_id"],
             "starts_at": payload["start_at"],
-            "duration_minutes": max(5, int((end - start).total_seconds() // 60)),
+            "duration_minutes": self.duration.value(),
             "interval_weeks": 1,
             "occurrences": self.occurrences.value(),
             "participant_ids": payload["participant_ids"],
@@ -311,6 +700,7 @@ class LessonCardDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.lesson = lesson
+        self.operation: str | None = None
         self.setWindowTitle("Карточка занятия")
         self.setMinimumSize(720, 500)
         layout = QVBoxLayout(self)
@@ -326,6 +716,26 @@ class LessonCardDialog(QDialog):
             f"{STATUS_LABELS.get(lesson.get('status'), lesson.get('status', ''))}"
         )
         layout.addWidget(details)
+        segments = lesson.get("teacher_segments", [])
+        if segments:
+            actual_lines = [
+                "Плановый преподаватель: " + str(lesson.get("teacher_name_snapshot", ""))
+            ]
+            for segment in segments:
+                segment_start = datetime.fromisoformat(segment["started_at"]).astimezone()
+                segment_end_value = segment.get("ended_at")
+                segment_end = (
+                    datetime.fromisoformat(segment_end_value).astimezone().strftime("%H:%M")
+                    if segment_end_value
+                    else "сейчас"
+                )
+                actual_lines.append(
+                    f"{segment_start:%H:%M}–{segment_end} "
+                    f"{segment.get('teacher_name_snapshot', '')}"
+                )
+            actual_teachers = QLabel("Фактически:\n" + "\n".join(actual_lines))
+            actual_teachers.setWordWrap(True)
+            layout.addWidget(actual_teachers)
         self.actual_start: QDateTimeEdit | None = None
         self.actual_end: QDateTimeEdit | None = None
         self._actual_original: tuple[str | None, str | None] = (
@@ -337,6 +747,7 @@ class LessonCardDialog(QDialog):
             actual_end = datetime.fromisoformat(str(self._actual_original[1])).astimezone()
             duration = max(0, int((actual_end - actual_start).total_seconds() // 60))
             actual_form = QFormLayout()
+            configure_form_layout(actual_form)
             self.actual_start = QDateTimeEdit(QDateTime(actual_start))
             self.actual_end = QDateTimeEdit(QDateTime(actual_end))
             for editor in (self.actual_start, self.actual_end):
@@ -348,7 +759,9 @@ class LessonCardDialog(QDialog):
             actual_form.addRow("Продолжительность", QLabel(f"{duration} мин"))
             layout.addLayout(actual_form)
         self.table = _table(
-            ["Участник", "Посещение", "Приход", "Уход", "Опоздание", "Отмена"]
+            ["Участник", "Посещение", "Приход", "Уход", "Опоздание", "Отмена"],
+            stretch=(0, 5),
+            compact=(1, 2, 3, 4),
         )
         participants = lesson.get("participants", [])
         self.table.setRowCount(len(participants))
@@ -358,10 +771,20 @@ class LessonCardDialog(QDialog):
             name.setData(Qt.ItemDataRole.UserRole, participant.get("person_id"))
             self.table.setItem(row, 0, name)
             combo = QComboBox()
-            for value, label in ATTENDANCE_LABELS.items():
+            allowed = ATTENDANCE_LABELS.items()
+            if lesson.get("status") == "in_progress":
+                allowed = [
+                    (value, label)
+                    for value, label in ATTENDANCE_LABELS.items()
+                    if value not in {"excused", "left_early"}
+                    or value == participant.get("attendance_status")
+                ]
+            for value, label in allowed:
                 combo.addItem(label, value)
             combo.setCurrentIndex(combo.findData(participant.get("attendance_status")))
-            combo.setEnabled(editable)
+            combo.setEnabled(
+                editable and participant.get("attendance_status") not in {"excused", "left_early"}
+            )
             self.table.setCellWidget(row, 1, combo)
             for column, key in ((2, "arrived_at"), (3, "left_at")):
                 value = participant.get(key)
@@ -390,13 +813,44 @@ class LessonCardDialog(QDialog):
             self.table.setItem(row, 5, QTableWidgetItem(cancellation))
         if open_person is not None:
             self.table.cellDoubleClicked.connect(
-                lambda row, column: open_person(
-                    int(self.table.item(row, 0).data(Qt.ItemDataRole.UserRole))
+                lambda row, column: (
+                    open_person(int(self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)))
+                    if column == 0 and self.table.item(row, 0) is not None
+                    else None
                 )
-                if column == 0 and self.table.item(row, 0) is not None
-                else None
             )
         layout.addWidget(self.table)
+        if lesson.get("status") == "in_progress":
+            operations = QHBoxLayout()
+            operations.addWidget(
+                _button(
+                    "Ученик покинул занятие",
+                    lambda: self._select_operation("leave_early"),
+                    "warning",
+                )
+            )
+            operations.addWidget(
+                _button(
+                    "Отменить участие",
+                    lambda: self._select_operation("cancel_participant"),
+                )
+            )
+            operations.addStretch(1)
+            operations.addWidget(
+                _button(
+                    "Преподаватель не может продолжить",
+                    lambda: self._select_operation("teacher_exit"),
+                    "warning",
+                )
+            )
+            operations.addWidget(
+                _button(
+                    "Завершить досрочно",
+                    lambda: self._select_operation("finish_early"),
+                    "danger",
+                )
+            )
+            layout.addLayout(operations)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -405,6 +859,18 @@ class LessonCardDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _select_operation(self, operation: str) -> None:
+        if operation in {"leave_early", "cancel_participant"} and self.table.currentRow() < 0:
+            QMessageBox.information(self, "Участник", "Сначала выберите ученика в таблице.")
+            return
+        self.operation = operation
+        self.accept()
+
+    def selected_person_id(self) -> int | None:
+        row = self.table.currentRow()
+        item = self.table.item(row, 0) if row >= 0 else None
+        return int(item.data(Qt.ItemDataRole.UserRole)) if item is not None else None
 
     def attendance(self) -> list[tuple[int, str]]:
         result = []
@@ -420,9 +886,7 @@ class LessonCardDialog(QDialog):
         start = self.actual_start.dateTime().toString(Qt.DateFormat.ISODate)
         end = self.actual_end.dateTime().toString(Qt.DateFormat.ISODate)
         original = tuple(
-            QDateTime.fromString(str(value), Qt.DateFormat.ISODate).toString(
-                Qt.DateFormat.ISODate
-            )
+            QDateTime.fromString(str(value), Qt.DateFormat.ISODate).toString(Qt.DateFormat.ISODate)
             for value in self._actual_original
         )
         return None if (start, end) == original else (start, end)
@@ -441,18 +905,27 @@ class GroupMembersDialog(QDialog):
         self.students = students
         self.memberships = [dict(item) for item in memberships]
         self.setWindowTitle(f"Состав группы · {group.get('name', '')}")
-        self.setMinimumSize(620, 430)
+        self.setMinimumSize(720, 360)
+        self.resize(760, 440)
         layout = QVBoxLayout(self)
         actions = QHBoxLayout()
+        member_label = QLabel("Новый участник")
+        member_label.setObjectName("controlGroupLabel")
+        actions.addWidget(member_label)
         self.student = SearchableComboBox(placeholder="Фамилия или имя")
         self.student.setMinimumWidth(280)
+        member_label.setBuddy(self.student)
         for person in students:
             self.student.addItem(person.get("full_name", ""), person.get("id"))
         actions.addWidget(self.student, 1)
         actions.addWidget(_button("Добавить", self._add, "primary"))
         actions.addWidget(_button("Завершить участие", self._end, "warning"))
         layout.addLayout(actions)
-        self.table = _table(["Ученик", "Начало", "Окончание", "Состояние"])
+        self.table = _table(
+            ["Ученик", "Начало", "Окончание", "Состояние"],
+            stretch=(0,),
+            compact=(1, 2, 3),
+        )
         layout.addWidget(self.table)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -524,6 +997,7 @@ class FreeSlotDialog(QDialog):
         self.setMinimumSize(680, 560)
         layout = QVBoxLayout(self)
         form = QFormLayout()
+        configure_form_layout(form)
         self.day = QDateEdit(QDate.currentDate())
         self.day.setCalendarPopup(True)
         configure_calendar(self.day)
@@ -532,30 +1006,50 @@ class FreeSlotDialog(QDialog):
         self.duration.setValue(60)
         self.duration.setSuffix(" мин")
         self.teacher = LessonDialog._combo(references.get("teachers", []), "full_name")
-        self.room = LessonDialog._combo(
-            references.get("rooms", []), "name", empty="Любой кабинет"
-        )
+        self.room = LessonDialog._combo(references.get("rooms", []), "name", empty="Любой кабинет")
         form.addRow("Дата", self.day)
         form.addRow("Продолжительность", self.duration)
         form.addRow("Преподаватель", self.teacher)
         form.addRow("Предпочитаемый кабинет", self.room)
         layout.addLayout(form)
-        layout.addWidget(QLabel("Ученики"))
+        student_header = QHBoxLayout()
+        student_label = QLabel("Ученики")
+        student_label.setObjectName("controlGroupLabel")
+        student_header.addWidget(student_label)
+        self.student_search = QLineEdit()
+        self.student_search.setPlaceholderText("Введите фамилию или имя…")
+        self.student_search.setClearButtonEnabled(True)
+        self.student_search.textChanged.connect(self._filter_students)
+        student_header.addWidget(self.student_search, 1)
+        self.selected_only = QCheckBox("Только выбранные")
+        self.selected_only.toggled.connect(self._filter_students)
+        student_header.addWidget(self.selected_only)
+        self.student_count = QLabel("Выбрано: 0")
+        self.student_count.setObjectName("supportingText")
+        student_header.addWidget(self.student_count)
+        layout.addLayout(student_header)
         self.students = QTableWidget(0, 2)
         self.students.setHorizontalHeaderLabels(["Выбрать", "ФИО"])
         self.students.verticalHeader().setVisible(False)
-        self.students.horizontalHeader().setStretchLastSection(True)
+        self.students.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.students.setColumnWidth(0, 90)
+        self.students.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         people = references.get("students", [])
         self.students.setRowCount(len(people))
         for row, person in enumerate(people):
             check = QCheckBox()
             check.setProperty("person_id", person.get("id"))
+            check.toggled.connect(self._student_selection_changed)
             self.students.setCellWidget(row, 0, check)
             self.students.setItem(row, 1, QTableWidgetItem(person.get("full_name", "")))
-        self.students.setMaximumHeight(180)
+        self.students.setMinimumHeight(150)
+        self.students.setMaximumHeight(220)
         layout.addWidget(self.students)
-        layout.addWidget(_button("Найти варианты", self._request, "primary"))
-        self.results = _table(["Дата", "Время", "Кабинет"])
+        search_row = QHBoxLayout()
+        search_row.addStretch(1)
+        search_row.addWidget(_button("Найти варианты", self._request, "primary"))
+        layout.addLayout(search_row)
+        self.results = _table(["Дата", "Время", "Кабинет"], stretch=(2,), compact=(0, 1))
         self.results.doubleClicked.connect(lambda _index: self.accept())
         layout.addWidget(self.results, 1)
         buttons = QDialogButtonBox(
@@ -566,6 +1060,30 @@ class FreeSlotDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _filter_students(self, _value: object = None) -> None:
+        query = self.student_search.text()
+        selected_only = self.selected_only.isChecked()
+        for row in range(self.students.rowCount()):
+            name = self.students.item(row, 1)
+            check = self.students.cellWidget(row, 0)
+            matches = name is not None and matches_word_prefix(query, name.text())
+            hide_selected = bool(
+                selected_only and isinstance(check, QCheckBox) and not check.isChecked()
+            )
+            self.students.setRowHidden(row, not matches or hide_selected)
+
+    def _student_selection_changed(self, _checked: bool = False) -> None:
+        selected = sum(
+            int(
+                isinstance(self.students.cellWidget(row, 0), QCheckBox)
+                and self.students.cellWidget(row, 0).isChecked()
+            )
+            for row in range(self.students.rowCount())
+        )
+        self.student_count.setText(f"Выбрано: {selected}")
+        if self.selected_only.isChecked():
+            self._filter_students()
 
     def criteria(self) -> dict[str, Any]:
         student_ids = []
@@ -601,6 +1119,7 @@ class FreeSlotDialog(QDialog):
         row = self.results.currentRow()
         return self.results.item(row, 0).data(Qt.ItemDataRole.UserRole) if row >= 0 else None
 
+
 class LearningPage(QWidget):
     notifications_changed = Signal(list)
     person_requested = Signal(int)
@@ -610,6 +1129,7 @@ class LearningPage(QWidget):
         self.api = api
         self.pool = QThreadPool(self)
         self._workers: set[Worker] = set()
+        self._closing = False
         self.references: dict[str, Any] = {}
         self.today_data: dict[str, Any] = {}
         self.calendar_lessons: list[dict[str, Any]] = []
@@ -625,23 +1145,43 @@ class LearningPage(QWidget):
         self.refresh()
         self.live_timer = QTimer(self)
         self.live_timer.setInterval(10_000)
-        self.live_timer.timeout.connect(self.refresh_today)
+        self.live_timer.timeout.connect(self._auto_refresh)
         self.live_timer.start()
+
+    def _auto_refresh(self) -> None:
+        if (
+            not self._closing
+            and self.isVisible()
+            and QApplication.activeModalWidget() is None
+            and not self._workers
+        ):
+            self.refresh()
 
     def _today_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         actions = QHBoxLayout()
+        actions.setSpacing(8)
         actions.addWidget(_button("Добавить занятие", self.add_lesson, "primary"))
         actions.addWidget(_button("Найти свободное время", self.find_free_time))
-        actions.addWidget(_button("Обновить", self.refresh))
         actions.addStretch(1)
-        self.presence_person = SearchableComboBox(placeholder="Фамилия или имя")
-        self.presence_person.setMinimumWidth(220)
-        actions.addWidget(self.presence_person)
-        actions.addWidget(_button("Пришёл", lambda: self.presence("arrival"), "primary"))
-        actions.addWidget(_button("Ушёл", lambda: self.presence("departure"), "warning"))
         layout.addLayout(actions)
+        presence_panel = QFrame()
+        presence_panel.setObjectName("controlPanel")
+        presence_actions = QHBoxLayout(presence_panel)
+        presence_actions.setContentsMargins(12, 8, 12, 8)
+        presence_actions.setSpacing(8)
+        presence_label = QLabel("Посещение клуба")
+        presence_label.setObjectName("controlGroupLabel")
+        presence_actions.addWidget(presence_label)
+        self.presence_person = SearchableComboBox(placeholder="Фамилия или имя")
+        self.presence_person.setMinimumWidth(280)
+        presence_label.setBuddy(self.presence_person)
+        presence_actions.addWidget(self.presence_person, 1)
+        presence_actions.addWidget(_button("Пришёл", lambda: self.presence("arrival"), "primary"))
+        self.departure_button = _button("Ушёл", lambda: self.presence("departure"), "warning")
+        presence_actions.addWidget(self.departure_button)
+        layout.addWidget(presence_panel)
         alert_row = QHBoxLayout()
         self.alert_label = QLabel()
         self.alert_label.setObjectName("connectionStatus")
@@ -653,48 +1193,88 @@ class LearningPage(QWidget):
         alert_row.addWidget(self.dismiss_alerts_button)
         layout.addLayout(alert_row)
         self.today_lessons = _table(
-            ["Время", "Предмет", "Учитель", "Кабинет", "Статус", "Действия"]
+            [
+                "Время",
+                "Предмет",
+                "Преподаватель",
+                "Кабинет",
+                "Участники",
+                "Статус",
+                "Действия",
+            ],
+            stretch=(1, 2, 3),
+            fixed={0: 110, 4: 100, 5: 125, 6: 320},
         )
         layout.addWidget(self.today_lessons, 2)
-        layout.addWidget(QLabel("Сейчас в клубе"))
-        self.present_table = _table(["ФИО", "Время прихода"])
+        present_header = QHBoxLayout()
+        present_header.addWidget(QLabel("Сейчас в клубе"))
+        present_hint = QLabel("Дважды щёлкните человека, чтобы отметить уход")
+        present_hint.setObjectName("supportingText")
+        present_header.addStretch(1)
+        present_header.addWidget(present_hint)
+        layout.addLayout(present_header)
+        self.present_table = _table(["ФИО", "Время прихода"], stretch=(0,), compact=(1,))
         self.present_table.setMaximumHeight(180)
+        self.present_table.setToolTip(
+            "Дважды щёлкните строку, чтобы выбрать человека в поле посещения клуба"
+        )
+        self.present_table.cellDoubleClicked.connect(
+            lambda row, _column: self._select_present_person(row)
+        )
         layout.addWidget(self.present_table)
         return page
 
     def _calendar_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        filters = QHBoxLayout()
-        filters.setSpacing(8)
-        filters.addWidget(QLabel("Режим"))
+        layout.setSpacing(10)
+        filter_panel = QFrame()
+        filter_panel.setObjectName("controlPanel")
+        filters = QGridLayout(filter_panel)
+        filters.setContentsMargins(12, 10, 12, 10)
+        filters.setHorizontalSpacing(8)
+        filters.setVerticalSpacing(8)
+        period_label = QLabel("Период")
+        period_label.setObjectName("controlGroupLabel")
+        filters.addWidget(period_label, 0, 0)
         self.calendar_period = QComboBox()
-        self.calendar_period.setMinimumWidth(150)
+        self.calendar_period.setMinimumWidth(190)
         self.calendar_period.addItem("День", 1)
         self.calendar_period.addItem("Неделя", 7)
         self.calendar_period.addItem("Произвольный период", 0)
         self.calendar_period.currentIndexChanged.connect(self._calendar_period_changed)
-        filters.addWidget(self.calendar_period)
-        filters.addSpacing(10)
-        filters.addWidget(QLabel("С"))
+        self.calendar_period.setAccessibleName("Режим отображения расписания")
+        filters.addWidget(self.calendar_period, 0, 1)
+        from_label = QLabel("с")
+        filters.addWidget(from_label, 0, 2)
         self.calendar_date = QDateEdit(QDate.currentDate())
-        self.calendar_date.setMinimumWidth(126)
+        self.calendar_date.setDisplayFormat("dd.MM.yyyy")
+        self.calendar_date.setMinimumWidth(145)
         self.calendar_date.setCalendarPopup(True)
         configure_calendar(self.calendar_date)
         self.calendar_date.dateChanged.connect(self._calendar_period_changed)
-        filters.addWidget(self.calendar_date)
+        self.calendar_date.setAccessibleName("Начало периода")
+        from_label.setBuddy(self.calendar_date)
+        filters.addWidget(self.calendar_date, 0, 3)
+        to_label = QLabel("по")
+        filters.addWidget(to_label, 0, 4)
         self.calendar_end = QDateEdit(QDate.currentDate())
+        self.calendar_end.setDisplayFormat("dd.MM.yyyy")
         self.calendar_end.setCalendarPopup(True)
         configure_calendar(self.calendar_end)
         self.calendar_end.setEnabled(False)
         self.calendar_end.dateChanged.connect(self.load_calendar)
-        self.calendar_end.setMinimumWidth(126)
-        filters.addWidget(QLabel("по"))
-        filters.addWidget(self.calendar_end)
-        filters.addSpacing(10)
-        filters.addWidget(QLabel("Показать"))
+        self.calendar_end.setMinimumWidth(145)
+        self.calendar_end.setAccessibleName("Окончание периода")
+        to_label.setBuddy(self.calendar_end)
+        filters.addWidget(self.calendar_end, 0, 5)
+        filters.setColumnStretch(6, 1)
+
+        object_label = QLabel("Показать")
+        object_label.setObjectName("controlGroupLabel")
+        filters.addWidget(object_label, 1, 0)
         self.calendar_filter_type = QComboBox()
-        self.calendar_filter_type.setMinimumWidth(150)
+        self.calendar_filter_type.setMinimumWidth(190)
         for label, value in (
             ("Весь клуб", None),
             ("Преподаватель", "teacher_id"),
@@ -704,25 +1284,33 @@ class LearningPage(QWidget):
         ):
             self.calendar_filter_type.addItem(label, value)
         self.calendar_filter_type.currentIndexChanged.connect(self._calendar_filter_changed)
-        filters.addWidget(self.calendar_filter_type)
+        self.calendar_filter_type.setAccessibleName("Тип фильтра расписания")
+        filters.addWidget(self.calendar_filter_type, 1, 1)
         self.calendar_filter_value = SearchableComboBox(placeholder="Начните вводить…")
-        self.calendar_filter_value.setMinimumWidth(180)
+        self.calendar_filter_value.setMinimumWidth(320)
+        self.calendar_filter_value.setAccessibleName("Значение фильтра расписания")
         self.calendar_filter_value.setVisible(False)
         self.calendar_filter_value.currentIndexChanged.connect(self.load_calendar)
-        filters.addWidget(self.calendar_filter_value, 1)
-        layout.addLayout(filters)
+        filters.addWidget(self.calendar_filter_value, 1, 2, 1, 4)
+        layout.addWidget(filter_panel)
         actions = QHBoxLayout()
         actions.setSpacing(8)
         actions.addWidget(_button("Добавить занятие", self.add_lesson, "primary"))
+        actions.addWidget(_button("Найти свободное время", self.find_free_time))
         actions.addStretch(1)
         actions.addWidget(_button("Предпросмотр", self.preview_calendar))
         actions.addWidget(_button("Сохранить PDF", self.save_calendar_pdf))
         actions.addWidget(_button("Печать", self.print_calendar))
         layout.addLayout(actions)
         self.calendar_table = _table(
-            ["Время", "Предмет", "Учитель", "Кабинет", "Участников", "Статус"]
+            ["Время", "Предмет", "Учитель", "Кабинет", "Участников", "Статус"],
+            stretch=(1, 2, 3),
+            fixed={0: 125, 4: 105, 5: 130},
         )
         self.calendar_table.doubleClicked.connect(self._edit_calendar_selected)
+        self.calendar_summary = QLabel("Загрузка расписания…")
+        self.calendar_summary.setObjectName("supportingText")
+        layout.addWidget(self.calendar_summary)
         layout.addWidget(self.calendar_table)
         return page
 
@@ -731,8 +1319,13 @@ class LearningPage(QWidget):
         layout = QVBoxLayout(page)
         self.reference_tabs = QTabWidget()
         self.reference_tables: dict[str, QTableWidget] = {}
+        self.reference_empty_labels: dict[str, QLabel] = {}
         for kind, title, headers in (
-            ("subjects", "Предметы", ["Название", "Цвет", "Состояние"]),
+            (
+                "subjects",
+                "Предметы",
+                ["Название", "Цвет", "Преподаватели", "Состояние"],
+            ),
             ("rooms", "Кабинеты", ["Название", "Вместимость", "Состояние"]),
             (
                 "groups",
@@ -743,23 +1336,41 @@ class LearningPage(QWidget):
             tab = QWidget()
             tab_layout = QVBoxLayout(tab)
             buttons = QHBoxLayout()
+            section_label = QLabel(title)
+            section_label.setObjectName("sectionTitle")
+            buttons.addWidget(section_label)
             buttons.addStretch(1)
-            buttons.addWidget(
-                _button(
-                    "Добавить", lambda checked=False, key=kind: self.edit_reference(key), "primary"
-                )
+            add_button = _button(
+                "Добавить", lambda checked=False, key=kind: self.edit_reference(key), "primary"
             )
+            buttons.addWidget(add_button)
+            group_members_button: QPushButton | None = None
             if kind == "groups":
-                buttons.addWidget(_button("Состав", self.manage_selected_group))
-            buttons.addWidget(
-                _button(
-                    "Изменить", lambda checked=False, key=kind: self.edit_selected_reference(key)
+                group_members_button = _button("Состав группы", self.manage_selected_group)
+                group_members_button.setEnabled(False)
+                buttons.addWidget(group_members_button)
+            tab_layout.addLayout(buttons)
+            if kind == "subjects":
+                table = _table(headers, stretch=(0, 2), fixed={1: 72, 3: 105})
+            elif kind == "groups":
+                table = _table(headers, stretch=(0, 1, 2), compact=(3, 4))
+            else:
+                table = _table(headers, stretch=(0,), compact=tuple(range(1, len(headers))))
+            self.reference_tables[kind] = table
+            table.itemSelectionChanged.connect(
+                lambda widget=table, members=group_members_button: (
+                    members.setEnabled(widget.currentRow() >= 0) if members else None
                 )
             )
-            tab_layout.addLayout(buttons)
-            table = _table(headers)
-            self.reference_tables[kind] = table
+            table.itemActivated.connect(lambda _item, key=kind: self.edit_selected_reference(key))
+            table.setToolTip("Дважды щёлкните строку или нажмите Enter для изменения")
             tab_layout.addWidget(table)
+            empty_label = QLabel("Записей пока нет")
+            empty_label.setObjectName("emptyState")
+            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_label.setMinimumHeight(220)
+            self.reference_empty_labels[kind] = empty_label
+            tab_layout.addWidget(empty_label)
             self.reference_tabs.addTab(tab, title)
         layout.addWidget(self.reference_tabs)
         return page
@@ -771,29 +1382,45 @@ class LearningPage(QWidget):
         student_page = QWidget()
         student_layout = QVBoxLayout(student_page)
         student_actions = QHBoxLayout()
+        student_label = QLabel("Ученик")
+        student_label.setObjectName("controlGroupLabel")
+        student_actions.addWidget(student_label)
         self.journal_student = SearchableComboBox(placeholder="Фамилия или имя")
-        self.journal_student.setMinimumWidth(260)
+        self.journal_student.setMinimumWidth(340)
+        student_label.setBuddy(self.journal_student)
         student_actions.addWidget(self.journal_student)
         student_actions.addWidget(_button("Показать", self.load_student_history))
         student_actions.addStretch(1)
         student_layout.addLayout(student_actions)
+        self.student_summary = QLabel("Выберите ученика, чтобы открыть историю занятий")
+        self.student_summary.setObjectName("supportingText")
+        student_layout.addWidget(self.student_summary)
         self.student_journal = _table(
-            ["Дата", "Предмет", "Учитель", "Время", "Посещение", "Опоздание"]
+            ["Дата", "Предмет", "Учитель", "Время", "Посещение", "Опоздание"],
+            stretch=(1, 2),
+            compact=(0, 3, 4, 5),
         )
         student_layout.addWidget(self.student_journal)
         teacher_page = QWidget()
         teacher_layout = QVBoxLayout(teacher_page)
         teacher_actions = QHBoxLayout()
+        teacher_label = QLabel("Преподаватель")
+        teacher_label.setObjectName("controlGroupLabel")
+        teacher_actions.addWidget(teacher_label)
         self.journal_teacher = SearchableComboBox(placeholder="Фамилия или имя")
-        self.journal_teacher.setMinimumWidth(260)
+        self.journal_teacher.setMinimumWidth(340)
+        teacher_label.setBuddy(self.journal_teacher)
         teacher_actions.addWidget(self.journal_teacher)
         teacher_actions.addWidget(_button("Показать", self.load_teacher_history))
         teacher_actions.addStretch(1)
         teacher_layout.addLayout(teacher_actions)
-        self.teacher_summary = QLabel()
+        self.teacher_summary = QLabel("Выберите преподавателя, чтобы открыть историю занятий")
+        self.teacher_summary.setObjectName("supportingText")
         teacher_layout.addWidget(self.teacher_summary)
         self.teacher_journal = _table(
-            ["Дата", "Предмет", "Кабинет", "Время", "Участников", "Статус"]
+            ["Дата", "Предмет", "Кабинет", "Фактическое время", "Минут", "Роль / статус"],
+            stretch=(1, 2),
+            compact=(0, 3, 4, 5),
         )
         self.student_journal.doubleClicked.connect(self._open_student_journal_lesson)
         self.teacher_journal.doubleClicked.connect(self._open_teacher_journal_lesson)
@@ -804,22 +1431,41 @@ class LearningPage(QWidget):
         return page
 
     def _run(
-        self, fn: Callable[..., Any], *args: Any, done: Callable[[Any], None] | None = None
+        self,
+        fn: Callable[..., Any],
+        *args: Any,
+        done: Callable[[Any], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
     ) -> None:
+        if self._closing:
+            return
         worker = Worker(lambda: fn(*args))
         self._workers.add(worker)
 
         def finished(result: object) -> None:
             self._workers.discard(worker)
-            (done or (lambda _result: self.refresh()))(result)
+            if not self._closing:
+                (done or (lambda _result: self.refresh()))(result)
 
         def failed(message: str) -> None:
             self._workers.discard(worker)
-            QMessageBox.critical(self, "Ошибка", message)
+            if self._closing:
+                return
+            if on_error is not None:
+                on_error(message)
+            else:
+                QMessageBox.critical(self, "Ошибка", message)
 
         worker.signals.finished.connect(finished)
         worker.signals.failed.connect(failed)
         self.pool.start(worker)
+
+    def shutdown(self) -> None:
+        self._closing = True
+        self.live_timer.stop()
+        self.pool.clear()
+        self.pool.waitForDone(16_000)
+        self._workers.clear()
 
     def refresh(self) -> None:
         self._run(self.api.learning_reference_data, done=self._references_loaded)
@@ -847,11 +1493,37 @@ class LearningPage(QWidget):
         self._calendar_filter_changed()
         for kind, table in self.reference_tables.items():
             items = self.references.get(kind, [])
+            table.setVisible(bool(items))
+            self.reference_empty_labels[kind].setVisible(not items)
             table.setRowCount(len(items))
             for row, item in enumerate(items):
                 values = [item.get("name", "")]
                 if kind == "subjects":
-                    values.append(item.get("color", ""))
+                    has_teacher_assignments = "teacher_ids" in item
+                    teacher_ids = set(item.get("teacher_ids") or [])
+                    teacher_names = (
+                        [
+                            str(teacher.get("full_name", ""))
+                            for teacher in self.references.get("teachers", [])
+                            if teacher.get("id") in teacher_ids
+                        ]
+                        if has_teacher_assignments
+                        else []
+                    )
+                    values.extend(
+                        [
+                            "",
+                            (
+                                ", ".join(teacher_names)
+                                if teacher_names
+                                else (
+                                    "Не назначены"
+                                    if has_teacher_assignments
+                                    else "Требуется обновление сервера"
+                                )
+                            ),
+                        ]
+                    )
                 elif kind == "rooms":
                     values.append(item.get("capacity", ""))
                 elif kind == "groups":
@@ -879,6 +1551,28 @@ class LearningPage(QWidget):
                     cell = QTableWidgetItem(str(value))
                     cell.setData(Qt.ItemDataRole.UserRole, item)
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if kind == "subjects" and column == 1:
+                        color = QColor(str(item.get("color", "#2563eb")))
+                        if not color.isValid():
+                            color = QColor("#2563eb")
+                        swatch_holder = QWidget()
+                        swatch_layout = QHBoxLayout(swatch_holder)
+                        swatch_layout.setContentsMargins(10, 8, 10, 8)
+                        swatch = QFrame()
+                        swatch.setFixedSize(58, 22)
+                        swatch.setStyleSheet(
+                            f"background-color: {color.name()}; "
+                            "border: 1px solid #aeb9c8; border-radius: 5px;"
+                        )
+                        swatch_layout.addWidget(swatch)
+                        swatch_layout.addStretch(1)
+                        swatch_holder.setToolTip(f"Цвет предмета в календаре: {color.name()}")
+                        table.setCellWidget(row, column, swatch_holder)
+                    if kind == "subjects" and column == 2:
+                        cell.setTextAlignment(
+                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                        )
+                        cell.setToolTip(str(value))
                     table.setItem(row, column, cell)
 
     def _today_loaded(self, data: object) -> None:
@@ -894,6 +1588,7 @@ class LearningPage(QWidget):
                 lesson.get("subject_name_snapshot", ""),
                 lesson.get("teacher_name_snapshot", ""),
                 lesson.get("room_name_snapshot", ""),
+                _participant_summary(lesson),
                 STATUS_LABELS.get(lesson.get("status"), lesson.get("status", "")),
             ]
             for column, value in enumerate(values):
@@ -926,12 +1621,14 @@ class LearningPage(QWidget):
             bar.addWidget(
                 _button("Карточка", lambda checked=False, item=lesson: self.open_lesson(item))
             )
-            self.today_lessons.setCellWidget(row, 5, actions)
+            self.today_lessons.setCellWidget(row, 6, actions)
         present = self.today_data.get("present", [])
         self.present_table.setRowCount(len(present))
         for row, person in enumerate(present):
             arrived = datetime.fromisoformat(person["arrived_at"]).astimezone()
-            self.present_table.setItem(row, 0, QTableWidgetItem(person.get("person_name", "")))
+            name_item = QTableWidgetItem(person.get("person_name", ""))
+            name_item.setData(Qt.ItemDataRole.UserRole, person.get("person_id"))
+            self.present_table.setItem(row, 0, name_item)
             self.present_table.setItem(row, 1, QTableWidgetItem(f"{arrived:%H:%M}"))
         alerts = self.today_data.get("alerts", [])
         self.alert_label.setVisible(bool(alerts))
@@ -1000,8 +1697,12 @@ class LearningPage(QWidget):
 
     def _calendar_loaded(self, data: object) -> None:
         self.calendar_lessons = data if isinstance(data, list) else []
+        count = len(self.calendar_lessons)
+        self.calendar_summary.setText(
+            f"Найдено занятий: {count}" if count else "В выбранном периоде занятий нет"
+        )
         self.calendar_table.setRowCount(len(self.calendar_lessons))
-        show_date = int(self.calendar_period.currentData() or 1) > 1
+        show_date = self.calendar_end.date() > self.calendar_date.date()
         for row, lesson in enumerate(self.calendar_lessons):
             start = datetime.fromisoformat(lesson["start_at"]).astimezone()
             values = [
@@ -1009,7 +1710,7 @@ class LearningPage(QWidget):
                 lesson.get("subject_name_snapshot", ""),
                 lesson.get("teacher_name_snapshot", ""),
                 lesson.get("room_name_snapshot", ""),
-                len(lesson.get("participants", [])),
+                _participant_details(lesson),
                 STATUS_LABELS.get(lesson.get("status"), lesson.get("status", "")),
             ]
             for column, value in enumerate(values):
@@ -1022,11 +1723,31 @@ class LearningPage(QWidget):
 
     def add_lesson(self) -> None:
         dialog = LessonDialog(self.references, parent=self)
-        if dialog.exec():
-            if dialog.repeat.isChecked():
-                self._run(self.api.create_lesson_series, dialog.series_payload())
-            else:
-                self._run(self.api.create_lesson, dialog.payload())
+        self._submit_new_lesson(dialog)
+
+    def _submit_new_lesson(self, dialog: LessonDialog) -> None:
+        if not dialog.exec():
+            return
+        if dialog.repeat.isChecked():
+            function = self.api.create_lesson_series
+            payload = dialog.series_payload()
+        else:
+            function = self.api.create_lesson
+            payload = dialog.payload()
+        self._run(
+            function,
+            payload,
+            on_error=lambda message: self._restore_lesson_dialog(
+                dialog, message, lambda: self._submit_new_lesson(dialog)
+            ),
+        )
+
+    @staticmethod
+    def _restore_lesson_dialog(
+        dialog: LessonDialog, message: str, retry: Callable[[], None]
+    ) -> None:
+        dialog.show_error(message)
+        QTimer.singleShot(0, retry)
 
     def find_free_time(self) -> None:
         dialog = FreeSlotDialog(self.references, self)
@@ -1048,47 +1769,69 @@ class LearningPage(QWidget):
         lesson = LessonDialog(self.references, parent=self)
         LessonDialog._select(lesson.teacher, criteria.get("teacher_id"))
         LessonDialog._select(lesson.room, slot.get("room_id"))
-        lesson.start.setDateTime(QDateTime.fromString(slot["start_at"], Qt.DateFormat.ISODate))
-        lesson.end.setDateTime(QDateTime.fromString(slot["end_at"], Qt.DateFormat.ISODate))
+        lesson.set_period(slot["start_at"], slot["end_at"])
         selected_students = set(criteria.get("student_ids", []))
         for row in range(lesson.students.rowCount()):
             check = lesson.students.cellWidget(row, 0).findChild(QCheckBox)
             if check:
                 check.setChecked(int(check.property("person_id")) in selected_students)
-        if lesson.exec():
-            self._run(self.api.create_lesson, lesson.payload())
+        self._submit_new_lesson(lesson)
 
     def edit_lesson(self, lesson: dict[str, Any]) -> None:
-        if lesson.get("status") in {"completed", "cancelled"}:
+        if lesson.get("status") not in {"planned", "scheduled"}:
             QMessageBox.information(
-                self, "Занятие", "История завершённого занятия доступна только для просмотра."
+                self,
+                "Занятие",
+                "План можно менять только до начала занятия. "
+                "Для идущего занятия используйте действия в его карточке.",
             )
             return
         dialog = LessonDialog(self.references, lesson, self)
-        if dialog.exec():
-            if not lesson.get("series_id"):
-                self._run(self.api.update_lesson, int(lesson["id"]), dialog.payload())
-                return
-            choice = QMessageBox(self)
-            choice.setWindowTitle("Изменение серии")
-            choice.setText("Какие занятия изменить?")
-            only_button = choice.addButton("Только это", QMessageBox.ButtonRole.AcceptRole)
-            future_button = choice.addButton("Это и будущие", QMessageBox.ButtonRole.ActionRole)
-            all_button = choice.addButton("Всю серию", QMessageBox.ButtonRole.ActionRole)
-            choice.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
-            choice.exec()
-            clicked = choice.clickedButton()
-            if clicked == only_button:
-                self._run(self.api.update_lesson, int(lesson["id"]), dialog.payload())
-            elif clicked in {future_button, all_button}:
-                payload = dialog.series_payload()
-                payload["scope"] = "future" if clicked == future_button else "all"
-                payload["anchor_lesson_id"] = int(lesson["id"])
-                self._run(
-                    self.api.update_lesson_series,
-                    int(lesson["series_id"]),
-                    payload,
-                )
+        self._submit_existing_lesson(dialog, lesson)
+
+    def _submit_existing_lesson(self, dialog: LessonDialog, lesson: dict[str, Any]) -> None:
+        if not dialog.exec():
+            return
+
+        def retry() -> None:
+            self._submit_existing_lesson(dialog, lesson)
+
+        if not lesson.get("series_id"):
+            self._run(
+                self.api.update_lesson,
+                int(lesson["id"]),
+                dialog.payload(),
+                on_error=lambda message: self._restore_lesson_dialog(dialog, message, retry),
+            )
+            return
+        choice = QMessageBox(self)
+        choice.setWindowTitle("Изменение серии")
+        choice.setText("Какие занятия изменить?")
+        only_button = choice.addButton("Только это", QMessageBox.ButtonRole.AcceptRole)
+        future_button = choice.addButton("Это и будущие", QMessageBox.ButtonRole.ActionRole)
+        all_button = choice.addButton("Всю серию", QMessageBox.ButtonRole.ActionRole)
+        choice.addButton("Вернуться к занятию", QMessageBox.ButtonRole.RejectRole)
+        choice.exec()
+        clicked = choice.clickedButton()
+        if clicked == only_button:
+            self._run(
+                self.api.update_lesson,
+                int(lesson["id"]),
+                dialog.payload(),
+                on_error=lambda message: self._restore_lesson_dialog(dialog, message, retry),
+            )
+        elif clicked in {future_button, all_button}:
+            payload = dialog.series_payload()
+            payload["scope"] = "future" if clicked == future_button else "all"
+            payload["anchor_lesson_id"] = int(lesson["id"])
+            self._run(
+                self.api.update_lesson_series,
+                int(lesson["series_id"]),
+                payload,
+                on_error=lambda message: self._restore_lesson_dialog(dialog, message, retry),
+            )
+        else:
+            QTimer.singleShot(0, retry)
 
     def open_lesson(self, lesson: dict[str, Any]) -> None:
         dialog = LessonCardDialog(
@@ -1097,27 +1840,26 @@ class LearningPage(QWidget):
             open_person=lambda person_id: self.person_requested.emit(person_id),
         )
         if dialog.exec():
+            if dialog.operation:
+                self._handle_lesson_operation(lesson, dialog)
+                return
             changes = dialog.attendance()
             actual_time_change = dialog.actual_time_change()
             original = {
                 int(item["person_id"]): str(item.get("attendance_status", "expected"))
                 for item in lesson.get("participants", [])
             }
-            cancellations: dict[int, str] = {}
+            cancellations: dict[int, dict[str, Any]] = {}
             for person_id, attendance_status in changes:
                 if (
                     lesson.get("status") != "completed"
                     and attendance_status == "excused"
                     and original.get(person_id) != "excused"
                 ):
-                    reason, accepted = QInputDialog.getText(
-                        self,
-                        "Отмена участия",
-                        "Причина отмены:",
-                    )
-                    if not accepted or not reason.strip():
+                    cancellation = self._cancellation_details(person_id)
+                    if cancellation is None:
                         return
-                    cancellations[person_id] = reason.strip()
+                    cancellations[person_id] = cancellation
 
             def save_all() -> None:
                 for person_id, attendance_status in changes:
@@ -1146,21 +1888,14 @@ class LearningPage(QWidget):
                         self.api.cancel_lesson_participant(
                             int(lesson["id"]),
                             person_id,
-                            {
-                                "cancelled_by": "administrator",
-                                "reason": cancellations[person_id],
-                            },
+                            cancellations[person_id],
                         )
                     elif before == "excused":
                         self.api.restore_lesson_participant(int(lesson["id"]), person_id)
                         if attendance_status != "expected":
-                            self.api.set_attendance(
-                                int(lesson["id"]), person_id, attendance_status
-                            )
+                            self.api.set_attendance(int(lesson["id"]), person_id, attendance_status)
                     else:
-                        self.api.set_attendance(
-                            int(lesson["id"]), person_id, attendance_status
-                        )
+                        self.api.set_attendance(int(lesson["id"]), person_id, attendance_status)
 
             correction_reasons: dict[int, str] = {}
             if lesson.get("status") == "completed":
@@ -1199,7 +1934,156 @@ class LearningPage(QWidget):
                             "reason": actual_time_reason,
                         },
                     )
+
             self._run(save_all_with_time)
+
+    def _handle_lesson_operation(self, lesson: dict[str, Any], dialog: LessonCardDialog) -> None:
+        lesson_id = int(lesson["id"])
+        if dialog.operation == "leave_early":
+            person_id = dialog.selected_person_id()
+            reason, accepted = QInputDialog.getText(self, "Ученик покинул занятие", "Причина:")
+            if person_id is not None and accepted and reason.strip():
+                self._run(
+                    self.api.leave_lesson_early,
+                    lesson_id,
+                    person_id,
+                    reason.strip(),
+                    done=self._action_done,
+                )
+            return
+        if dialog.operation == "cancel_participant":
+            person_id = dialog.selected_person_id()
+            if person_id is not None:
+                self._cancel_participant(lesson, person_id)
+            return
+        if dialog.operation == "finish_early":
+            self._finish_lesson_early(lesson_id)
+            return
+        if dialog.operation == "teacher_exit":
+            self._teacher_exit(lesson)
+
+    def _cancel_participant(self, lesson: dict[str, Any], person_id: int) -> None:
+        payload = self._cancellation_details(person_id)
+        if payload is None:
+            return
+        self._run(
+            self.api.cancel_lesson_participant,
+            int(lesson["id"]),
+            person_id,
+            payload,
+            done=self._action_done,
+        )
+
+    def _cancellation_details(self, person_id: int) -> dict[str, Any] | None:
+        student = next(
+            (
+                item
+                for item in self.references.get("students", [])
+                if int(item.get("id", -1)) == person_id
+            ),
+            {},
+        )
+        choices: list[tuple[str, str, int | None]] = [
+            ("Ученик", "student", person_id),
+            ("Администратор", "administrator", None),
+        ]
+        choices[1:1] = [
+            (f"Родитель: {guardian.get('full_name', '')}", "guardian", int(guardian["id"]))
+            for guardian in student.get("guardians", [])
+        ]
+        label, accepted = QInputDialog.getItem(
+            self,
+            "Отмена участия",
+            "Кто сообщил об отмене?",
+            [item[0] for item in choices],
+            editable=False,
+        )
+        if not accepted:
+            return
+        reason, accepted = QInputDialog.getText(self, "Отмена участия", "Причина:")
+        if not accepted or not reason.strip():
+            return None
+        _title, actor, actor_person_id = next(item for item in choices if item[0] == label)
+        return {
+            "cancelled_by": actor,
+            "cancelled_by_person_id": actor_person_id,
+            "reason": reason.strip(),
+        }
+
+    def _finish_lesson_early(self, lesson_id: int) -> None:
+        reason, accepted = QInputDialog.getText(self, "Досрочное завершение", "Внутренняя причина:")
+        if not accepted or not reason.strip():
+            return
+        public_comment, accepted = QInputDialog.getText(
+            self,
+            "Досрочное завершение",
+            "Комментарий для родителей (необязательно):",
+        )
+        if not accepted:
+            return
+        self._run(
+            self.api.finish_lesson_early,
+            lesson_id,
+            reason.strip(),
+            public_comment.strip(),
+            done=self._action_done,
+        )
+
+    def _teacher_exit(self, lesson: dict[str, Any]) -> None:
+        choice = QMessageBox(self)
+        choice.setWindowTitle("Преподаватель не может продолжить")
+        choice.setText("Выберите, как продолжить занятие.")
+        replace_button = choice.addButton("Назначить замену", QMessageBox.ButtonRole.AcceptRole)
+        finish_button = choice.addButton(
+            "Завершить досрочно", QMessageBox.ButtonRole.DestructiveRole
+        )
+        choice.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        choice.exec()
+        if choice.clickedButton() == finish_button:
+            self._finish_lesson_early(int(lesson["id"]))
+            return
+        if choice.clickedButton() != replace_button:
+            return
+        subject = next(
+            (
+                item
+                for item in self.references.get("subjects", [])
+                if int(item.get("id", -1)) == int(lesson.get("subject_id", -1))
+            ),
+            {},
+        )
+        qualified = set(subject.get("teacher_ids", []))
+        participant_ids = {int(item["person_id"]) for item in lesson.get("participants", [])}
+        teachers = [
+            item
+            for item in self.references.get("teachers", [])
+            if item.get("active")
+            and int(item.get("id", -1)) in qualified
+            and int(item.get("id", -1)) not in participant_ids
+        ]
+        name, accepted = QInputDialog.getItem(
+            self,
+            "Замена преподавателя",
+            "Новый преподаватель:",
+            [str(item.get("full_name", "")) for item in teachers],
+            editable=False,
+        )
+        if not accepted or not name:
+            return
+        reason, accepted = QInputDialog.getText(self, "Замена преподавателя", "Причина замены:")
+        if not accepted or not reason.strip():
+            return
+        teacher = next(item for item in teachers if item.get("full_name") == name)
+        self._run(
+            self.api.transition_lesson_teacher,
+            int(lesson["id"]),
+            {
+                "action": "substitute",
+                "replacement_teacher_id": int(teacher["id"]),
+                "reason": reason.strip(),
+            },
+            done=self._action_done,
+        )
 
     def lesson_action(self, lesson: dict[str, Any], action: str) -> None:
         self._run(self.api.lesson_action, int(lesson["id"]), action, done=self._action_done)
@@ -1215,6 +2099,18 @@ class LearningPage(QWidget):
         person_id = self.presence_person.currentData()
         if person_id is not None:
             self._run(self.api.presence_action, int(person_id), action, done=self._action_done)
+
+    def _select_present_person(self, row: int) -> None:
+        item = self.present_table.item(row, 0)
+        if item is None:
+            return
+        person_id = item.data(Qt.ItemDataRole.UserRole)
+        index = self.presence_person.findData(person_id)
+        if index < 0:
+            return
+        self.presence_person.setCurrentIndex(index)
+        self.presence_person.setFocus()
+        self.departure_button.setFocus()
 
     def edit_reference(self, kind: str, item: dict[str, Any] | None = None) -> None:
         dialog = ReferenceDialog(kind, item, self, references=self.references)
@@ -1346,6 +2242,11 @@ class LearningPage(QWidget):
     def _student_history_loaded(self, result: object) -> None:
         data = result if isinstance(result, dict) else {}
         lessons = data.get("lessons", [])
+        self.student_summary.setText(
+            f"Занятий: {len(lessons)} · дважды щёлкните строку для подробностей"
+            if lessons
+            else "В истории этого ученика пока нет занятий"
+        )
         labels = {
             "expected": "Ожидается",
             "present": "Присутствовал",
@@ -1394,19 +2295,37 @@ class LearningPage(QWidget):
         self.teacher_summary.setText(
             f"Всего: {summary.get('total', 0)} · "
             f"Завершено: {summary.get('completed', 0)} · "
-            f"Отменено: {summary.get('cancelled', 0)}"
+            f"Отменено: {summary.get('cancelled', 0)} · "
+            "дважды щёлкните строку для подробностей"
         )
         self.teacher_journal.setRowCount(len(lessons))
         for row, lesson in enumerate(lessons):
-            start = datetime.fromisoformat(lesson["start_at"]).astimezone()
-            end = datetime.fromisoformat(lesson["end_at"]).astimezone()
+            planned_start = datetime.fromisoformat(lesson["start_at"]).astimezone()
+            actual_start_value = lesson.get("actual_start_at")
+            actual_end_value = lesson.get("actual_end_at")
+            start = (
+                datetime.fromisoformat(actual_start_value).astimezone()
+                if actual_start_value
+                else planned_start
+            )
+            end = (
+                datetime.fromisoformat(actual_end_value).astimezone()
+                if actual_end_value
+                else datetime.fromisoformat(lesson["end_at"]).astimezone()
+            )
+            segment_type = lesson.get("teacher_segment_type")
+            role_status = STATUS_LABELS.get(lesson.get("status"), lesson.get("status", ""))
+            if segment_type == "substitute":
+                role_status = "Замещающий преподаватель"
+            elif segment_type == "primary" and actual_end_value:
+                role_status = f"Основной · замена/завершение в {end:%H:%M}"
             values = [
-                f"{start:%d.%m.%Y}",
+                f"{planned_start:%d.%m.%Y}",
                 lesson.get("subject_name_snapshot", ""),
                 lesson.get("room_name_snapshot", ""),
                 f"{start:%H:%M}–{end:%H:%M}",
-                len(lesson.get("participants", [])),
-                STATUS_LABELS.get(lesson.get("status"), lesson.get("status", "")),
+                lesson.get("teacher_segment_minutes", "—"),
+                role_status,
             ]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
