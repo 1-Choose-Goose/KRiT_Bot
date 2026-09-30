@@ -468,7 +468,10 @@ def test_schedule_preview_is_landscape_calendar_with_students(tmp_path) -> None:
     page._prepare_schedule_printer(printer)
 
     assert printer.pageLayout().orientation() == QPageLayout.Orientation.Landscape
-    assert all(day in plain for day in ("Понедельник", "Среда", "Воскресенье"))
+    assert "Среда" in plain
+    assert "Понедельник" not in plain
+    assert "Воскресенье" not in plain
+    assert "Занятий нет" not in plain
     assert "Алексеев А. Ф." in plain
     assert "Белов" not in plain
     assert "Кабинет №1" not in plain
@@ -476,6 +479,44 @@ def test_schedule_preview_is_landscape_calendar_with_students(tmp_path) -> None:
     assert SchedulePreviewDialog._normalize_zoom_percent(150) == 150
     assert SchedulePreviewDialog._normalize_zoom_percent(10) == 25
     assert SchedulePreviewDialog._normalize_zoom_percent(500) == 400
+    page.shutdown()
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_busy_day_uses_parallel_columns_before_adding_pages() -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    app.processEvents()
+    page.calendar_date.setDate(QDate(2026, 9, 30))
+    page.calendar_end.setDate(QDate(2026, 9, 30))
+    page.calendar_lessons = [
+        {
+            "start_at": f"2026-09-30T{8 + index:02d}:00:00+05:00",
+            "end_at": f"2026-09-30T{9 + index:02d}:00:00+05:00",
+            "subject_name_snapshot": "Информатика" if index % 2 == 0 else "Русский язык",
+            "teacher_name_snapshot": "Быков Валерий Андреевич",
+            "status": "planned",
+            "participants": [
+                {
+                    "person_name_snapshot": f"Ученик {student} Александрович",
+                    "attendance_status": "expected",
+                }
+                for student in range(4)
+            ],
+        }
+        for index in range(13)
+    ]
+
+    document = page._schedule_document()
+    document.setPageSize(QSizeF(842, 595))
+    plain = document.toPlainText()
+
+    assert document.pageCount() == 1
+    assert plain.count("Среда") >= 2
+    assert "часть 1 из" in plain
+    assert "Занятий нет" not in plain
     page.shutdown()
     page.deleteLater()
     app.processEvents()

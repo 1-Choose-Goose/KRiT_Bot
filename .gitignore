@@ -16,8 +16,8 @@ data/
 .coverage
 build/
 dist/
+output/
 *.egg-info/
 !.env.example
 TOKEN.txt
 Server.txt
-

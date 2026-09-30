@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from html import escape
+from math import ceil
 from typing import Any
 
 from PySide6.QtCore import QDate, QDateTime, QMarginsF, Qt, QThreadPool, QTimer, Signal
@@ -2422,13 +2423,13 @@ class LearningPage(QWidget):
     def _schedule_document(self) -> QTextDocument:
         selected = self.calendar_date.date().toPython()
         selected_end = max(selected, self.calendar_end.date().toPython())
-        first_day = selected - timedelta(days=selected.weekday())
-        last_day = selected_end + timedelta(days=6 - selected_end.weekday())
-        lessons_by_day: dict[object, list[dict[str, Any]]] = {}
+        lessons_by_day: dict[date, list[dict[str, Any]]] = {}
         for lesson in self.calendar_lessons:
             if lesson.get("status") == "cancelled":
                 continue
             start = datetime.fromisoformat(lesson["start_at"]).astimezone()
+            if not selected <= start.date() <= selected_end:
+                continue
             lessons_by_day.setdefault(start.date(), []).append(lesson)
         for lessons in lessons_by_day.values():
             lessons.sort(key=lambda item: str(item.get("start_at", "")))
@@ -2442,25 +2443,14 @@ class LearningPage(QWidget):
             "Суббота",
             "Воскресенье",
         )
-        rows: list[str] = []
-        week_start = first_day
-        while week_start <= last_day:
-            cells: list[str] = []
-            for offset in range(7):
-                day = week_start + timedelta(days=offset)
-                outside = day < selected or day > selected_end
-                background = "#f1f4f8" if outside else "#ffffff"
-                lesson_blocks = [
-                    self._schedule_lesson_html(item) for item in lessons_by_day.get(day, [])
-                ]
-                empty = "<div class='empty'>Занятий нет</div>" if not lesson_blocks else ""
-                cells.append(
-                    f"<td bgcolor='{background}' valign='top' height='115'>"
-                    f"<div class='date'>{day:%d.%m}</div>"
-                    f"{''.join(lesson_blocks)}{empty}</td>"
+        columns: list[tuple[date, int, int, list[dict[str, Any]], int]] = []
+        for day, lessons in sorted(lessons_by_day.items()):
+            chunks = self._split_schedule_day(lessons)
+            for part, chunk in enumerate(chunks, start=1):
+                columns.append(
+                    (day, part, len(chunks), chunk, sum(map(self._schedule_lesson_cost, chunk)))
                 )
-            rows.append(f"<tr>{''.join(cells)}</tr>")
-            week_start += timedelta(days=7)
+        pages = self._schedule_pages(columns)
 
         document = QTextDocument(self)
         period_label = selected.strftime("%d.%m.%Y")
@@ -2469,31 +2459,98 @@ class LearningPage(QWidget):
         filter_label = self.calendar_filter_type.currentText()
         if self.calendar_filter_value.isVisible():
             filter_label += f": {self.calendar_filter_value.currentText()}"
-        headers = "".join(f"<th>{name}</th>" for name in weekday_names)
+        if not pages:
+            document.setHtml(
+                "<style>body { font-family: 'Segoe UI'; color: #172033; }</style>"
+                f"<h1>КРиТ · расписание {period_label}</h1>"
+                f"<p>{escape(filter_label)}</p>"
+                "<p>В выбранном периоде занятий нет.</p>"
+            )
+            return document
+
+        page_sections: list[str] = []
+        for page_number, page in enumerate(pages, start=1):
+            width = max(1, 100 // len(page))
+            headers: list[str] = []
+            cells: list[str] = []
+            for day, part, total_parts, lessons, _cost in page:
+                continuation = (
+                    f"<br><span class='continuation'>часть {part} из {total_parts}</span>"
+                    if total_parts > 1
+                    else ""
+                )
+                headers.append(
+                    f"<th width='{width}%'>"
+                    f"{weekday_names[day.weekday()]}<br>"
+                    f"<span class='date'>{day:%d.%m.%Y}</span>{continuation}</th>"
+                )
+                lesson_blocks = "".join(self._schedule_lesson_html(item) for item in lessons)
+                cells.append(f"<td width='{width}%' valign='top'>{lesson_blocks}</td>")
+            page_break = " style='page-break-after: always'" if page_number < len(pages) else ""
+            page_sections.append(
+                f"<h1>КРиТ · расписание {period_label}</h1>"
+                f"<p class='subtitle'>{escape(filter_label)} · страница "
+                f"{page_number} из {len(pages)}</p>"
+                f"<table class='calendar' width='100%' cellspacing='0' cellpadding='3'"
+                f"{page_break}><thead><tr>{''.join(headers)}</tr></thead>"
+                f"<tbody><tr>{''.join(cells)}</tr></tbody></table>"
+            )
         document.setHtml(
             "<style>"
-            "body { font-family: 'Segoe UI'; color: #172033; font-size: 8pt; }"
-            "h1 { font-size: 16pt; margin: 0 0 3px 0; }"
-            ".subtitle { color: #526174; margin: 0 0 10px 0; }"
-            "table.calendar { width: 100%; border-collapse: collapse; table-layout: fixed; }"
-            "table.calendar th { background: #e8eef8; padding: 6px 3px; "
-            "border: 1px solid #b8c4d4; }"
-            "table.calendar td { width: 14.28%; padding: 5px; border: 1px solid #b8c4d4; }"
-            ".date { font-size: 10pt; font-weight: 700; margin-bottom: 5px; }"
-            ".lesson { background: #eef4ff; border: 1px solid #b9ccef; "
-            "margin: 0 0 5px 0; padding: 4px; }"
-            ".time { color: #124da8; font-weight: 700; }"
-            ".subject { font-weight: 700; margin: 2px 0; }"
-            ".teacher { color: #37465a; }"
-            ".students { margin-top: 3px; }"
-            ".empty { color: #8a95a5; }"
+            "body { font-family: 'Segoe UI'; color: #172033; font-size: 7.5pt; }"
+            "h1 { font-size: 14pt; margin: 0 0 2px 0; }"
+            ".subtitle { color: #526174; margin: 0 0 6px 0; }"
+            "table.calendar { border-collapse: collapse; }"
+            "table.calendar th { background: #e8eef8; padding: 4px 3px; "
+            "border: 1px solid #b8c4d4; font-size: 8.5pt; }"
+            "table.calendar td { padding: 3px; border: 1px solid #b8c4d4; }"
+            ".date { font-weight: 700; }"
+            ".continuation { color: #526174; font-size: 7pt; font-weight: 400; }"
+            ".lesson { background: #eef4ff; border: 1px solid #c5d4ec; "
+            "margin: 0 0 3px 0; padding: 3px; line-height: 105%; }"
+            ".lesson-title { font-weight: 700; }"
+            ".time { color: #124da8; }"
+            ".teacher { color: #526174; }"
+            ".students { color: #172033; }"
             "</style>"
-            f"<h1>КРиТ · расписание {period_label}</h1>"
-            f"<p class='subtitle'>{escape(filter_label)}</p>"
-            f"<table class='calendar' width='100%'><thead><tr>{headers}</tr></thead>"
-            f"<tbody>{''.join(rows)}</tbody></table>"
+            f"{''.join(page_sections)}"
         )
         return document
+
+    def _split_schedule_day(
+        self, lessons: list[dict[str, Any]], *, column_capacity: int = 25
+    ) -> list[list[dict[str, Any]]]:
+        chunks: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        current_cost = 0
+        for lesson in lessons:
+            cost = self._schedule_lesson_cost(lesson)
+            if current and current_cost + cost > column_capacity:
+                chunks.append(current)
+                current = []
+                current_cost = 0
+            current.append(lesson)
+            current_cost += cost
+        if current:
+            chunks.append(current)
+        return chunks
+
+    @staticmethod
+    def _schedule_pages(
+        columns: list[tuple[date, int, int, list[dict[str, Any]], int]],
+    ) -> list[list[tuple[date, int, int, list[dict[str, Any]], int]]]:
+        if not columns:
+            return []
+        if len(columns) <= 7 and all(column[4] <= 18 for column in columns):
+            return [columns]
+        return [columns[index : index + 4] for index in range(0, len(columns), 4)]
+
+    def _schedule_lesson_cost(self, lesson: dict[str, Any]) -> int:
+        participants = self._schedule_participant_names(lesson)
+        subject = str(lesson.get("subject_name_snapshot", ""))
+        teacher = self._short_person_name(lesson.get("teacher_name_snapshot", ""))
+        students = ", ".join(participants)
+        return 2 + ceil(len(subject) / 24) + ceil(len(teacher) / 28) + ceil(len(students) / 30)
 
     @staticmethod
     def _short_person_name(value: object) -> str:
@@ -2506,6 +2563,20 @@ class LearningPage(QWidget):
     def _schedule_lesson_html(self, lesson: dict[str, Any]) -> str:
         start = datetime.fromisoformat(lesson["start_at"]).astimezone()
         end = datetime.fromisoformat(lesson["end_at"]).astimezone()
+        participants = self._schedule_participant_names(lesson)
+        students = ", ".join(map(escape, participants)) or "не указаны"
+        subject = escape(str(lesson.get("subject_name_snapshot", "")))
+        teacher = escape(self._short_person_name(lesson.get("teacher_name_snapshot", "")))
+        return (
+            "<div class='lesson'>"
+            f"<div class='lesson-title'><span class='time'>{start:%H:%M}–{end:%H:%M}</span> · "
+            f"{subject}</div>"
+            f"<div class='teacher'>{teacher}</div>"
+            f"<div class='students'><b>Ученики ({len(participants)}):</b> {students}</div>"
+            "</div>"
+        )
+
+    def _schedule_participant_names(self, lesson: dict[str, Any]) -> list[str]:
         participants = [
             name
             for item in lesson.get("participants", [])
@@ -2516,16 +2587,7 @@ class LearningPage(QWidget):
                 )
             )
         ]
-        students = "<br>".join(map(escape, participants)) or "Ученики не указаны"
-        teacher = escape(self._short_person_name(lesson.get("teacher_name_snapshot", "")))
-        return (
-            "<div class='lesson'>"
-            f"<div class='time'>{start:%H:%M}–{end:%H:%M}</div>"
-            f"<div class='subject'>{escape(str(lesson.get('subject_name_snapshot', '')))}</div>"
-            f"<div class='teacher'>{teacher}</div>"
-            f"<div class='students'><b>Ученики ({len(participants)}):</b><br>{students}</div>"
-            "</div>"
-        )
+        return participants
 
     def _prepare_schedule_printer(self, printer: QPrinter) -> None:
         printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
