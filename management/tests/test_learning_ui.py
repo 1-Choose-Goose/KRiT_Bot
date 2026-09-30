@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
+    QDialogButtonBox,
     QPushButton,
     QStyle,
     QStyleOptionSpinBox,
@@ -23,6 +24,7 @@ from krit_management.learning_page import (
     FreeSlotDialog,
     LearningPage,
     LessonDialog,
+    ReasonDialog,
     ReferenceDialog,
     SchedulePreviewDialog,
 )
@@ -119,7 +121,6 @@ def test_spinbox_arrows_use_the_shared_vertical_control_style() -> None:
     dialog = ReferenceDialog("rooms", {"name": "Кабинет №1", "capacity": 12})
     dialog.show()
     app.processEvents()
-
     option = QStyleOptionSpinBox()
     dialog.capacity.initStyleOption(option)
     up = dialog.capacity.style().subControlRect(
@@ -142,6 +143,26 @@ def test_spinbox_arrows_use_the_shared_vertical_control_style() -> None:
     assert "%s" not in app.styleSheet()
     assert "QCheckBox::indicator:checked:disabled" in app.styleSheet()
     dialog.close()
+    app.processEvents()
+
+
+def test_early_leave_reason_dialog_is_large_and_validates_text() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = ReasonDialog("Ученик покинул занятие", "Укажите причину:")
+    ok_button = dialog.buttons.button(QDialogButtonBox.StandardButton.Ok)
+
+    assert dialog.minimumWidth() >= 520
+    assert dialog.minimumHeight() >= 240
+    assert dialog.editor.minimumHeight() >= 110
+    assert not ok_button.isEnabled()
+    assert dialog.error.isHidden()
+
+    dialog.editor.setPlainText("живот болит")
+    app.processEvents()
+
+    assert ok_button.isEnabled()
+    assert dialog.reason() == "живот болит"
+    dialog.deleteLater()
     app.processEvents()
 
 

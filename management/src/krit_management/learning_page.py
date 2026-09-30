@@ -239,6 +239,59 @@ class SchedulePreviewDialog(QDialog):
         self.zoom.blockSignals(False)
 
 
+class ReasonDialog(QDialog):
+    def __init__(self, title: str, prompt: str, parent=None, *, minimum_length: int = 3) -> None:
+        super().__init__(parent)
+        self.minimum_length = minimum_length
+        self.setWindowTitle(title)
+        self.setMinimumSize(520, 240)
+        self.resize(560, 260)
+        layout = QVBoxLayout(self)
+        label = QLabel(prompt)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        self.editor = QTextEdit()
+        self.editor.setPlaceholderText("Опишите причину…")
+        self.editor.setMinimumHeight(110)
+        self.editor.setAccessibleName(prompt)
+        layout.addWidget(self.editor, 1)
+        self.error = QLabel()
+        self.error.setObjectName("formError")
+        self.error.setWordWrap(True)
+        self.error.hide()
+        layout.addWidget(self.error)
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("ОК")
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        self.buttons.accepted.connect(self._accept_reason)
+        self.buttons.rejected.connect(self.reject)
+        self.editor.textChanged.connect(self._update_state)
+        layout.addWidget(self.buttons)
+        self._update_state()
+        QTimer.singleShot(0, self.editor.setFocus)
+
+    def reason(self) -> str:
+        return self.editor.toPlainText().strip()
+
+    def _update_state(self) -> None:
+        valid = len(self.reason()) >= self.minimum_length
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(valid)
+        if valid:
+            self.error.clear()
+            self.error.hide()
+
+    def _accept_reason(self) -> None:
+        if len(self.reason()) < self.minimum_length:
+            self.error.setText(
+                f"Опишите причину подробнее — минимум {self.minimum_length} символа."
+            )
+            self.error.show()
+            return
+        self.accept()
+
+
 class ReferenceDialog(QDialog):
     def __init__(
         self,
@@ -945,6 +998,22 @@ class LessonCardDialog(QDialog):
         if operation in {"leave_early", "cancel_participant"} and self.table.currentRow() < 0:
             QMessageBox.information(self, "Участник", "Сначала выберите ученика в таблице.")
             return
+        if operation in {"leave_early", "cancel_participant"}:
+            status = self.table.cellWidget(self.table.currentRow(), 1).currentData()
+            if operation == "leave_early" and status not in {"present", "late"}:
+                QMessageBox.information(
+                    self,
+                    "Досрочный уход",
+                    "Отметить уход можно только для ученика со статусом «Пришёл» или «Опоздал».",
+                )
+                return
+            if operation == "cancel_participant" and status != "expected":
+                QMessageBox.information(
+                    self,
+                    "Отмена участия",
+                    "Отменить можно только ещё не начавшееся участие ученика.",
+                )
+                return
         self.operation = operation
         self.accept()
 
@@ -2093,13 +2162,17 @@ class LearningPage(QWidget):
         lesson_id = int(lesson["id"])
         if dialog.operation == "leave_early":
             person_id = dialog.selected_person_id()
-            reason, accepted = QInputDialog.getText(self, "Ученик покинул занятие", "Причина:")
-            if person_id is not None and accepted and reason.strip():
+            reason_dialog = ReasonDialog(
+                "Ученик покинул занятие",
+                "Укажите причину досрочного ухода:",
+                self,
+            )
+            if person_id is not None and reason_dialog.exec():
                 self._run(
                     self.api.leave_lesson_early,
                     lesson_id,
                     person_id,
-                    reason.strip(),
+                    reason_dialog.reason(),
                     done=self._action_done,
                 )
             return

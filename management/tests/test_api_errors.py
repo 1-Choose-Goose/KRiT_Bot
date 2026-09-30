@@ -90,3 +90,39 @@ def test_request_does_not_expose_http_codes_or_network_internals(monkeypatch) ->
     assert "Проверьте подключение к сети" in message
     assert "WinError" not in message
     api.close()
+
+
+def test_early_leave_falls_back_for_older_server(monkeypatch) -> None:
+    api = ManagementApi("http://127.0.0.1:1")
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def request(method: str, path: str, **kwargs):
+        calls.append((method, path, kwargs))
+        if path.endswith("/leave-early"):
+            raise ApiError("Запись не найдена", status_code=404, path=path)
+        return {"attendance_status": "left_early", "note": "Плохое самочувствие"}
+
+    monkeypatch.setattr(api, "_request", request)
+
+    result = api.leave_lesson_early(7, 12, "Плохое самочувствие")
+
+    assert result["attendance_status"] == "left_early"
+    assert calls[0][0] == "POST"
+    assert calls[1] == (
+        "PUT",
+        "/learning/lessons/7/participants/12/attendance",
+        {"json": {"status": "left_early", "note": "Плохое самочувствие"}},
+    )
+    api.close()
+
+
+def test_early_leave_does_not_hide_non_404_errors(monkeypatch) -> None:
+    api = ManagementApi("http://127.0.0.1:1")
+
+    def request(*_args, **_kwargs):
+        raise ApiError("Ученик фактически не участвует", status_code=409)
+
+    monkeypatch.setattr(api, "_request", request)
+    with pytest.raises(ApiError, match="фактически не участвует"):
+        api.leave_lesson_early(7, 12, "Плохое самочувствие")
+    api.close()

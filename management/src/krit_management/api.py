@@ -7,7 +7,18 @@ import httpx
 
 
 class ApiError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        detail: object = None,
+        path: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.detail = detail
+        self.path = path
 
 
 FIELD_LABELS = {
@@ -336,12 +347,16 @@ class ManagementApi:
         return data if isinstance(data, dict) else {}
 
     def set_attendance(
-        self, lesson_id: int, person_id: int, attendance_status: str
+        self,
+        lesson_id: int,
+        person_id: int,
+        attendance_status: str,
+        note: str | None = None,
     ) -> dict[str, Any]:
         return self._request(
             "PUT",
             f"/learning/lessons/{lesson_id}/participants/{person_id}/attendance",
-            json={"status": attendance_status},
+            json={"status": attendance_status, "note": note},
         )
 
     def correct_attendance(
@@ -392,11 +407,18 @@ class ManagementApi:
         )
 
     def leave_lesson_early(self, lesson_id: int, person_id: int, reason: str) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            f"/learning/lessons/{lesson_id}/participants/{person_id}/leave-early",
-            json={"reason": reason},
-        )
+        try:
+            return self._request(
+                "POST",
+                f"/learning/lessons/{lesson_id}/participants/{person_id}/leave-early",
+                json={"reason": reason},
+            )
+        except ApiError as exc:
+            if exc.status_code != 404:
+                raise
+            # Older KRiT servers recorded early departure through attendance.
+            # Keep desktop updates usable while the server is being rolled out.
+            return self.set_attendance(lesson_id, person_id, "left_early", reason)
 
     def finish_lesson_early(
         self, lesson_id: int, reason: str, public_comment: str = ""
@@ -469,5 +491,10 @@ class ManagementApi:
                 detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
             except ValueError:
                 detail = response.text
-            raise ApiError(_format_api_error(response.status_code, detail, path))
+            raise ApiError(
+                _format_api_error(response.status_code, detail, path),
+                status_code=response.status_code,
+                detail=detail,
+                path=path,
+            )
         return response.json()
