@@ -5,6 +5,7 @@ import ctypes
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -18,6 +19,8 @@ class ApplyUpdateError(RuntimeError):
 
 
 def wait_for_process(pid: int, timeout: int = 120) -> None:
+    if sys.platform != "win32":
+        return
     handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, pid)
     if not handle:
         return

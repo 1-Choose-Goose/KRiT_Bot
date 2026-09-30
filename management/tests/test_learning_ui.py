@@ -330,6 +330,10 @@ def test_calendar_can_remove_selected_planned_lesson(monkeypatch) -> None:
     page = LearningPage(FakeApi())  # type: ignore[arg-type]
     assert page.pool.waitForDone(3_000)
     app.processEvents()
+    # Stop queued initial refresh callbacks before loading the fixture data.
+    # Their ordering differs between the Windows and Linux Qt event loops.
+    page.shutdown()
+    app.processEvents()
     lesson = {
         "id": 17,
         "start_at": "2026-09-30T10:30:00+05:00",
