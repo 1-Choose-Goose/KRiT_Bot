@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import ManagementApi
+from .communications_page import CommunicationsPage
 from .dialogs import ROLE_LABELS, PersonDialog, person_roles
 from .learning_page import LearningPage
 from .timeutils import parse_center
@@ -115,7 +116,8 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self._clients_section())
         self.learning_page = LearningPage(self.api)
         self.pages.addWidget(self.learning_page)
-        self.pages.addWidget(self._placeholder("Модуль рассылок"))
+        self.communications_page = CommunicationsPage(self.api)
+        self.pages.addWidget(self.communications_page)
         workspace_layout.addWidget(self.pages, 1)
         root_layout.addWidget(workspace, 1)
         self.setCentralWidget(root)
@@ -361,6 +363,8 @@ class MainWindow(QMainWindow):
         self.section_title.setText(("Клиенты", "Учебный процесс", "Рассылки")[index])
         if index == 1:
             self.learning_page.refresh()
+        elif index == 2:
+            self.communications_page.refresh()
 
     def _clients_section(self) -> QWidget:
         section = QWidget()
@@ -611,6 +615,12 @@ class MainWindow(QMainWindow):
                     ),
                 )
 
+    def open_person_notifications(self, person: dict[str, Any]) -> None:
+        self._change_section(2)
+        self.communications_page.tabs.setCurrentIndex(3)
+        self.communications_page.pending_settings_person_id = int(person["id"])
+        self.communications_page.refresh()
+
     def _render_attempts(self) -> None:
         self.attempts_table.setVisible(bool(self.attempts))
         self.attempts_empty.setVisible(not self.attempts)
@@ -695,6 +705,7 @@ class MainWindow(QMainWindow):
             open_related=self.edit_person,
             load_learning_history=self._load_person_history,
             open_lesson=self._open_lesson_from_person,
+            open_notifications=self.open_person_notifications,
         )
         history_index = next(
             (
@@ -743,6 +754,7 @@ class MainWindow(QMainWindow):
             open_related=self.edit_person,
             load_learning_history=self._load_person_history,
             open_lesson=self._open_lesson_from_person,
+            open_notifications=self.open_person_notifications,
         )
         if dialog.exec():
             relations = dialog.relation_state()
@@ -1005,6 +1017,7 @@ class MainWindow(QMainWindow):
         self.refresh_timer.stop()
         self.notification_timer.stop()
         self.learning_page.shutdown()
+        self.communications_page.shutdown()
         self.pool.clear()
         self.pool.waitForDone(16000)
         self._workers.clear()

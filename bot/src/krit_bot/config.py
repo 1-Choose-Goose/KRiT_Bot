@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     vk_callback_confirmation: SecretStr | None = None
     vk_community_id: int | None = None
     max_channel_id: int | None = None
+    max_required_channel_id: int | None = None
+    max_required_channel_link: str | None = None
     vk_long_poll_wait_seconds: int = Field(default=25, ge=1, le=90)
     syndication_poll_seconds: float = Field(default=2.0, ge=0.5, le=60)
     syndication_max_attempts: int = Field(default=5, ge=1, le=20)

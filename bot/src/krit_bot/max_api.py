@@ -54,7 +54,7 @@ class MaxApiClient:
         params: dict[str, Any] = {
             "timeout": poll_timeout,
             "limit": limit,
-            "types": "message_created",
+            "types": "message_created,message_callback,bot_started,bot_stopped,user_removed",
         }
         if marker is not None:
             params["marker"] = marker
@@ -78,6 +78,21 @@ class MaxApiClient:
 
     async def get_membership(self, *, chat_id: int) -> dict[str, Any]:
         return await self._request("GET", f"/chats/{chat_id}/members/me")
+
+    async def get_chat_members(self, *, chat_id: int, user_ids: list[int]) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            f"/chats/{chat_id}/members",
+            params={"user_ids": ",".join(str(value) for value in user_ids)},
+        )
+
+    async def answer_callback(
+        self, *, callback_id: str, notification: str | None = None
+    ) -> dict[str, Any]:
+        body = {"notification": notification} if notification else {}
+        return await self._request(
+            "POST", "/answers", params={"callback_id": callback_id}, json=body
+        )
 
     async def send_to_chat(
         self, *, chat_id: int, text: str, attachments: list[dict[str, Any]] | None = None
@@ -133,9 +148,7 @@ class MaxApiClient:
         ).digest()
         provided = signature.strip()
         hex_digest = digest.hex()
-        if len(provided) == len(hex_digest) and hmac.compare_digest(
-            provided.lower(), hex_digest
-        ):
+        if len(provided) == len(hex_digest) and hmac.compare_digest(provided.lower(), hex_digest):
             return True
         base64_candidates = (
             base64.b64encode(digest).decode("ascii"),

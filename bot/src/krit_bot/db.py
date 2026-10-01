@@ -47,7 +47,7 @@ class Base(DeclarativeBase):
     pass
 
 
-EXPECTED_ALEMBIC_REVISION = "20260930_release_safety_v5"
+EXPECTED_ALEMBIC_REVISION = "20260930_communications_v6"
 
 
 class Person(Base):
@@ -247,6 +247,7 @@ async def ensure_schema(engine: AsyncEngine) -> None:
     if engine.dialect.name != "sqlite":
         await verify_schema_current(engine)
         return
+    from . import communication_models as _communication_models  # noqa: F401
     from . import learning_models as _learning_models  # noqa: F401
 
     async with engine.begin() as connection:

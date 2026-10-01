@@ -51,6 +51,10 @@ class LearningNotificationWorker:
                 continue
             if not handled:
                 await asyncio.sleep(self.poll_seconds)
+            else:
+                # MAX documents a 2 messages/second limit per dialogue. A
+                # single worker plus this pacing keeps bulk sends conservative.
+                await asyncio.sleep(0.5)
 
     async def recover_interrupted(self) -> None:
         async with self.sessions() as session:
@@ -70,7 +74,11 @@ class LearningNotificationWorker:
                     NotificationJob.status.in_(["pending", "retry"]),
                     NotificationJob.scheduled_at <= now,
                 )
-                .order_by(NotificationJob.scheduled_at, NotificationJob.id)
+                .order_by(
+                    NotificationJob.priority.desc(),
+                    NotificationJob.scheduled_at,
+                    NotificationJob.id,
+                )
                 .with_for_update(skip_locked=True)
                 .limit(1)
             )
@@ -89,12 +97,40 @@ class LearningNotificationWorker:
                 job.status = "cancelled"
                 job.last_error = "Получатель не авторизован в MAX"
                 job.updated_at = utcnow()
+                if job.priority >= 2 or job.campaign_id is not None:
+                    session.add(
+                        AdminNotification(
+                            dedupe_key=f"notification-job:{job.id}:unavailable",
+                            kind="max_recipient_unavailable",
+                            title="Получатель недоступен в MAX",
+                            message=f"Получатель #{job.recipient_person_id} не подключён к MAX.",
+                            lesson_id=job.lesson_id,
+                        )
+                    )
+                from .communications import record_message, refresh_campaign_status
+
+                await record_message(
+                    session,
+                    person_id=job.recipient_person_id,
+                    direction="outbound",
+                    text=str(job.payload.get("text") or "Уведомление КРиТ"),
+                    delivery_status="unavailable",
+                    outbox_job_id=job.id,
+                    interaction_request_id=job.interaction_request_id,
+                    campaign_id=job.campaign_id,
+                    related_lesson_id=job.lesson_id,
+                )
+                await refresh_campaign_status(session, job.campaign_id)
                 await session.commit()
                 return True
             job.status = "processing"
             job.attempts += 1
             job.last_attempt_at = utcnow()
             job.updated_at = job.last_attempt_at
+            if job.campaign_id is not None:
+                from .communications import refresh_campaign_status
+
+                await refresh_campaign_status(session, job.campaign_id)
             text = str(job.payload.get("text") or "Уведомление КРиТ")
             if job.payload.get("template") == "teacher_reminder" and job.lesson_id is not None:
                 student_names = list(
@@ -115,8 +151,14 @@ class LearningNotificationWorker:
             await session.commit()
             job_id = job.id
             user_id = identity.max_user_id
+            keyboard = job.payload.get("keyboard")
+            attachments = (
+                [{"type": "inline_keyboard", "payload": {"buttons": keyboard}}]
+                if isinstance(keyboard, list) and keyboard
+                else None
+            )
         try:
-            result = await self.api.send_text(user_id=user_id, text=text)
+            result = await self.api.send_text(user_id=user_id, text=text, attachments=attachments)
         except (MaxApiError, OSError, TimeoutError) as exc:
             async with self.sessions() as session:
                 job = await session.get(NotificationJob, job_id)
@@ -141,6 +183,23 @@ class LearningNotificationWorker:
                     )
                 job.last_error = str(exc)[:2000]
                 job.updated_at = utcnow()
+                if job.status == "failed":
+                    from .communications import record_message
+
+                    await record_message(
+                        session,
+                        person_id=job.recipient_person_id,
+                        direction="outbound",
+                        text=str(job.payload.get("text") or "Уведомление КРиТ"),
+                        delivery_status="failed",
+                        outbox_job_id=job.id,
+                        interaction_request_id=job.interaction_request_id,
+                        campaign_id=job.campaign_id,
+                        related_lesson_id=job.lesson_id,
+                    )
+                from .communications import refresh_campaign_status
+
+                await refresh_campaign_status(session, job.campaign_id)
                 await session.commit()
             log.warning("learning_notification_failed", job_id=job_id, error=str(exc))
             return True
@@ -150,14 +209,32 @@ class LearningNotificationWorker:
                 message = result.get("message", result)
                 if isinstance(message, dict):
                     body = message.get("body")
-                    message_id = (
-                        body.get("mid") if isinstance(body, dict) else message.get("mid")
-                    )
+                    message_id = body.get("mid") if isinstance(body, dict) else message.get("mid")
                     if message_id:
                         job.external_message_id = str(message_id)
                 job.status = "sent"
                 job.sent_at = utcnow()
                 job.last_error = None
                 job.updated_at = utcnow()
+                from .communications import (
+                    apply_delivered_schedule_snapshot,
+                    record_message,
+                    refresh_campaign_status,
+                )
+
+                await record_message(
+                    session,
+                    person_id=job.recipient_person_id,
+                    direction="outbound",
+                    text=str(job.payload.get("text") or "Уведомление КРиТ"),
+                    delivery_status="sent",
+                    max_message_id=job.external_message_id,
+                    outbox_job_id=job.id,
+                    interaction_request_id=job.interaction_request_id,
+                    campaign_id=job.campaign_id,
+                    related_lesson_id=job.lesson_id,
+                )
+                await apply_delivered_schedule_snapshot(session, job)
+                await refresh_campaign_status(session, job.campaign_id)
                 await session.commit()
         return True

@@ -19,7 +19,15 @@ async def subscribe(url: str) -> None:
         result = await api.subscribe_webhook(
             url=url,
             secret=settings.max_webhook_secret.get_secret_value(),
-            update_types=["message_created", "bot_added", "bot_started", "bot_removed"],
+            update_types=[
+                "message_created",
+                "message_callback",
+                "bot_added",
+                "bot_started",
+                "bot_stopped",
+                "bot_removed",
+                "user_removed",
+            ],
         )
     finally:
         await api.close()

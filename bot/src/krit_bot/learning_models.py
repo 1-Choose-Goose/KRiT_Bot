@@ -31,6 +31,12 @@ class PersonMaxIdentity(Base):
     verified_phone: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
     max_user_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, index=True)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    channel_subscription_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="unknown"
+    )
+    channel_subscription_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -143,6 +149,7 @@ class Lesson(Base):
         Index("ix_lesson_status_start", "status", "start_at"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    notification_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     series_id: Mapped[int | None] = mapped_column(
         ForeignKey("learning_lesson_series.id", ondelete="SET NULL"), index=True
     )
@@ -287,10 +294,22 @@ class NotificationJob(Base):
             name="ck_learning_notification_status",
         ),
         Index("ix_learning_notification_due", "status", "scheduled_at"),
+        Index("ix_learning_notification_recipient", "recipient_person_id"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     dedupe_key: Mapped[str] = mapped_column(String(180), nullable=False)
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    recipient_context: Mapped[str] = mapped_column(String(16), nullable=False, default="student")
+    subject_person_id: Mapped[int | None] = mapped_column(
+        ForeignKey("persons.id", ondelete="CASCADE"), index=True
+    )
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    campaign_id: Mapped[int | None] = mapped_column(
+        ForeignKey("communication_campaigns.id", ondelete="SET NULL"), index=True
+    )
+    interaction_request_id: Mapped[int | None] = mapped_column(
+        ForeignKey("interaction_requests.id", ondelete="SET NULL"), index=True
+    )
     lesson_id: Mapped[int | None] = mapped_column(
         ForeignKey("learning_lessons.id", ondelete="CASCADE"), index=True
     )

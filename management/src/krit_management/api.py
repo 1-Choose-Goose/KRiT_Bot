@@ -147,9 +147,7 @@ def _format_api_error(status_code: int, detail: object, path: str = "") -> str:
     if isinstance(detail, dict):
         if detail.get("conflicts"):
             return _format_conflicts(detail)
-        if detail.get("kind") == "capacity" or (
-            "capacity" in detail and "participants" in detail
-        ):
+        if detail.get("kind") == "capacity" or ("capacity" in detail and "participants" in detail):
             return (
                 f"В кабинете {detail.get('capacity')} мест, "
                 f"а выбрано участников: {detail.get('participants')}. "
@@ -164,9 +162,7 @@ def _format_api_error(status_code: int, detail: object, path: str = "") -> str:
         translated = {
             "Unknown role": "Выбрана неизвестная роль клиента.",
             "Invalid phone": "Проверьте формат контактного телефона.",
-            "Invalid MAX authorization phone": (
-                "Проверьте формат телефона для авторизации MAX."
-            ),
+            "Invalid MAX authorization phone": ("Проверьте формат телефона для авторизации MAX."),
         }.get(normalized)
         if translated:
             return translated
@@ -243,9 +239,7 @@ class ManagementApi:
     def create_person_aggregate(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/people/aggregate", json=payload)
 
-    def update_person_aggregate(
-        self, person_id: int, payload: dict[str, Any]
-    ) -> dict[str, Any]:
+    def update_person_aggregate(self, person_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("PUT", f"/people/{person_id}/aggregate", json=payload)
 
     def archive_person(
@@ -477,6 +471,101 @@ class ManagementApi:
     def group_memberships(self, group_id: int) -> list[dict[str, Any]]:
         data = self._request("GET", f"/learning/groups/{group_id}/memberships")
         return data if isinstance(data, list) else []
+
+    def communication_send(
+        self, person_ids: list[int], text: str, *, urgent: bool = False, preview: bool = False
+    ) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            "/communications/send-message",
+            json={
+                "person_ids": person_ids,
+                "text": text,
+                "urgent": urgent,
+                "preview": preview,
+            },
+        )
+        return data if isinstance(data, dict) else {}
+
+    def communication_poll(
+        self, person_ids: list[int], text: str, *, preview: bool = False
+    ) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            "/communications/polls",
+            json={"person_ids": person_ids, "text": text, "preview": preview},
+        )
+        return data if isinstance(data, dict) else {}
+
+    def communication_campaigns(self) -> list[dict[str, Any]]:
+        data = self._request("GET", "/communications/campaigns")
+        return data if isinstance(data, list) else []
+
+    def retry_communication_campaign(self, campaign_id: int) -> dict[str, Any]:
+        data = self._request(
+            "POST", f"/communications/campaigns/{campaign_id}/retry-failed"
+        )
+        return data if isinstance(data, dict) else {}
+
+    def communication_conversations(self, search: str = "") -> list[dict[str, Any]]:
+        data = self._request("GET", "/communications/conversations", params={"search": search})
+        return data if isinstance(data, list) else []
+
+    def communication_messages(self, person_id: int) -> list[dict[str, Any]]:
+        data = self._request("GET", f"/communications/conversations/{person_id}/messages")
+        return data if isinstance(data, list) else []
+
+    def communication_reply(self, person_id: int, text: str) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            f"/communications/conversations/{person_id}/messages",
+            json={"person_ids": [person_id], "text": text},
+        )
+        return data if isinstance(data, dict) else {}
+
+    def communication_mark_read(self, person_id: int) -> dict[str, Any]:
+        data = self._request("POST", f"/communications/conversations/{person_id}/read")
+        return data if isinstance(data, dict) else {}
+
+    def communication_confirmations(self, date_from: str, date_to: str) -> list[dict[str, Any]]:
+        data = self._request(
+            "GET",
+            "/communications/confirmations",
+            params={"date_from": date_from, "date_to": date_to},
+        )
+        return data if isinstance(data, list) else []
+
+    def communication_global_settings(self) -> list[dict[str, Any]]:
+        data = self._request("GET", "/communications/settings/global")
+        return data if isinstance(data, list) else []
+
+    def save_communication_global_settings(
+        self, rules: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        data = self._request("PUT", "/communications/settings/global", json=rules)
+        return data if isinstance(data, list) else []
+
+    def communication_person_settings(self, person_id: int) -> dict[str, Any]:
+        data = self._request("GET", f"/communications/settings/person/{person_id}")
+        return data if isinstance(data, dict) else {}
+
+    def save_communication_person_settings(
+        self, person_id: int, overrides: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        data = self._request(
+            "PUT", f"/communications/settings/person/{person_id}", json=overrides
+        )
+        return data if isinstance(data, dict) else {}
+
+    def publish_schedule(
+        self, date_from: str, date_to: str, *, preview: bool = False
+    ) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            "/communications/schedule/publish",
+            json={"date_from": date_from, "date_to": date_to, "preview": preview},
+        )
+        return data if isinstance(data, dict) else {}
 
     def add_group_membership(self, group_id: int, person_id: int) -> dict[str, Any]:
         return self._request(

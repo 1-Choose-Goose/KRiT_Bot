@@ -629,113 +629,69 @@ async def _queue_lesson_notifications(
     participants: list[LessonParticipant],
     center_timezone: str = "Asia/Yekaterinburg",
 ) -> None:
-    active_participants = [item for item in participants if item.attendance_status != "excused"]
-    participant_ids = {item.person_id for item in active_participants}
-    people = {
-        item.id: item
-        for item in (
-            await session.scalars(select(Person).where(Person.id.in_(participant_ids)))
-        ).all()
-    }
-    guardian_rows = (
-        await session.execute(
-            select(StudentGuardian.student_id, StudentGuardian.guardian_id).where(
-                StudentGuardian.student_id.in_(participant_ids)
-            )
-        )
-    ).all()
-    guardians_by_student: dict[int, set[int]] = {}
-    for student_id, guardian_id in guardian_rows:
-        if guardian_id != student_id:
-            guardians_by_student.setdefault(student_id, set()).add(guardian_id)
-    local_start = _db_utc(lesson.start_at).astimezone(_display_timezone(center_timezone))
-    local_end = _db_utc(lesson.end_at).astimezone(_display_timezone(center_timezone))
-    for hours in (24, 3, 1):
-        scheduled_at = _db_utc(lesson.start_at) - timedelta(hours=hours)
-        if scheduled_at <= utcnow():
-            continue
-        jobs: list[tuple[str, int, dict[str, Any]]] = []
-        for participant in active_participants:
-            student = people.get(participant.person_id)
-            if student is None:
-                continue
-            jobs.append(
-                (
-                    f"student:{student.id}",
-                    student.id,
-                    {
-                        "template": "student_reminder",
-                        "hours": hours,
-                        "text": (
-                            "Напоминание о занятии\n\n"
-                            f"{local_start:%d.%m.%Y в %H:%M}\n"
-                            f"{lesson.subject_name_snapshot}\n"
-                            f"Преподаватель: {lesson.teacher_name_snapshot}\n"
-                            f"Кабинет: {lesson.room_name_snapshot}"
-                        ),
-                    },
-                )
-            )
-            name_parts = student.full_name.split()
-            first_name = name_parts[1] if len(name_parts) > 1 else student.full_name
-            for guardian_id in guardians_by_student.get(student.id, set()):
-                jobs.append(
-                    (
-                        f"guardian:{guardian_id}:student:{student.id}",
-                        guardian_id,
-                        {
-                            "template": "guardian_reminder",
-                            "hours": hours,
-                            "subject_person_id": student.id,
-                            "text": (
-                                f"Напоминание о занятии {first_name}\n\n"
-                                f"{local_start:%d.%m.%Y в %H:%M}\n"
-                                f"{lesson.subject_name_snapshot}\n"
-                                f"Преподаватель: {lesson.teacher_name_snapshot}\n"
-                                f"Кабинет: {lesson.room_name_snapshot}"
-                            ),
-                        },
-                    )
-                )
-        jobs.append(
-            (
-                f"teacher:{lesson.teacher_id}",
-                lesson.teacher_id,
-                {
-                    "template": "teacher_reminder",
-                    "hours": hours,
-                    "text": (
-                        f"Занятие через {hours} ч.\n\n"
-                        f"{lesson.subject_name_snapshot}\n"
-                        f"{local_start:%H:%M}–{local_end:%H:%M}\n"
-                        f"Кабинет: {lesson.room_name_snapshot}"
-                    ),
-                },
-            )
-        )
-        for key_suffix, recipient_id, payload in jobs:
-            key = f"lesson:{lesson.id}:reminder:{hours}h:{key_suffix}"
-            existing = await session.scalar(
-                select(NotificationJob).where(NotificationJob.dedupe_key == key)
-            )
-            if existing is None:
-                session.add(
-                    NotificationJob(
-                        dedupe_key=key,
-                        event_type=f"lesson_reminder_{hours}h",
-                        lesson_id=lesson.id,
-                        recipient_person_id=recipient_id,
-                        scheduled_at=scheduled_at,
-                        payload=payload,
-                    )
-                )
-            elif existing.status in {"pending", "retry"}:
-                existing.scheduled_at = scheduled_at
-                existing.payload = payload
-            elif existing.status == "cancelled":
-                existing.status = "pending"
-                existing.scheduled_at = scheduled_at
-                existing.payload = payload
+    # All reminders are reconciled as daily bundles in the same persistent
+    # outbox.  Keeping the former per-lesson producer would send duplicates.
+    from .communications import (
+        reconcile_confirmation_requests,
+        reconcile_daily_reminders,
+    )
+
+    timezone = _display_timezone(center_timezone)
+    await reconcile_daily_reminders(session, now=utcnow(), timezone=timezone)
+    await reconcile_confirmation_requests(session, now=utcnow(), timezone=timezone)
+
+
+async def _queue_communication_event(
+    session: AsyncSession,
+    *,
+    dedupe_key: str,
+    event_type: str,
+    recipient_person_id: int,
+    recipient_context: str,
+    subject_person_id: int | None,
+    text_value: str,
+    center_timezone: str,
+    lesson_id: int | None = None,
+    scheduled_at: datetime | None = None,
+) -> None:
+    from .communications import (
+        PRIORITY_VALUE,
+        NotificationPolicyResolver,
+        apply_quiet_hours,
+        enqueue_job,
+    )
+
+    policy = await NotificationPolicyResolver(session).resolve(
+        recipient_person_id=recipient_person_id,
+        recipient_context=recipient_context,
+        subject_person_id=subject_person_id,
+        event_code=event_type,
+    )
+    if not policy.enabled:
+        return
+    due = apply_quiet_hours(
+        scheduled_at or utcnow(),
+        policy=policy,
+        timezone=_display_timezone(center_timezone),
+    )
+    if due is None:
+        return
+    await enqueue_job(
+        session,
+        dedupe_key=dedupe_key,
+        event_type=event_type,
+        lesson_id=lesson_id,
+        recipient_person_id=recipient_person_id,
+        recipient_context=recipient_context,
+        subject_person_id=subject_person_id,
+        priority=PRIORITY_VALUE[policy.priority],
+        scheduled_at=due,
+        payload={
+            "text": text_value,
+            "recipient_context": recipient_context,
+            "subject_person_id": subject_person_id,
+        },
+    )
 
 
 async def _queue_lesson_state_notifications(
@@ -812,7 +768,7 @@ async def _queue_lesson_state_notifications(
                 f"Фактически: {actual_start:%H:%M}–{actual_end:%H:%M}"
                 f"{public_comment}"
             )
-        jobs = [(f"student:{person.id}", person.id, student_text)]
+        jobs = [(f"student:{person.id}", person.id, "student", student_text)]
         name_parts = person.full_name.split()
         first_name = name_parts[1] if len(name_parts) > 1 else person.full_name
         for guardian_id in guardians.get(person.id, set()):
@@ -841,27 +797,30 @@ async def _queue_lesson_state_notifications(
                     f"Фактически: {actual_start:%H:%M}–{actual_end:%H:%M}"
                     f"{public_comment}"
                 )
-            jobs.append((f"guardian:{guardian_id}:student:{person.id}", guardian_id, text_value))
-        for suffix, recipient_id, text_value in jobs:
-            key = f"lesson:{lesson.id}:{event}:{suffix}"
-            existing_id = await session.scalar(
-                select(NotificationJob.id).where(NotificationJob.dedupe_key == key)
-            )
-            if existing_id is None:
-                session.add(
-                    NotificationJob(
-                        dedupe_key=key,
-                        event_type=(
-                            "lesson_participant_started"
-                            if event == "participant_started"
-                            else f"lesson_{event}"
-                        ),
-                        lesson_id=lesson.id,
-                        recipient_person_id=recipient_id,
-                        scheduled_at=utcnow(),
-                        payload={"text": text_value, "subject_person_id": person.id},
-                    )
+            jobs.append(
+                (
+                    f"guardian:{guardian_id}:student:{person.id}",
+                    guardian_id,
+                    "guardian",
+                    text_value,
                 )
+            )
+        normalized_event = (
+            "lesson_participant_started" if event == "participant_started" else f"lesson_{event}"
+        )
+        for suffix, recipient_id, recipient_context, text_value in jobs:
+            key = f"lesson:{lesson.id}:{event}:{suffix}"
+            await _queue_communication_event(
+                session,
+                dedupe_key=key,
+                event_type=normalized_event,
+                lesson_id=lesson.id,
+                recipient_person_id=recipient_id,
+                recipient_context=recipient_context,
+                subject_person_id=person.id,
+                text_value=text_value,
+                center_timezone=center_timezone,
+            )
 
 
 async def _queue_guardian_event(
@@ -882,29 +841,27 @@ async def _queue_guardian_event(
             )
         ).all()
     )
-    verb = "пришёл в КРиТ" if event_type == "arrival" else "ушёл из КРиТ"
+    verb = "прибыл(а) в КРиТ" if event_type == "arrival" else "покинул(а) КРиТ"
+    local_occurred = occurred_at.astimezone(_display_timezone(center_timezone))
     for guardian_id in guardian_ids:
         key = f"presence:{event_type}:{person.id}:{occurred_at.isoformat()}:person:{guardian_id}"
-        if (
-            await session.scalar(
-                select(NotificationJob.id).where(NotificationJob.dedupe_key == key)
-            )
-            is None
-        ):
-            session.add(
-                NotificationJob(
-                    dedupe_key=key,
-                    event_type=f"presence_{event_type}",
-                    recipient_person_id=guardian_id,
-                    scheduled_at=occurred_at,
-                    payload={
-                        "text": (
-                            f"{person.full_name} {verb} в "
-                            f"{occurred_at.astimezone(_display_timezone(center_timezone)):%H:%M}."
-                        )
-                    },
-                )
-            )
+        normalized_event = (
+            "student_arrived_club" if event_type == "arrival" else "student_left_club"
+        )
+        await _queue_communication_event(
+            session,
+            dedupe_key=key,
+            event_type=normalized_event,
+            recipient_person_id=guardian_id,
+            recipient_context="guardian",
+            subject_person_id=person.id,
+            scheduled_at=occurred_at,
+            text_value=(
+                f"{person.full_name} {verb}\n\n"
+                f"{local_occurred:%d.%m.%Y}\n{local_occurred:%H:%M}"
+            ),
+            center_timezone=center_timezone,
+        )
 
 
 async def _ensure_admin_notifications(session: AsyncSession, now: datetime) -> None:
@@ -1696,6 +1653,43 @@ def create_learning_router(
                 )
             if item.series_id is not None and not series_edit:
                 item.series_exception = True
+            current_participants = list(
+                (
+                    await session.scalars(
+                        select(LessonParticipant).where(LessonParticipant.lesson_id == item.id)
+                    )
+                ).all()
+            )
+            previous_participant_ids = {
+                entry.person_id
+                for entry in current_participants
+                if entry.attendance_status != "excused"
+            }
+            semantic_change = any(
+                (
+                    item.subject_id != subject.id,
+                    item.teacher_id != teacher.id,
+                    item.room_id != room.id,
+                    item.group_id != payload.group_id,
+                    _db_utc(item.start_at) != start_at,
+                    _db_utc(item.end_at) != end_at,
+                    previous_participant_ids != {person.id for person in participants},
+                )
+            )
+            if semantic_change:
+                item.notification_revision += 1
+                from .communication_models import LessonAttendanceIntent
+
+                await session.execute(
+                    LessonAttendanceIntent.__table__.update()
+                    .where(
+                        LessonAttendanceIntent.lesson_id == item.id,
+                        LessonAttendanceIntent.status.in_(
+                            ["pending", "confirmed", "declined", "conflict"]
+                        ),
+                    )
+                    .values(status="needs_reconfirmation", updated_at=utcnow())
+                )
             item.subject_id, item.teacher_id, item.room_id, item.group_id = (
                 subject.id,
                 teacher.id,
@@ -1712,13 +1706,6 @@ def create_learning_router(
                 teacher.full_name,
                 room.name,
                 subject.name,
-            )
-            current_participants = list(
-                (
-                    await session.scalars(
-                        select(LessonParticipant).where(LessonParticipant.lesson_id == item.id)
-                    )
-                ).all()
             )
             current_by_person = {entry.person_id: entry for entry in current_participants}
             desired_by_person = {person.id: person for person in participants}
@@ -2401,26 +2388,26 @@ def create_learning_router(
                 if active_names
                 else "пока нет участников"
             )
-            session.add(
-                NotificationJob(
-                    dedupe_key=(
-                        f"lesson:{lesson.id}:teacher_replacement:"
-                        f"{replacement.id}:{replacement_at.isoformat()}"
-                    ),
-                    event_type="lesson_teacher_replacement",
-                    lesson_id=lesson.id,
-                    recipient_person_id=replacement.id,
-                    scheduled_at=replacement_at,
-                    payload={
-                        "text": (
-                            "Вам назначена замена.\n\n"
-                            f"{lesson.subject_name_snapshot}\n"
-                            f"Сегодня до {local_end:%H:%M}\n"
-                            f"Кабинет: {lesson.room_name_snapshot}\n\n"
-                            f"Ученики:\n{students_text}"
-                        )
-                    },
-                )
+            await _queue_communication_event(
+                session,
+                dedupe_key=(
+                    f"lesson:{lesson.id}:teacher_replacement:"
+                    f"{replacement.id}:{replacement_at.isoformat()}"
+                ),
+                event_type="teacher_replaced",
+                lesson_id=lesson.id,
+                recipient_person_id=replacement.id,
+                recipient_context="teacher",
+                subject_person_id=replacement.id,
+                scheduled_at=replacement_at,
+                text_value=(
+                    "Вам назначена замена.\n\n"
+                    f"{lesson.subject_name_snapshot}\n"
+                    f"Сегодня до {local_end:%H:%M}\n"
+                    f"Кабинет: {lesson.room_name_snapshot}\n\n"
+                    f"Ученики:\n{students_text}"
+                ),
+                center_timezone=center_timezone,
             )
             session.add(
                 AuditEvent(
@@ -2470,6 +2457,14 @@ def create_learning_router(
                 payload.reason,
                 utcnow(),
             )
+            item.notification_revision += 1
+            from .communication_models import LessonAttendanceIntent
+
+            await session.execute(
+                LessonAttendanceIntent.__table__.update()
+                .where(LessonAttendanceIntent.lesson_id == item.id)
+                .values(status="needs_reconfirmation", updated_at=utcnow())
+            )
             await _resolve_admin_condition(session, f"lesson:{item.id}:not_started")
             await _resolve_admin_condition(session, f"lesson:{item.id}:not_finished")
             await _resolve_admin_condition(session, f"lesson:{item.id}:no_active_students")
@@ -2489,34 +2484,37 @@ def create_learning_router(
                 ).all()
             )
             participant_ids = {entry.person_id for entry in participants}
-            guardians = set(
-                (
-                    await session.scalars(
-                        select(StudentGuardian.guardian_id).where(
-                            StudentGuardian.student_id.in_(participant_ids),
-                            StudentGuardian.guardian_id != StudentGuardian.student_id,
-                        )
+            guardian_rows = (
+                await session.execute(
+                    select(StudentGuardian.student_id, StudentGuardian.guardian_id).where(
+                        StudentGuardian.student_id.in_(participant_ids),
+                        StudentGuardian.guardian_id != StudentGuardian.student_id,
                     )
-                ).all()
+                )
+            ).all()
+            recipients = [(student_id, "student", student_id) for student_id in participant_ids]
+            recipients.extend(
+                (guardian_id, "guardian", student_id) for student_id, guardian_id in guardian_rows
             )
-            recipients = participant_ids | guardians | {item.teacher_id}
+            recipients.append((item.teacher_id, "teacher", item.teacher_id))
             local_start = _db_utc(item.start_at).astimezone(_display_timezone(center_timezone))
-            for recipient_id in recipients:
-                session.add(
-                    NotificationJob(
-                        dedupe_key=f"lesson:{item.id}:cancelled:person:{recipient_id}",
-                        event_type="lesson_cancelled",
-                        lesson_id=item.id,
-                        recipient_person_id=recipient_id,
-                        scheduled_at=utcnow(),
-                        payload={
-                            "text": (
-                                f"Занятие «{item.subject_name_snapshot}» "
-                                f"{local_start:%d.%m в %H:%M} "
-                                f"отменено. Причина: {payload.reason}"
-                            )
-                        },
-                    )
+            for recipient_id, recipient_context, subject_id in recipients:
+                await _queue_communication_event(
+                    session,
+                    dedupe_key=(
+                        f"lesson:{item.id}:cancelled:person:{recipient_id}:subject:{subject_id}"
+                    ),
+                    event_type="lesson_cancelled",
+                    lesson_id=item.id,
+                    recipient_person_id=recipient_id,
+                    recipient_context=recipient_context,
+                    subject_person_id=subject_id,
+                    text_value=(
+                        f"Занятие «{item.subject_name_snapshot}» "
+                        f"{local_start:%d.%m в %H:%M} "
+                        f"отменено. Причина: {payload.reason}"
+                    ),
+                    center_timezone=center_timezone,
                 )
             session.add(
                 AuditEvent(
@@ -2778,8 +2776,63 @@ def create_learning_router(
                 person_name_snapshot=person.full_name,
             )
             session.add(participant)
+            lesson.notification_revision += 1
+            from .communication_models import LessonAttendanceIntent
+
+            await session.execute(
+                LessonAttendanceIntent.__table__.update()
+                .where(
+                    LessonAttendanceIntent.lesson_id == lesson.id,
+                    LessonAttendanceIntent.student_person_id == person_id,
+                )
+                .values(status="needs_reconfirmation", updated_at=utcnow())
+            )
             await session.flush()
             await _queue_lesson_notifications(session, lesson, [participant], center_timezone)
+            local_start = _db_utc(lesson.start_at).astimezone(_display_timezone(center_timezone))
+            event_text = (
+                f"Вы добавлены на занятие «{lesson.subject_name_snapshot}» "
+                f"{local_start:%d.%m в %H:%M}."
+            )
+            await _queue_communication_event(
+                session,
+                dedupe_key=f"lesson:{lesson.id}:participant_added:student:{person.id}",
+                event_type="participant_added",
+                lesson_id=lesson.id,
+                recipient_person_id=person.id,
+                recipient_context="student",
+                subject_person_id=person.id,
+                text_value=event_text,
+                center_timezone=center_timezone,
+            )
+            guardian_ids = list(
+                (
+                    await session.scalars(
+                        select(StudentGuardian.guardian_id).where(
+                            StudentGuardian.student_id == person.id,
+                            StudentGuardian.guardian_id != person.id,
+                        )
+                    )
+                ).all()
+            )
+            for guardian_id in guardian_ids:
+                await _queue_communication_event(
+                    session,
+                    dedupe_key=(
+                        f"lesson:{lesson.id}:participant_added:guardian:"
+                        f"{guardian_id}:student:{person.id}"
+                    ),
+                    event_type="participant_added",
+                    lesson_id=lesson.id,
+                    recipient_person_id=guardian_id,
+                    recipient_context="guardian",
+                    subject_person_id=person.id,
+                    text_value=(
+                        f"{person.full_name} добавлен(а) на занятие "
+                        f"«{lesson.subject_name_snapshot}»."
+                    ),
+                    center_timezone=center_timezone,
+                )
             session.add(
                 AuditEvent(
                     actor_admin_id=admin_id,
@@ -2912,7 +2965,64 @@ def create_learning_router(
                             "conflicts": conflicts,
                         },
                     )
-                await _queue_lesson_notifications(session, lesson, [participant], center_timezone)
+            lesson.notification_revision += 1
+            from .communication_models import LessonAttendanceIntent
+
+            await session.execute(
+                LessonAttendanceIntent.__table__.update()
+                .where(
+                    LessonAttendanceIntent.lesson_id == lesson.id,
+                    LessonAttendanceIntent.student_person_id == person_id,
+                )
+                .values(status="needs_reconfirmation", updated_at=utcnow())
+            )
+            await session.flush()
+            await _queue_lesson_notifications(session, lesson, [participant], center_timezone)
+            notification_event = (
+                "participant_removed" if state == "excused" else "participant_added"
+            )
+            state_text = f"Участие в занятии «{lesson.subject_name_snapshot}» " + (
+                "отменено." if state == "excused" else "восстановлено."
+            )
+            await _queue_communication_event(
+                session,
+                dedupe_key=(
+                    f"lesson:{lesson.id}:{notification_event}:student:{person_id}:"
+                    f"revision:{lesson.notification_revision}"
+                ),
+                event_type=notification_event,
+                lesson_id=lesson.id,
+                recipient_person_id=person_id,
+                recipient_context="student",
+                subject_person_id=person_id,
+                text_value=state_text,
+                center_timezone=center_timezone,
+            )
+            guardian_ids = list(
+                (
+                    await session.scalars(
+                        select(StudentGuardian.guardian_id).where(
+                            StudentGuardian.student_id == person_id,
+                            StudentGuardian.guardian_id != person_id,
+                        )
+                    )
+                ).all()
+            )
+            for guardian_id in guardian_ids:
+                await _queue_communication_event(
+                    session,
+                    dedupe_key=(
+                        f"lesson:{lesson.id}:{notification_event}:guardian:{guardian_id}:"
+                        f"student:{person_id}:revision:{lesson.notification_revision}"
+                    ),
+                    event_type=notification_event,
+                    lesson_id=lesson.id,
+                    recipient_person_id=guardian_id,
+                    recipient_context="guardian",
+                    subject_person_id=person_id,
+                    text_value=state_text,
+                    center_timezone=center_timezone,
+                )
             session.add(
                 AuditEvent(
                     actor_admin_id=admin_id,

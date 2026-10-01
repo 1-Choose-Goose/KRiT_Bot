@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from krit_bot.communication_models import CommunicationMessage
 from krit_bot.config import extract_first_token
 from krit_bot.db import Base, Person, PersonRole, build_session_factory
 from krit_bot.handler import EchoHandler, parse_message_created
@@ -67,7 +69,7 @@ def test_token_file_uses_only_first_non_empty_line() -> None:
     assert extract_first_token(raw) == "max-token"
 
 
-async def test_only_authorized_user_receives_echo() -> None:
+async def test_only_authorized_message_is_stored_for_the_admin() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -96,8 +98,13 @@ async def test_only_authorized_user_receives_echo() -> None:
     await handler.handle(update(42, "Раз"))
     await handler.handle(update(99, "Два", "m2"))
 
-    assert api.sent == [(42, "Эхо: Раз")]
+    assert api.sent == []
     assert api.contact_requests == [99]
+    async with sessions() as session:
+        message = await session.scalar(select(CommunicationMessage))
+        assert message is not None
+        assert message.text == "Раз"
+        assert message.direction == "inbound"
     await engine.dispose()
 
 
@@ -129,7 +136,9 @@ async def test_duplicate_message_is_ignored() -> None:
     await handler.handle(update(42))
     await handler.handle(update(42))
 
-    assert api.sent == [(42, "Эхо: Привет")]
+    assert api.sent == []
+    async with sessions() as session:
+        assert await session.scalar(select(func.count(CommunicationMessage.id))) == 1
     await engine.dispose()
 
 
@@ -161,6 +170,5 @@ async def test_verified_contact_links_user_once() -> None:
         assert identity.max_user_id == 42
     assert api.sent == [
         (42, "Авторизация завершена. Добро пожаловать в «КРиТ»!"),
-        (42, "Эхо: Тест"),
     ]
     await engine.dispose()

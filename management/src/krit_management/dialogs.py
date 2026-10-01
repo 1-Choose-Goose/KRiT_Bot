@@ -138,6 +138,7 @@ class PersonDialog(QDialog):
         load_learning_history: Callable[[int, list[str], Callable[[dict[str, Any]], None]], None]
         | None = None,
         open_lesson: Callable[[int], None] | None = None,
+        open_notifications: Callable[[dict[str, Any]], None] | None = None,
         allow_relations: bool = True,
     ) -> None:
         super().__init__(parent)
@@ -146,6 +147,7 @@ class PersonDialog(QDialog):
         self.open_related = open_related
         self.load_learning_history = load_learning_history
         self.open_lesson = open_lesson
+        self.open_notifications = open_notifications
         self._history_loaded = False
         self.allow_relations = allow_relations
         self.relation_states: dict[str, list[dict[str, Any]]] = {
@@ -292,10 +294,21 @@ class PersonDialog(QDialog):
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("Сохранить")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setProperty("kind", "secondary")
+        if self.person.get("id") and self.open_notifications is not None:
+            notification_button = buttons.addButton(
+                "Уведомления", QDialogButtonBox.ButtonRole.ActionRole
+            )
+            notification_button.setProperty("kind", "secondary")
+            notification_button.clicked.connect(self._open_notifications)
         buttons.accepted.connect(self._accept_if_valid)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self._role_changed()
+
+    def _open_notifications(self) -> None:
+        if self.open_notifications is not None:
+            self.reject()
+            self.open_notifications(self.person)
 
     def _section_changed(self, index: int) -> None:
         if self.sections.tabText(index) != "Учебный процесс" or self._history_loaded:

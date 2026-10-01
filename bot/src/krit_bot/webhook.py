@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
+from .communications import create_communications_router, run_communications_maintenance
 from .config import Settings
 from .db import (
     AccessAttempt,
@@ -201,11 +202,17 @@ def create_app(settings: Settings) -> FastAPI:
         token=settings.max_bot_token.get_secret_value(),  # type: ignore[union-attr]
         base_url=settings.max_api_base_url,
     )
-    handler = EchoHandler(sessions=sessions, api=api)
+    handler = EchoHandler(
+        sessions=sessions,
+        api=api,
+        required_channel_id=settings.max_required_channel_id,
+        required_channel_link=settings.max_required_channel_link,
+    )
     polling_task: asyncio.Task[None] | None = None
     syndication_task: asyncio.Task[None] | None = None
     vk_long_poll_task: asyncio.Task[None] | None = None
     learning_notifications_task: asyncio.Task[None] | None = None
+    communications_task: asyncio.Task[None] | None = None
     syndication_worker: SyndicationWorker | None = None
     invalid_password_hash = password_hash.hash("invalid-password")
 
@@ -263,12 +270,16 @@ def create_app(settings: Settings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         nonlocal polling_task, syndication_task, vk_long_poll_task, syndication_worker
-        nonlocal learning_notifications_task
+        nonlocal learning_notifications_task, communications_task
         await ensure_schema(engine)
         await ensure_bootstrap_admin()
         learning_notifications_task = asyncio.create_task(
             LearningNotificationWorker(sessions=sessions, api=api).run(),
             name="learning-notifications",
+        )
+        communications_task = asyncio.create_task(
+            run_communications_maintenance(sessions, center_timezone=settings.center_timezone),
+            name="communications-maintenance",
         )
         if settings.bot_mode == "polling":
             me = await api.get_me()
@@ -349,12 +360,22 @@ def create_app(settings: Settings) -> FastAPI:
         if learning_notifications_task is not None:
             learning_notifications_task.cancel()
             await asyncio.gather(learning_notifications_task, return_exceptions=True)
+        if communications_task is not None:
+            communications_task.cancel()
+            await asyncio.gather(communications_task, return_exceptions=True)
         await api.close()
         await engine.dispose()
 
     app = FastAPI(title="KRiT MAX Bot", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.include_router(
         create_learning_router(
+            sessions,
+            require_management_token,
+            center_timezone=settings.center_timezone,
+        )
+    )
+    app.include_router(
+        create_communications_router(
             sessions,
             require_management_token,
             center_timezone=settings.center_timezone,
