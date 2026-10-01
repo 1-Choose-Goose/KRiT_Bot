@@ -421,6 +421,9 @@ async def _conflicts(
         .join(Lesson, Lesson.id == LessonTeacherSegment.lesson_id)
         .where(
             Lesson.status == "in_progress",
+            # An accidentally unclosed old teacher segment must not reserve a
+            # room or a person forever. Lessons are limited to 24 hours.
+            Lesson.start_at > start_at - timedelta(days=1),
             LessonTeacherSegment.started_at < end_at,
             or_(
                 LessonTeacherSegment.ended_at.is_(None),

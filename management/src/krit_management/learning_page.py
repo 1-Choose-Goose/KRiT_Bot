@@ -530,6 +530,7 @@ class LessonDialog(QDialog):
         self.duration.valueChanged.connect(self._update_end_display)
         self.students = QTableWidget(0, 3)
         self.students.setHorizontalHeaderLabels(["Выбрать", "Ученик", "Источник"])
+        self.students.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.students.verticalHeader().setVisible(False)
         self.students.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.students.setColumnWidth(0, 90)

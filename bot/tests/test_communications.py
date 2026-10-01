@@ -19,6 +19,7 @@ from krit_bot.communications import (
     EffectivePolicy,
     NotificationPolicyResolver,
     _campaign_poll_details,
+    _poll_targets,
     _schedule_text,
     apply_quiet_hours,
     cleanup_communication_history,
@@ -38,7 +39,17 @@ from krit_bot.db import (
     ensure_schema,
     utcnow,
 )
-from krit_bot.learning_models import Lesson, LessonParticipant, NotificationJob, Room, Subject
+from krit_bot.learning import _conflicts
+from krit_bot.learning_models import (
+    GroupMembership,
+    Lesson,
+    LessonParticipant,
+    LessonTeacherSegment,
+    NotificationJob,
+    Room,
+    StudyGroup,
+    Subject,
+)
 
 
 async def _database(tmp_path):
@@ -629,7 +640,7 @@ async def test_poll_details_keep_answers_delivery_and_family_agreement(tmp_path)
                 question=campaign.title,
                 recipient_person_id=person.id,
                 recipient_context=context,
-                subject_person_id=student.id if context != "teacher" else None,
+                subject_person_id=student.id,
                 campaign_id=campaign.id,
             )
             session.add(request)
@@ -675,9 +686,105 @@ async def test_poll_details_keep_answers_delivery_and_family_agreement(tmp_path)
         }
         assert details["recipients"][2]["delivery_status"] == "sent"
         assert details["recipients"][2]["answer"] is None
-        assert details["agreements"][0]["teacher_name"] == "Олег Учитель"
-        assert details["agreements"][0]["teacher_answer"] is None
+        assert details["agreements"][0]["guardians"] == [
+            {"person_id": guardian.id, "name": "Ирина Родитель", "answer": "yes"}
+        ]
+        assert details["agreements"][0]["teachers"] == [
+            {"person_id": teacher.id, "name": "Олег Учитель", "answer": None}
+        ]
         assert details["agreements"][0]["result"] == "conflict"
+    await engine.dispose()
+
+
+async def test_poll_target_expansion_builds_student_family_teacher_card(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    async with sessions() as session:
+        student = Person(
+            full_name="Анна Ученица",
+            phone="+79000000081",
+            role_links=[PersonRole(role="student")],
+        )
+        guardian = Person(
+            full_name="Ирина Родитель",
+            phone="+79000000082",
+            role_links=[PersonRole(role="parent")],
+        )
+        teacher = Person(
+            full_name="Олег Учитель",
+            phone="+79000000083",
+            role_links=[PersonRole(role="teacher")],
+        )
+        session.add_all([student, guardian, teacher])
+        await session.flush()
+        group = StudyGroup(name="Группа опроса", default_teacher_id=teacher.id)
+        session.add(group)
+        await session.flush()
+        session.add_all(
+            [
+                StudentGuardian(student_id=student.id, guardian_id=guardian.id),
+                GroupMembership(
+                    group_id=group.id,
+                    person_id=student.id,
+                    start_at=utcnow() - timedelta(days=1),
+                ),
+            ]
+        )
+        await session.flush()
+
+        targets = await _poll_targets(session, [student])
+
+        assert set(targets) == {
+            type(targets[0])(student.id, "student", student.id),
+            type(targets[0])(guardian.id, "guardian", student.id),
+            type(targets[0])(teacher.id, "teacher", student.id),
+        }
+    await engine.dispose()
+
+
+async def test_old_unclosed_teacher_segment_does_not_block_future_lesson(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    async with sessions() as session:
+        teacher = Person(full_name="Олег Учитель", phone="+79000000091")
+        subject = Subject(name="Предмет старого занятия", color="#2563eb")
+        room = Room(name="Кабинет старого занятия", capacity=10)
+        session.add_all([teacher, subject, room])
+        await session.flush()
+        old_start = datetime(2026, 9, 30, 15, 0, tzinfo=UTC)
+        lesson = Lesson(
+            subject_id=subject.id,
+            teacher_id=teacher.id,
+            room_id=room.id,
+            start_at=old_start,
+            end_at=old_start + timedelta(hours=1),
+            status="in_progress",
+            teacher_name_snapshot=teacher.full_name,
+            room_name_snapshot=room.name,
+            subject_name_snapshot=subject.name,
+        )
+        session.add(lesson)
+        await session.flush()
+        session.add(
+            LessonTeacherSegment(
+                lesson_id=lesson.id,
+                teacher_person_id=teacher.id,
+                teacher_name_snapshot=teacher.full_name,
+                started_at=old_start,
+                segment_type="primary",
+            )
+        )
+        await session.flush()
+
+        new_start = datetime(2026, 10, 2, 13, 0, tzinfo=UTC)
+        conflicts = await _conflicts(
+            session,
+            start_at=new_start,
+            end_at=new_start + timedelta(hours=1),
+            teacher_id=teacher.id,
+            room_id=room.id,
+            participant_ids=set(),
+        )
+
+        assert conflicts == []
     await engine.dispose()
 
 

@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import ManagementApi
-from .timeutils import parse_center
+from .timeutils import now_center, parse_center
 from .widgets import SafeComboBox, SearchableComboBox
 from .workers import Worker
 
@@ -133,6 +133,37 @@ def _table(headers: list[str]) -> QTableWidget:
     return result
 
 
+def _dialog_preview(full_name: str, value: object) -> str:
+    lines = [line.strip() for line in str(value or "").splitlines() if line.strip()]
+    lines = [line for line in lines if line.casefold() != full_name.strip().casefold()]
+    if not lines:
+        return "Нет сообщений"
+    first = lines[0]
+    lowered = first.casefold()
+    if lowered.startswith("ваши занятия") or lowered.startswith("занятия "):
+        return "Расписание занятий"
+    return " ".join(lines)[:72]
+
+
+def _dialog_time(value: object) -> str:
+    if not value:
+        return ""
+    try:
+        moment = parse_center(value)
+    except (TypeError, ValueError):
+        return ""
+    return moment.strftime("%H:%M" if moment.date() == now_center().date() else "%d.%m")
+
+
+def _answer_people(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "Не назначен"
+    return "\n".join(
+        f"{item.get('name', '—')} — {ANSWER_LABELS.get(str(item.get('answer')), 'нет ответа')}"
+        for item in items
+    )
+
+
 class PollDetailsDialog(QDialog):
     def __init__(self, details: dict[str, Any], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -194,17 +225,15 @@ class PollDetailsDialog(QDialog):
             [
                 "Ученик",
                 "Ответ ученика",
-                "Родитель",
-                "Ответ родителя",
-                "Преподаватель",
-                "Ответ преподавателя",
+                "Ответы родителей",
+                "Ответы преподавателей",
                 "Итог",
             ]
         )
         agreement_header = self.agreements.horizontalHeader()
         agreement_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         agreement_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        agreement_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        agreement_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         agreements = list(details.get("agreements") or [])
         self.agreements.setRowCount(len(agreements))
         agreement_labels = {
@@ -216,14 +245,13 @@ class PollDetailsDialog(QDialog):
             values = [
                 item.get("student_name", ""),
                 ANSWER_LABELS.get(str(item.get("student_answer")), "—"),
-                item.get("guardian_name") or "—",
-                ANSWER_LABELS.get(str(item.get("guardian_answer")), "—"),
-                item.get("teacher_name") or "—",
-                ANSWER_LABELS.get(str(item.get("teacher_answer")), "—"),
+                _answer_people(list(item.get("guardians") or [])),
+                _answer_people(list(item.get("teachers") or [])),
                 agreement_labels.get(str(item.get("result")), "—"),
             ]
             for column, value in enumerate(values):
                 self.agreements.setItem(row, column, QTableWidgetItem(str(value)))
+            self.agreements.resizeRowToContents(row)
         self.agreements.setMaximumHeight(210)
         layout.addWidget(self.agreements, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -321,7 +349,16 @@ class CommunicationsPage(QWidget):
         self.campaigns = _table(
             ["Дата", "Тип", "Сообщение", "Статус", "Результат", "Действия"]
         )
-        self.campaigns.setMaximumHeight(180)
+        campaign_header = self.campaigns.horizontalHeader()
+        campaign_header.setStretchLastSection(False)
+        for column, width in ((0, 135), (1, 125), (3, 110), (4, 210), (5, 140)):
+            campaign_header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            self.campaigns.setColumnWidth(column, width)
+        campaign_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.campaigns.verticalHeader().setDefaultSectionSize(44)
+        self.campaigns.setMinimumHeight(190)
+        self.campaigns.setMaximumHeight(240)
+        self.campaigns.cellDoubleClicked.connect(self._campaign_double_clicked)
         layout.addWidget(self.campaigns)
         return page
 
@@ -659,12 +696,17 @@ class CommunicationsPage(QWidget):
                 outcome,
             ]
             for column, text in enumerate(values):
-                self.campaigns.setItem(row, column, QTableWidgetItem(text))
+                cell = QTableWidgetItem(text)
+                cell.setToolTip(text)
+                if column == 0:
+                    cell.setData(Qt.ItemDataRole.UserRole, int(item["id"]))
+                    cell.setData(Qt.ItemDataRole.UserRole + 1, str(item.get("type", "")))
+                self.campaigns.setItem(row, column, cell)
             actions: list[QPushButton] = []
             if item.get("type") == "custom_poll":
                 actions.append(
                     _button(
-                        "Открыть опрос",
+                        "Открыть",
                         lambda campaign_id=int(item["id"]): self.open_poll(campaign_id),
                     )
                 )
@@ -684,9 +726,15 @@ class CommunicationsPage(QWidget):
                 action_layout.setContentsMargins(4, 2, 4, 2)
                 action_layout.setSpacing(5)
                 for button in actions:
+                    button.setProperty("density", "compact")
                     action_layout.addWidget(button)
                 action_layout.addStretch(1)
                 self.campaigns.setCellWidget(row, 5, container)
+
+    def _campaign_double_clicked(self, row: int, _column: int) -> None:
+        item = self.campaigns.item(row, 0)
+        if item is not None and item.data(Qt.ItemDataRole.UserRole + 1) == "custom_poll":
+            self.open_poll(int(item.data(Qt.ItemDataRole.UserRole)))
 
     def open_poll(self, campaign_id: int) -> None:
         self._run(
@@ -736,7 +784,8 @@ class CommunicationsPage(QWidget):
             item.setData(Qt.ItemDataRole.UserRole + 1, row.get("full_name", ""))
             item.setData(Qt.ItemDataRole.UserRole + 2, unread)
             item.setData(Qt.ItemDataRole.UserRole + 3, row.get("last_message_preview", ""))
-            item.setSizeHint(QSize(0, 58))
+            item.setData(Qt.ItemDataRole.UserRole + 4, row.get("last_message_at"))
+            item.setSizeHint(QSize(0, 64))
             self.dialogs.addItem(item)
             self._render_dialog_list_item(item)
             if current == int(row["person_id"]):
@@ -753,18 +802,24 @@ class CommunicationsPage(QWidget):
         name = QLabel(str(item.data(Qt.ItemDataRole.UserRole + 1)))
         name.setObjectName("dialogName")
         heading.addWidget(name)
+        heading.addStretch(1)
+        last_time = _dialog_time(item.data(Qt.ItemDataRole.UserRole + 4))
+        if last_time:
+            time_label = QLabel(last_time)
+            time_label.setObjectName("dialogTime")
+            heading.addWidget(time_label)
         unread = int(item.data(Qt.ItemDataRole.UserRole + 2) or 0)
         if unread:
             badge = QLabel(str(unread))
             badge.setObjectName("unreadBadge")
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             heading.addWidget(badge)
-        heading.addStretch(1)
         content.addLayout(heading)
-        preview_text = " ".join(
-            str(item.data(Qt.ItemDataRole.UserRole + 3) or "").split()
+        preview_text = _dialog_preview(
+            str(item.data(Qt.ItemDataRole.UserRole + 1) or ""),
+            item.data(Qt.ItemDataRole.UserRole + 3),
         )
-        preview = QLabel(preview_text[:64] or "Нет сообщений")
+        preview = QLabel(preview_text)
         preview.setObjectName("dialogPreview")
         content.addWidget(preview)
         self.dialogs.setItemWidget(item, container)
@@ -813,9 +868,16 @@ class CommunicationsPage(QWidget):
         self._render_chat_messages()
 
     def _render_chat_messages(self) -> None:
-        lines = []
+        lines = [
+            "<style>body{font-family:'Segoe UI';font-size:10pt;color:#0f2347;}"
+            ".bubble{margin:4px 0;padding:9px 11px;border-radius:9px;}"
+            ".incoming{background:#f1f5f9;} .outgoing{background:#e8f1ff;}"
+            ".sender{font-weight:600;} .meta{color:#64748b;font-size:8pt;}"
+            ".text{margin-top:4px;}</style>"
+        ]
         for row in self.chat_messages:
-            who = "Администратор" if row.get("direction") == "outbound" else "Клиент"
+            outbound = row.get("direction") == "outbound"
+            who = "Вы" if outbound else "Клиент"
             raw_status = str(row.get("delivery_status", ""))
             status = html.escape(DELIVERY_STATUS_LABELS.get(raw_status, "неизвестно"))
             try:
@@ -828,9 +890,14 @@ class CommunicationsPage(QWidget):
             text = html.escape(str(row.get("text", ""))).replace("\n", "<br>")
             kind = MESSAGE_TYPE_LABELS.get(str(row.get("message_type", "text")))
             kind_text = f" · {html.escape(kind)}" if kind else ""
+            alignment = "right" if outbound else "left"
+            bubble = "outgoing" if outbound else "incoming"
             lines.append(
-                f"<p><b>{who}</b> "
-                f"<small>{created_at} · {status}{kind_text}</small><br>{text}</p>"
+                f"<table width='100%' cellspacing='0' cellpadding='2'><tr>"
+                f"<td align='{alignment}'><table width='78%' cellspacing='0' cellpadding='0'>"
+                f"<tr><td class='bubble {bubble}'><span class='sender'>{who}</span>"
+                f"<span class='meta'> · {created_at} · {status}{kind_text}</span>"
+                f"<div class='text'>{text}</div></td></tr></table></td></tr></table>"
             )
         self.chat_history.setHtml("".join(lines))
         self.chat_history.verticalScrollBar().setValue(

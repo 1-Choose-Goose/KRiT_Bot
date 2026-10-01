@@ -35,10 +35,12 @@ from .communication_models import (
 from .db import Person, StudentGuardian, utcnow
 from .learning_models import (
     AuditEvent,
+    GroupMembership,
     Lesson,
     LessonParticipant,
     NotificationJob,
     PersonMaxIdentity,
+    StudyGroup,
 )
 
 
@@ -1312,6 +1314,94 @@ async def _campaign_poll_counts(session: AsyncSession, campaign_id: int) -> dict
     }
 
 
+@dataclass(frozen=True)
+class PollTarget:
+    recipient_person_id: int
+    recipient_context: str
+    subject_person_id: int | None
+
+
+async def _poll_targets(
+    session: AsyncSession, selected_people: list[Person]
+) -> list[PollTarget]:
+    """Expand a selected student into one student-family-teacher response card."""
+    selected_student_ids = {
+        person.id
+        for person in selected_people
+        if any(link.role == "student" for link in person.role_links)
+    }
+    targets: dict[tuple[int, str, int | None], PollTarget] = {}
+    selected_person_ids = {person.id for person in selected_people}
+    selected_parent_links: dict[int, set[int]] = defaultdict(set)
+    if selected_student_ids and selected_person_ids:
+        parent_links = (
+            await session.execute(
+                select(StudentGuardian.guardian_id, StudentGuardian.student_id).where(
+                    StudentGuardian.guardian_id.in_(selected_person_ids),
+                    StudentGuardian.student_id.in_(selected_student_ids),
+                )
+            )
+        ).all()
+        for guardian_id, student_id in parent_links:
+            selected_parent_links[guardian_id].add(student_id)
+
+    def add(recipient_id: int, context: str, subject_id: int | None) -> None:
+        target = PollTarget(recipient_id, context, subject_id)
+        targets[(recipient_id, context, subject_id)] = target
+
+    for person in selected_people:
+        roles = {link.role for link in person.role_links}
+        if "student" in roles:
+            add(person.id, "student", person.id)
+        linked_selected_students = selected_parent_links.get(person.id, set())
+        if "parent" in roles:
+            if linked_selected_students:
+                for student_id in linked_selected_students:
+                    add(person.id, "guardian", student_id)
+            elif "student" not in roles:
+                add(person.id, "guardian", None)
+        if "teacher" in roles and "student" not in roles:
+            add(person.id, "teacher", None)
+        if not roles:
+            add(person.id, "student", person.id)
+
+    if selected_student_ids:
+        relations = list(
+            (
+                await session.scalars(
+                    select(StudentGuardian).where(
+                        StudentGuardian.student_id.in_(selected_student_ids)
+                    )
+                )
+            ).all()
+        )
+        for relation in relations:
+            add(relation.guardian_id, "guardian", relation.student_id)
+
+        current_time = utcnow()
+        teacher_rows = (
+            await session.execute(
+                select(GroupMembership.person_id, StudyGroup.default_teacher_id)
+                .join(StudyGroup, StudyGroup.id == GroupMembership.group_id)
+                .where(
+                    GroupMembership.person_id.in_(selected_student_ids),
+                    GroupMembership.start_at <= current_time,
+                    or_(
+                        GroupMembership.end_at.is_(None),
+                        GroupMembership.end_at > current_time,
+                    ),
+                    StudyGroup.active.is_(True),
+                    StudyGroup.default_teacher_id.is_not(None),
+                )
+            )
+        ).all()
+        for student_id, teacher_id in teacher_rows:
+            if teacher_id is not None:
+                add(teacher_id, "teacher", student_id)
+
+    return list(targets.values())
+
+
 async def _campaign_poll_details(
     session: AsyncSession, campaign_id: int
 ) -> dict[str, Any] | None:
@@ -1327,7 +1417,12 @@ async def _campaign_poll_details(
             )
         ).all()
     )
-    person_ids = {item.recipient_person_id for item in requests}
+    person_ids = {
+        person_id
+        for item in requests
+        for person_id in (item.recipient_person_id, item.subject_person_id)
+        if person_id is not None
+    }
     people = {
         item.id: item
         for item in (
@@ -1354,13 +1449,18 @@ async def _campaign_poll_details(
         if item.interaction_request_id is not None
     }
     recipients = []
-    answer_by_person: dict[int, str | None] = {}
+    answer_by_target: dict[tuple[int, str, int | None], str | None] = {}
     for request in requests:
         person = people.get(request.recipient_person_id)
         response = responses.get(request.id)
         job = jobs.get(request.id)
         answer = response.answer if response is not None else None
-        answer_by_person[request.recipient_person_id] = answer
+        subject_id = request.subject_person_id
+        if request.recipient_context == "student" and subject_id is None:
+            subject_id = request.recipient_person_id
+        answer_by_target[
+            (request.recipient_person_id, request.recipient_context, subject_id)
+        ] = answer
         recipients.append(
             {
                 "request_id": request.id,
@@ -1368,77 +1468,62 @@ async def _campaign_poll_details(
                 "full_name": person.full_name if person is not None else "Неизвестный получатель",
                 "roles": [link.role for link in (person.role_links if person else [])],
                 "context": request.recipient_context,
+                "subject_person_id": subject_id,
                 "delivery_status": job.status if job is not None else "unavailable",
                 "answer": answer,
                 "answered_at": response.answered_at if response is not None else None,
             }
         )
-    relations = list(
-        (
-            await session.scalars(
-                select(StudentGuardian).where(
-                    StudentGuardian.student_id.in_(person_ids),
-                    StudentGuardian.guardian_id.in_(person_ids),
+    student_ids = {
+        request.subject_person_id or request.recipient_person_id
+        for request in requests
+        if request.recipient_context == "student"
+    }
+    agreements = []
+    for student_id in sorted(student_ids):
+        student_answer = answer_by_target.get((student_id, "student", student_id))
+        guardians = []
+        teachers = []
+        for request in requests:
+            if request.subject_person_id != student_id:
+                continue
+            answer = answer_by_target.get(
+                (
+                    request.recipient_person_id,
+                    request.recipient_context,
+                    student_id,
                 )
             )
-        ).all()
-    )
-    roles_by_person = {
-        person_id: {link.role for link in person.role_links}
-        for person_id, person in people.items()
-    }
-    teacher_ids = [
-        person_id for person_id, roles in roles_by_person.items() if "teacher" in roles
-    ]
-    teacher_id = teacher_ids[0] if len(teacher_ids) == 1 else None
-    guardians_by_student: dict[int, list[int]] = defaultdict(list)
-    for relation in relations:
-        guardians_by_student[relation.student_id].append(relation.guardian_id)
-    agreements = []
-    for student_id, roles in roles_by_person.items():
-        if "student" not in roles:
-            continue
-        guardian_ids: list[int | None] = guardians_by_student.get(student_id) or [None]
-        if guardian_ids == [None] and teacher_id is None:
-            continue
-        for guardian_id in guardian_ids:
-            student_answer = answer_by_person.get(student_id)
-            guardian_answer = (
-                answer_by_person.get(guardian_id) if guardian_id is not None else None
-            )
-            teacher_answer = (
-                answer_by_person.get(teacher_id) if teacher_id is not None else None
-            )
-            expected_answers = [student_answer]
-            if guardian_id is not None:
-                expected_answers.append(guardian_answer)
-            if teacher_id is not None:
-                expected_answers.append(teacher_answer)
-            answered = {answer for answer in expected_answers if answer is not None}
-            if len(answered) > 1:
-                result = "conflict"
-            elif any(answer is None for answer in expected_answers):
-                result = "waiting"
-            else:
-                result = "agreed"
-            agreements.append(
-                {
-                    "student_id": student_id,
-                    "student_name": people[student_id].full_name,
-                    "student_answer": student_answer,
-                    "guardian_id": guardian_id,
-                    "guardian_name": (
-                        people[guardian_id].full_name if guardian_id is not None else None
-                    ),
-                    "guardian_answer": guardian_answer,
-                    "teacher_id": teacher_id,
-                    "teacher_name": (
-                        people[teacher_id].full_name if teacher_id is not None else None
-                    ),
-                    "teacher_answer": teacher_answer,
-                    "result": result,
-                }
-            )
+            person = people.get(request.recipient_person_id)
+            target = {
+                "person_id": request.recipient_person_id,
+                "name": person.full_name if person is not None else "Неизвестный получатель",
+                "answer": answer,
+            }
+            if request.recipient_context == "guardian":
+                guardians.append(target)
+            elif request.recipient_context == "teacher":
+                teachers.append(target)
+        expected_answers = [student_answer]
+        expected_answers.extend(item["answer"] for item in guardians)
+        expected_answers.extend(item["answer"] for item in teachers)
+        answered = {answer for answer in expected_answers if answer is not None}
+        if len(answered) > 1:
+            result = "conflict"
+        elif any(answer is None for answer in expected_answers):
+            result = "waiting"
+        else:
+            result = "agreed"
+        agreements.append(
+            {
+                "student_id": student_id,
+                "student_name": people[student_id].full_name,
+                "student_answer": student_answer,
+                "guardians": guardians,
+                "teachers": teachers,
+                "result": result,
+            }
+        )
     return {
         "id": campaign.id,
         "title": campaign.title,
@@ -1703,12 +1788,20 @@ def create_communications_router(
             existing = {person.id for person in selected_people}
             if existing != set(person_ids):
                 raise HTTPException(404, "Один из получателей не найден")
-            available, unavailable = await availability(session, person_ids)
+            targets = await _poll_targets(session, selected_people)
+            target_person_ids = list(
+                dict.fromkeys(target.recipient_person_id for target in targets)
+            )
+            available, unavailable = await availability(session, target_person_ids)
+            available_people = set(available)
+            available_targets = sum(
+                target.recipient_person_id in available_people for target in targets
+            )
             preview = {
-                "recipients": len(person_ids),
-                "available": len(available),
+                "recipients": len(targets),
+                "available": available_targets,
                 "unavailable": unavailable,
-                "messages": len(available),
+                "messages": available_targets,
                 "sample": payload.text,
             }
             if payload.preview:
@@ -1723,31 +1816,21 @@ def create_communications_router(
             session.add(campaign)
             await session.flush()
             request_ids = []
-            selected_student_ids = {
-                person.id
-                for person in selected_people
-                if any(link.role == "student" for link in person.role_links)
+            subject_ids = {
+                target.subject_person_id
+                for target in targets
+                if target.subject_person_id is not None
             }
-            people_by_id = {person.id: person for person in selected_people}
-            for person_id in person_ids:
-                person = people_by_id[person_id]
-                roles = {link.role for link in person.role_links}
-                linked_students = [
-                    link.student_id
-                    for link in person.student_links
-                    if link.student_id in selected_student_ids
-                ]
-                if "parent" in roles:
-                    recipient_context = "guardian"
-                    subject_person_id = (
-                        linked_students[0] if len(linked_students) == 1 else None
-                    )
-                elif "teacher" in roles:
-                    recipient_context = "teacher"
-                    subject_person_id = None
-                else:
-                    recipient_context = "student"
-                    subject_person_id = person_id
+            subjects = {
+                person.id: person.full_name
+                for person in (
+                    await session.scalars(select(Person).where(Person.id.in_(subject_ids)))
+                ).all()
+            }
+            for target in targets:
+                person_id = target.recipient_person_id
+                recipient_context = target.recipient_context
+                subject_person_id = target.subject_person_id
                 request = InteractionRequest(
                     request_type="yes_no",
                     question=payload.text,
@@ -1778,7 +1861,10 @@ def create_communications_router(
                 ]
                 await enqueue_job(
                     session,
-                    dedupe_key=f"campaign:{campaign.id}:{person_id}",
+                    dedupe_key=(
+                        f"campaign:{campaign.id}:{person_id}:{recipient_context}:"
+                        f"{subject_person_id or 0}"
+                    ),
                     event_type=NotificationEvent.CUSTOM_YES_NO_REQUEST,
                     recipient_person_id=person_id,
                     recipient_context=recipient_context,
@@ -1788,7 +1874,15 @@ def create_communications_router(
                     campaign_id=campaign.id,
                     interaction_request_id=request.id,
                     lesson_id=payload.related_lesson_id,
-                    payload={"text": payload.text, "keyboard": keyboard},
+                    payload={
+                        "text": (
+                            f"{payload.text}\nУченик: {subjects[subject_person_id]}"
+                            if subject_person_id is not None
+                            and subject_person_id != person_id
+                            else payload.text
+                        ),
+                        "keyboard": keyboard,
+                    },
                 )
             campaign.status = "scheduled"
             session.add(
@@ -1797,7 +1891,7 @@ def create_communications_router(
                     action="communications.poll_campaign_created",
                     entity_type="communication_campaign",
                     entity_id=campaign.id,
-                    details={"recipients": len(person_ids)},
+                    details={"recipients": len(targets)},
                 )
             )
             await session.commit()

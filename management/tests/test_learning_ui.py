@@ -644,6 +644,7 @@ def test_subject_assignments_filter_teachers_in_group_and_lesson() -> None:
         "students": [],
     }
     lesson = LessonDialog(references)
+    assert lesson.students.editTriggers() == QTableWidget.EditTrigger.NoEditTriggers
     assert lesson.teacher.findData(10) >= 0
     assert lesson.teacher.findData(11) == -1
     lesson.subject.setCurrentIndex(lesson.subject.findData(2))

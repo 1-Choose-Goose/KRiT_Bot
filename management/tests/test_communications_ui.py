@@ -110,7 +110,8 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
             {
                 "person_id": 1,
                 "full_name": "Куц Олег Олегович",
-                "last_message_preview": "Нужна помощь",
+                "last_message_preview": "Куц Олег Олегович\nВаши занятия КРиТ 02.10.2026",
+                "last_message_at": "2026-10-01T12:47:00+05:00",
                 "admin_unread_count": 3,
             }
         ]
@@ -120,7 +121,8 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     dialog_widget = page.dialogs.itemWidget(dialog_item)
     assert dialog_item.text() == "Куц Олег Олегович"
     assert dialog_widget.findChild(QLabel, "dialogName").text() == "Куц Олег Олегович"
-    assert dialog_widget.findChild(QLabel, "dialogPreview").text() == "Нужна помощь"
+    assert dialog_widget.findChild(QLabel, "dialogPreview").text() == "Расписание занятий"
+    assert dialog_widget.findChild(QLabel, "dialogTime").text()
     assert dialog_widget.findChild(QLabel, "unreadBadge").text() == "3"
     page._run = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     page._dialog_selected(dialog_item)
@@ -171,6 +173,7 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     assert page.campaigns.item(0, 1).text() == "Сообщение"
     assert page.campaigns.item(0, 3).text() == "Завершена"
     assert page.campaigns.item(0, 4).text() == "доставлено: 2, ошибка: 1"
+    assert page.campaigns.rowHeight(0) >= 44
     page.confirmation_rows = [
         {
             "student_name": "Алексеева Анна",
@@ -220,18 +223,21 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
                 {
                     "student_name": "Анна Ученица",
                     "student_answer": "no",
-                    "guardian_name": "Ирина Родитель",
-                    "guardian_answer": "yes",
-                    "teacher_name": "Олег Учитель",
-                    "teacher_answer": None,
+                    "guardians": [
+                        {"name": "Ирина Родитель", "answer": "yes"}
+                    ],
+                    "teachers": [
+                        {"name": "Олег Учитель", "answer": None}
+                    ],
                     "result": "conflict",
                 }
             ],
         }
     )
     assert poll_dialog.recipients.item(0, 2).text() == "Доставлено, ответа нет"
-    assert poll_dialog.agreements.item(0, 4).text() == "Олег Учитель"
-    assert poll_dialog.agreements.item(0, 6).text() == "Ответы расходятся"
+    assert poll_dialog.agreements.item(0, 2).text() == "Ирина Родитель — Да"
+    assert poll_dialog.agreements.item(0, 3).text() == "Олег Учитель — нет ответа"
+    assert poll_dialog.agreements.item(0, 4).text() == "Ответы расходятся"
     poll_dialog.close()
     page.shutdown()
     page.close()
