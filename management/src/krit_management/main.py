@@ -203,6 +203,13 @@ QHeaderView::section {
 }
 QLabel#pageTitle { font-size: 24px; font-weight: 750; color: #15213a; }
 QLabel#sectionTitle { font-size: 17px; font-weight: 700; color: #1c2942; }
+QLabel#dialogName { font-size: 13px; font-weight: 700; color: #172033; }
+QLabel#dialogPreview { color: #6b7688; font-size: 12px; }
+QLabel#unreadBadge {
+    background: #1b63db; color: white; border-radius: 9px;
+    min-width: 18px; min-height: 18px; max-height: 18px;
+    padding: 0 4px; font-size: 11px; font-weight: 700;
+}
 QLabel#controlGroupLabel { color: #34435a; font-weight: 700; }
 QLabel#supportingText { color: #687386; padding: 1px 2px; }
 QLabel#formError {

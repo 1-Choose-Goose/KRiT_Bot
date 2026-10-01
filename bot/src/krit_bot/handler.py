@@ -53,7 +53,7 @@ def parse_message_callback(update: dict[str, Any]) -> IncomingCallback | None:
     if update.get("update_type") != "message_callback":
         return None
     callback = update.get("callback") or {}
-    user = callback.get("user") or {}
+    user = callback.get("user") or update.get("user") or {}
     callback_id = callback.get("callback_id")
     payload = callback.get("payload")
     user_id = user.get("user_id")
@@ -171,6 +171,13 @@ class EchoHandler:
                         )
                         .order_by(InteractionRequest.updated_at.desc())
                     )
+                    message_type = (
+                        "interaction_reason"
+                        if pending_reason is not None
+                        else "command"
+                        if incoming.text.startswith("/")
+                        else "text"
+                    )
                     await record_message(
                         session,
                         person_id=person_id,
@@ -178,9 +185,7 @@ class EchoHandler:
                         text=incoming.text,
                         delivery_status="received",
                         max_message_id=incoming.message_id,
-                        message_type=(
-                            "interaction_reason" if pending_reason is not None else "text"
-                        ),
+                        message_type=message_type,
                         interaction_request_id=(
                             pending_reason.id if pending_reason is not None else None
                         ),
@@ -397,6 +402,19 @@ class EchoHandler:
                     answer="partial" if lesson_answer else answer,
                     lesson_answers=lesson_answers,
                 )
+                await record_message(
+                    session,
+                    person_id=person_id,
+                    direction="inbound",
+                    text=(
+                        f"Ответ по занятию: {'Да' if answer == 'yes' else 'Нет'}"
+                        if lesson_answer
+                        else f"Ответ на запрос: {'Да' if answer == 'yes' else 'Нет'}"
+                    ),
+                    delivery_status="received",
+                    message_type="interaction_callback",
+                    interaction_request_id=request.id,
+                )
             except (ValueError, PermissionError) as exc:
                 await session.commit()
                 await self._api.answer_callback(
@@ -451,6 +469,15 @@ class EchoHandler:
                     notification="Этот запрос предназначен другому получателю",
                 )
                 return
+            await record_message(
+                session,
+                person_id=person_id,
+                direction="inbound",
+                text="Выбрано: ответить отдельно по каждому занятию",
+                delivery_status="received",
+                message_type="interaction_callback",
+                interaction_request_id=request.id,
+            )
             rows = (
                 await session.execute(
                     select(InteractionRequestLesson.lesson_id, Lesson)
@@ -459,6 +486,7 @@ class EchoHandler:
                     .order_by(Lesson.start_at)
                 )
             ).all()
+            await session.commit()
         buttons = []
         lines = ["Отметьте каждое занятие:"]
         for lesson_id, lesson in rows:
@@ -506,6 +534,19 @@ class EchoHandler:
                 return
             request.expects_reason_from_person_id = person_id if action == "write" else None
             request.updated_at = utcnow()
+            await record_message(
+                session,
+                person_id=person_id,
+                direction="inbound",
+                text=(
+                    "Выбрано: указать причину"
+                    if action == "write"
+                    else "Выбрано: не указывать причину"
+                ),
+                delivery_status="received",
+                message_type="interaction_callback",
+                interaction_request_id=request.id,
+            )
             await session.commit()
         await self._api.answer_callback(
             callback_id=callback.callback_id,

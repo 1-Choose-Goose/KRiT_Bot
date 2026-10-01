@@ -6,12 +6,14 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from PySide6.QtCore import QDate, Qt, QThreadPool, QTimer
+from PySide6.QtCore import QDate, QSize, Qt, QThreadPool, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDateEdit,
+    QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -31,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import ManagementApi
+from .timeutils import parse_center
 from .widgets import SafeComboBox, SearchableComboBox
 from .workers import Worker
 
@@ -97,6 +100,11 @@ DELIVERY_STATUS_LABELS = {
     "unavailable": "MAX недоступен",
 }
 ANSWER_LABELS = {"yes": "Да", "no": "Нет", "partial": "По занятиям"}
+MESSAGE_TYPE_LABELS = {
+    "command": "Команда боту",
+    "interaction_callback": "Взаимодействие с ботом",
+    "interaction_reason": "Ответ на запрос бота",
+}
 PERSON_SEARCH_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 STATUS_LABELS = {
     "pending": "🔵 Запрос ещё не отправлен / ожидается",
@@ -123,6 +131,105 @@ def _table(headers: list[str]) -> QTableWidget:
     result.verticalHeader().setVisible(False)
     result.horizontalHeader().setStretchLastSection(True)
     return result
+
+
+class PollDetailsDialog(QDialog):
+    def __init__(self, details: dict[str, Any], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Результаты опроса · КРиТ")
+        self.resize(980, 680)
+        layout = QVBoxLayout(self)
+        title = QLabel(str(details.get("title", "Опрос")))
+        title.setObjectName("dialogTitle")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+        counts = details.get("counts") or {}
+        summary = QLabel(
+            f"Получателей: {counts.get('recipients', 0)} · "
+            f"Да: {counts.get('yes', 0)} · Нет: {counts.get('no', 0)} · "
+            f"Без ответа: {counts.get('no_response', 0)}"
+        )
+        summary.setObjectName("supportingText")
+        layout.addWidget(summary)
+        layout.addWidget(QLabel("Ответы получателей"))
+        self.recipients = _table(
+            ["ФИО", "Роли", "Доставка", "Ответ", "Время ответа"]
+        )
+        recipient_header = self.recipients.horizontalHeader()
+        recipient_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in range(1, 5):
+            recipient_header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        recipients = list(details.get("recipients") or [])
+        self.recipients.setRowCount(len(recipients))
+        for row, item in enumerate(recipients):
+            answer = ANSWER_LABELS.get(str(item.get("answer")), "—")
+            raw_delivery = str(item.get("delivery_status", ""))
+            if item.get("answer"):
+                delivery = "Ответ получен"
+            elif raw_delivery == "sent":
+                delivery = "Доставлено, ответа нет"
+            else:
+                delivery = JOB_STATUS_LABELS.get(raw_delivery, "Недоступно")
+            answered_at = "—"
+            if item.get("answered_at"):
+                try:
+                    answered_at = parse_center(item["answered_at"]).strftime("%d.%m.%Y %H:%M")
+                except (TypeError, ValueError):
+                    answered_at = str(item["answered_at"])
+            values = [
+                item.get("full_name", ""),
+                ", ".join(
+                    ROLE_LABELS.get(str(role), "Другая роль")
+                    for role in (item.get("roles") or [])
+                ),
+                delivery,
+                answer,
+                answered_at,
+            ]
+            for column, value in enumerate(values):
+                self.recipients.setItem(row, column, QTableWidgetItem(str(value)))
+        layout.addWidget(self.recipients, 2)
+        layout.addWidget(QLabel("Согласование ответов ученика, родителя и преподавателя"))
+        self.agreements = _table(
+            [
+                "Ученик",
+                "Ответ ученика",
+                "Родитель",
+                "Ответ родителя",
+                "Преподаватель",
+                "Ответ преподавателя",
+                "Итог",
+            ]
+        )
+        agreement_header = self.agreements.horizontalHeader()
+        agreement_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        agreement_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        agreement_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        agreements = list(details.get("agreements") or [])
+        self.agreements.setRowCount(len(agreements))
+        agreement_labels = {
+            "agreed": "Согласовано",
+            "conflict": "Ответы расходятся",
+            "waiting": "Ожидается ответ",
+        }
+        for row, item in enumerate(agreements):
+            values = [
+                item.get("student_name", ""),
+                ANSWER_LABELS.get(str(item.get("student_answer")), "—"),
+                item.get("guardian_name") or "—",
+                ANSWER_LABELS.get(str(item.get("guardian_answer")), "—"),
+                item.get("teacher_name") or "—",
+                ANSWER_LABELS.get(str(item.get("teacher_answer")), "—"),
+                agreement_labels.get(str(item.get("result")), "—"),
+            ]
+            for column, value in enumerate(values):
+                self.agreements.setItem(row, column, QTableWidgetItem(str(value)))
+        self.agreements.setMaximumHeight(210)
+        layout.addWidget(self.agreements, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText("Закрыть")
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class CommunicationsPage(QWidget):
@@ -165,7 +272,6 @@ class CommunicationsPage(QWidget):
         self.recipient_search.setPlaceholderText("Поиск получателя по ФИО или телефону")
         self.recipient_search.textChanged.connect(self._render_recipients)
         top.addWidget(self.recipient_search, 1)
-        top.addWidget(_button("Выбрать найденных", self._select_visible_recipients))
         top.addWidget(_button("Снять выбор", self._clear_recipient_selection))
         self.selected_count = QLabel("Выбрано: 0")
         top.addWidget(self.selected_count)
@@ -182,7 +288,7 @@ class CommunicationsPage(QWidget):
         self.recipients.setColumnWidth(3, 165)
         self.recipients.setColumnWidth(4, 145)
         self.recipients.itemChanged.connect(self._recipient_item_changed)
-        self.recipients.cellClicked.connect(self._recipient_cell_clicked)
+        self.recipients.cellDoubleClicked.connect(self._recipient_cell_clicked)
         layout.addWidget(self.recipients, 2)
         self.message_text = QTextEdit()
         self.message_text.setPlaceholderText("Введите сообщение (до 4000 символов)")
@@ -192,7 +298,6 @@ class CommunicationsPage(QWidget):
         self.urgent = QCheckBox("Срочное сообщение")
         actions.addWidget(self.urgent)
         actions.addStretch(1)
-        actions.addWidget(_button("Предпросмотр", self.preview_message))
         actions.addWidget(_button("Опрос Да / Нет", self.send_poll))
         actions.addWidget(_button("Отправить", self.send_message, primary=True))
         layout.addLayout(actions)
@@ -200,8 +305,12 @@ class CommunicationsPage(QWidget):
         schedule.addWidget(QLabel("Публикация расписания:"))
         self.publish_from = QDateEdit(QDate.currentDate())
         self.publish_from.setCalendarPopup(True)
+        self.publish_from.setDisplayFormat("dd.MM.yyyy")
+        self.publish_from.setMinimumWidth(140)
         self.publish_to = QDateEdit(QDate.currentDate().addDays(7))
         self.publish_to.setCalendarPopup(True)
+        self.publish_to.setDisplayFormat("dd.MM.yyyy")
+        self.publish_to.setMinimumWidth(140)
         schedule.addWidget(self.publish_from)
         schedule.addWidget(QLabel("—"))
         schedule.addWidget(self.publish_to)
@@ -254,8 +363,12 @@ class CommunicationsPage(QWidget):
         filters.addWidget(QLabel("Период"))
         self.confirm_from = QDateEdit(QDate.currentDate())
         self.confirm_from.setCalendarPopup(True)
+        self.confirm_from.setDisplayFormat("dd.MM.yyyy")
+        self.confirm_from.setMinimumWidth(140)
         self.confirm_to = QDateEdit(QDate.currentDate().addDays(7))
         self.confirm_to.setCalendarPopup(True)
+        self.confirm_to.setDisplayFormat("dd.MM.yyyy")
+        self.confirm_to.setMinimumWidth(140)
         filters.addWidget(self.confirm_from)
         filters.addWidget(self.confirm_to)
         filters.addWidget(_button("Показать", self.load_confirmations))
@@ -302,6 +415,7 @@ class CommunicationsPage(QWidget):
             ]
         )
         self.settings.verticalHeader().setVisible(False)
+        self.settings.verticalHeader().setDefaultSectionSize(40)
         settings_header = self.settings.horizontalHeader()
         settings_header.setStretchLastSection(False)
         for column in range(self.settings.columnCount()):
@@ -330,6 +444,7 @@ class CommunicationsPage(QWidget):
             ["Событие", "Контекст", "За сколько, мин", "Режим"]
         )
         self.person_overrides.verticalHeader().setVisible(False)
+        self.person_overrides.verticalHeader().setDefaultSectionSize(40)
         person_header = self.person_overrides.horizontalHeader()
         person_header.setStretchLastSection(False)
         person_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -342,9 +457,10 @@ class CommunicationsPage(QWidget):
         layout.addWidget(self.person_overrides)
         person_actions = QHBoxLayout()
         person_actions.addStretch(1)
-        person_actions.addWidget(
-            _button("Сохранить индивидуальные настройки", self.save_person_settings, primary=True)
+        self.save_person_settings_button = _button(
+            "Сохранить индивидуальные настройки", self.save_person_settings, primary=True
         )
+        person_actions.addWidget(self.save_person_settings_button)
         layout.addLayout(person_actions)
         return page
 
@@ -453,12 +569,6 @@ class CommunicationsPage(QWidget):
             else Qt.CheckState.Checked
         )
 
-    def _select_visible_recipients(self) -> None:
-        for row in range(self.recipients.rowCount()):
-            item = self.recipients.item(row, 0)
-            if item is not None:
-                item.setCheckState(Qt.CheckState.Checked)
-
     def _clear_recipient_selection(self) -> None:
         self.selected_recipient_ids.clear()
         self._render_recipients()
@@ -531,8 +641,14 @@ class CommunicationsPage(QWidget):
                     f"; да: {poll.get('yes', 0)}, нет: {poll.get('no', 0)}, "
                     f"без ответа: {poll.get('no_response', 0)}"
                 )
+            try:
+                created_at = parse_center(item.get("created_at", "")).strftime(
+                    "%d.%m.%Y %H:%M"
+                )
+            except (TypeError, ValueError):
+                created_at = str(item.get("created_at", ""))
             values = [
-                str(item.get("created_at", ""))[:16].replace("T", " "),
+                created_at,
                 CAMPAIGN_TYPE_LABELS.get(
                     str(item.get("type", "")), "Рассылка"
                 ),
@@ -544,18 +660,43 @@ class CommunicationsPage(QWidget):
             ]
             for column, text in enumerate(values):
                 self.campaigns.setItem(row, column, QTableWidgetItem(text))
+            actions: list[QPushButton] = []
+            if item.get("type") == "custom_poll":
+                actions.append(
+                    _button(
+                        "Открыть опрос",
+                        lambda campaign_id=int(item["id"]): self.open_poll(campaign_id),
+                    )
+                )
             if counts.get("failed") or counts.get("cancelled"):
-                self.campaigns.setCellWidget(
-                    row,
-                    5,
+                actions.append(
                     _button(
                         "Повторить ошибки",
                         lambda campaign_id=int(item["id"]): self._run(
                             lambda: self.api.retry_communication_campaign(campaign_id),
                             lambda _result: self.refresh(),
                         ),
-                    ),
+                    )
                 )
+            if actions:
+                container = QWidget()
+                action_layout = QHBoxLayout(container)
+                action_layout.setContentsMargins(4, 2, 4, 2)
+                action_layout.setSpacing(5)
+                for button in actions:
+                    action_layout.addWidget(button)
+                action_layout.addStretch(1)
+                self.campaigns.setCellWidget(row, 5, container)
+
+    def open_poll(self, campaign_id: int) -> None:
+        self._run(
+            lambda: self.api.communication_poll_details(campaign_id),
+            self._show_poll_details,
+        )
+
+    def _show_poll_details(self, value: object) -> None:
+        details = value if isinstance(value, dict) else {}
+        PollDetailsDialog(details, self).exec()
 
     def _schedule_dates(self) -> tuple[str, str]:
         return (
@@ -590,21 +731,52 @@ class CommunicationsPage(QWidget):
         self.dialogs.clear()
         for row in rows:
             unread = int(row.get("admin_unread_count") or 0)
-            suffix = f"  • {unread} новых" if unread else ""
-            item = QListWidgetItem(
-                f"{row.get('full_name', '')}{suffix}\n{row.get('last_message_preview', '')}"
-            )
+            item = QListWidgetItem(str(row.get("full_name", "")))
             item.setData(Qt.ItemDataRole.UserRole, int(row["person_id"]))
             item.setData(Qt.ItemDataRole.UserRole + 1, row.get("full_name", ""))
+            item.setData(Qt.ItemDataRole.UserRole + 2, unread)
+            item.setData(Qt.ItemDataRole.UserRole + 3, row.get("last_message_preview", ""))
+            item.setSizeHint(QSize(0, 58))
             self.dialogs.addItem(item)
+            self._render_dialog_list_item(item)
             if current == int(row["person_id"]):
                 self.dialogs.setCurrentItem(item)
+
+    def _render_dialog_list_item(self, item: QListWidgetItem) -> None:
+        container = QWidget()
+        container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        content = QVBoxLayout(container)
+        content.setContentsMargins(9, 5, 9, 5)
+        content.setSpacing(2)
+        heading = QHBoxLayout()
+        heading.setSpacing(7)
+        name = QLabel(str(item.data(Qt.ItemDataRole.UserRole + 1)))
+        name.setObjectName("dialogName")
+        heading.addWidget(name)
+        unread = int(item.data(Qt.ItemDataRole.UserRole + 2) or 0)
+        if unread:
+            badge = QLabel(str(unread))
+            badge.setObjectName("unreadBadge")
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            heading.addWidget(badge)
+        heading.addStretch(1)
+        content.addLayout(heading)
+        preview_text = " ".join(
+            str(item.data(Qt.ItemDataRole.UserRole + 3) or "").split()
+        )
+        preview = QLabel(preview_text[:64] or "Нет сообщений")
+        preview.setObjectName("dialogPreview")
+        content.addWidget(preview)
+        self.dialogs.setItemWidget(item, container)
 
     def _dialog_selected(self, item: QListWidgetItem | None) -> None:
         if item is None:
             return
         self.current_person_id = int(item.data(Qt.ItemDataRole.UserRole))
         self.chat_title.setText(str(item.data(Qt.ItemDataRole.UserRole + 1)))
+        if int(item.data(Qt.ItemDataRole.UserRole + 2) or 0):
+            item.setData(Qt.ItemDataRole.UserRole + 2, 0)
+            self._render_dialog_list_item(item)
         person_id = self.current_person_id
         self._run(
             lambda: self.api.communication_messages(person_id),
@@ -646,10 +818,19 @@ class CommunicationsPage(QWidget):
             who = "Администратор" if row.get("direction") == "outbound" else "Клиент"
             raw_status = str(row.get("delivery_status", ""))
             status = html.escape(DELIVERY_STATUS_LABELS.get(raw_status, "неизвестно"))
-            created_at = html.escape(str(row.get("created_at", "")))
+            try:
+                created_at = parse_center(row.get("created_at", "")).strftime(
+                    "%d.%m.%Y %H:%M"
+                )
+            except (TypeError, ValueError):
+                created_at = str(row.get("created_at", ""))
+            created_at = html.escape(created_at)
             text = html.escape(str(row.get("text", ""))).replace("\n", "<br>")
+            kind = MESSAGE_TYPE_LABELS.get(str(row.get("message_type", "text")))
+            kind_text = f" · {html.escape(kind)}" if kind else ""
             lines.append(
-                f"<p><b>{who}</b> <small>{created_at} · {status}</small><br>{text}</p>"
+                f"<p><b>{who}</b> "
+                f"<small>{created_at} · {status}{kind_text}</small><br>{text}</p>"
             )
         self.chat_history.setHtml("".join(lines))
         self.chat_history.verticalScrollBar().setValue(
@@ -824,15 +1005,26 @@ class CommunicationsPage(QWidget):
         self.settings_target.blockSignals(False)
         self._run(
             lambda: self.api.communication_person_settings(int(person_id)),
-            self._person_settings_loaded,
+            lambda value: self._person_settings_loaded_for(int(person_id), value),
         )
 
     def _person_settings_loaded(self, value: object) -> None:
         self.person_settings = value if isinstance(value, dict) else {}
         self._render_person_settings()
 
+    def _person_settings_loaded_for(self, person_id: int, value: object) -> None:
+        if self.settings_person.currentData() != person_id:
+            return
+        self._person_settings_loaded(value)
+
     def _render_person_settings(self) -> None:
         if not hasattr(self, "person_overrides"):
+            return
+        person_selected = self.settings_person.currentData() is not None
+        self.settings_target.setEnabled(person_selected)
+        self.save_person_settings_button.setEnabled(person_selected)
+        if not person_selected:
+            self.person_overrides.setRowCount(0)
             return
         child_id = self.settings_target.currentData()
         rules = [

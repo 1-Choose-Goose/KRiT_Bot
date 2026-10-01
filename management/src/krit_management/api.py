@@ -501,6 +501,10 @@ class ManagementApi:
         data = self._request("GET", "/communications/campaigns")
         return data if isinstance(data, list) else []
 
+    def communication_poll_details(self, campaign_id: int) -> dict[str, Any]:
+        data = self._request("GET", f"/communications/campaigns/{campaign_id}/poll")
+        return data if isinstance(data, dict) else {}
+
     def retry_communication_campaign(self, campaign_id: int) -> dict[str, Any]:
         data = self._request(
             "POST", f"/communications/campaigns/{campaign_id}/retry-failed"

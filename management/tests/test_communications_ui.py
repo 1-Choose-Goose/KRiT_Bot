@@ -5,9 +5,13 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QComboBox, QHeaderView
+from PySide6.QtWidgets import QApplication, QComboBox, QHeaderView, QLabel
 
-from krit_management.communications_page import PERSON_SEARCH_ROLE, CommunicationsPage
+from krit_management.communications_page import (
+    PERSON_SEARCH_ROLE,
+    CommunicationsPage,
+    PollDetailsDialog,
+)
 from krit_management.widgets import SearchableComboBox
 
 
@@ -66,7 +70,7 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     page._clear_recipient_selection()
     assert page._selected_ids() == []
     page.recipient_search.setText("Куц")
-    page._select_visible_recipients()
+    page._recipient_cell_clicked(0, 1)
     assert page._selected_ids() == [2]
     page.recipient_search.clear()
     page._messages_loaded(
@@ -100,6 +104,28 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     )
     assert page.chat_history.toPlainText().count("Ответ администратора") == 1
     assert 1 not in page.pending_replies
+    page.dialogs.blockSignals(True)
+    page._dialogs_loaded(
+        [
+            {
+                "person_id": 1,
+                "full_name": "Куц Олег Олегович",
+                "last_message_preview": "Нужна помощь",
+                "admin_unread_count": 3,
+            }
+        ]
+    )
+    page.dialogs.blockSignals(False)
+    dialog_item = page.dialogs.item(0)
+    dialog_widget = page.dialogs.itemWidget(dialog_item)
+    assert dialog_item.text() == "Куц Олег Олегович"
+    assert dialog_widget.findChild(QLabel, "dialogName").text() == "Куц Олег Олегович"
+    assert dialog_widget.findChild(QLabel, "dialogPreview").text() == "Нужна помощь"
+    assert dialog_widget.findChild(QLabel, "unreadBadge").text() == "3"
+    page._run = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    page._dialog_selected(dialog_item)
+    assert dialog_item.data(Qt.ItemDataRole.UserRole + 2) == 0
+    assert page.dialogs.itemWidget(dialog_item).findChild(QLabel, "unreadBadge") is None
     page._settings_loaded(
         [
             {
@@ -122,6 +148,11 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     assert page.settings.item(0, 8).text() == "180"
     assert page.settings.item(0, 0).text() == "Подтверждение посещения"
     assert page.settings.columnWidth(0) == 250
+    assert page.settings.rowHeight(0) >= 40
+    assert page.person_overrides.rowCount() == 0
+    assert not page.save_person_settings_button.isEnabled()
+    assert page.publish_from.displayFormat() == "dd.MM.yyyy"
+    assert page.publish_to.displayFormat() == "dd.MM.yyyy"
     priority = page.settings.cellWidget(0, 4)
     assert isinstance(priority, QComboBox)
     assert priority.currentText() == "Обычный"
@@ -172,5 +203,35 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     assert page.settings_person._proxy.rowCount() == 1
     assert "Андреева" in str(page.settings_person.itemData(1, PERSON_SEARCH_ROLE))
     assert page.person_overrides.columnWidth(3) == 250
+    poll_dialog = PollDetailsDialog(
+        {
+            "title": "Придёте на занятие?",
+            "counts": {"recipients": 3, "yes": 1, "no": 1, "no_response": 1},
+            "recipients": [
+                {
+                    "full_name": "Олег Учитель",
+                    "roles": ["teacher"],
+                    "delivery_status": "sent",
+                    "answer": None,
+                    "answered_at": None,
+                }
+            ],
+            "agreements": [
+                {
+                    "student_name": "Анна Ученица",
+                    "student_answer": "no",
+                    "guardian_name": "Ирина Родитель",
+                    "guardian_answer": "yes",
+                    "teacher_name": "Олег Учитель",
+                    "teacher_answer": None,
+                    "result": "conflict",
+                }
+            ],
+        }
+    )
+    assert poll_dialog.recipients.item(0, 2).text() == "Доставлено, ответа нет"
+    assert poll_dialog.agreements.item(0, 4).text() == "Олег Учитель"
+    assert poll_dialog.agreements.item(0, 6).text() == "Ответы расходятся"
+    poll_dialog.close()
     page.shutdown()
     page.close()

@@ -3,10 +3,16 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from krit_bot.communication_models import CommunicationMessage, MaxRegistrationPending
+from krit_bot.communication_models import (
+    CommunicationMessage,
+    CommunicationThread,
+    InteractionRequest,
+    InteractionResponse,
+    MaxRegistrationPending,
+)
 from krit_bot.config import extract_first_token
 from krit_bot.db import Base, Person, PersonRole, build_session_factory
-from krit_bot.handler import EchoHandler, parse_message_created
+from krit_bot.handler import EchoHandler, parse_message_callback, parse_message_created
 from krit_bot.learning_models import PersonMaxIdentity
 
 
@@ -81,11 +87,28 @@ def callback_update(user_id: int, payload: str, callback_id: str = "cb-1") -> di
     }
 
 
+def callback_update_with_root_user(
+    user_id: int, payload: str, callback_id: str = "cb-root"
+) -> dict:
+    return {
+        "update_type": "message_callback",
+        "user": {"user_id": user_id},
+        "callback": {"callback_id": callback_id, "payload": payload},
+    }
+
+
 def test_parse_message_created() -> None:
     parsed = parse_message_created(update(42))
     assert parsed is not None
     assert parsed.user_id == 42
     assert parsed.display_name == "Иван Иванов"
+
+
+def test_parse_message_callback_accepts_documented_root_user() -> None:
+    parsed = parse_message_callback(callback_update_with_root_user(42, "interaction:1:yes"))
+    assert parsed is not None
+    assert parsed.user_id == 42
+    assert parsed.payload == "interaction:1:yes"
 
 
 def test_token_file_uses_only_first_non_empty_line() -> None:
@@ -129,6 +152,93 @@ async def test_only_authorized_message_is_stored_for_the_admin() -> None:
         assert message is not None
         assert message.text == "Раз"
         assert message.direction == "inbound"
+    await engine.dispose()
+
+
+async def test_slash_command_is_stored_without_admin_notification() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(
+            full_name="Иван Иванов",
+            phone="+79990000000",
+            role_links=[PersonRole(role="student")],
+            active=True,
+        )
+        session.add(person)
+        await session.flush()
+        session.add(
+            PersonMaxIdentity(
+                person_id=person.id,
+                verified_phone=person.phone,
+                max_user_id=42,
+            )
+        )
+        await session.commit()
+        person_id = person.id
+    handler = EchoHandler(sessions=sessions, api=FakeApi())  # type: ignore[arg-type]
+
+    await handler.handle(update(42, "/start"))
+
+    async with sessions() as session:
+        message = await session.scalar(select(CommunicationMessage))
+        thread = await session.get(CommunicationThread, person_id)
+        assert message is not None
+        assert message.message_type == "command"
+        assert thread is not None
+        assert thread.admin_unread_count == 0
+        assert thread.last_message_at is None
+    await engine.dispose()
+
+
+async def test_poll_button_with_root_user_saves_answer_and_acknowledges_callback() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(
+            full_name="Иван Иванов",
+            phone="+79990000000",
+            role_links=[PersonRole(role="student")],
+            active=True,
+        )
+        session.add(person)
+        await session.flush()
+        session.add(
+            PersonMaxIdentity(
+                person_id=person.id,
+                verified_phone=person.phone,
+                max_user_id=42,
+            )
+        )
+        request = InteractionRequest(
+            request_type="yes_no",
+            question="Вы придёте?",
+            recipient_person_id=person.id,
+            recipient_context="student",
+            subject_person_id=person.id,
+        )
+        session.add(request)
+        await session.commit()
+        request_id = request.id
+    api = FakeApi()
+    handler = EchoHandler(sessions=sessions, api=api)  # type: ignore[arg-type]
+
+    await handler.handle(
+        callback_update_with_root_user(42, f"interaction:{request_id}:yes", "poll-yes")
+    )
+
+    async with sessions() as session:
+        response = await session.scalar(select(InteractionResponse))
+        message = await session.scalar(select(CommunicationMessage))
+        thread = await session.get(CommunicationThread, 1)
+        assert response is not None and response.answer == "yes"
+        assert message is not None and message.message_type == "interaction_callback"
+        assert thread is not None and thread.admin_unread_count == 0
+    assert api.callback_answers[-1] == ("poll-yes", "Ответ сохранён")
     await engine.dispose()
 
 

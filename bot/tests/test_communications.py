@@ -6,7 +6,9 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 
 from krit_bot.communication_models import (
+    CommunicationCampaign,
     CommunicationMessage,
+    CommunicationThread,
     GuardianNotificationOverride,
     InteractionRequest,
     InteractionRequestLesson,
@@ -16,6 +18,7 @@ from krit_bot.communication_models import (
 from krit_bot.communications import (
     EffectivePolicy,
     NotificationPolicyResolver,
+    _campaign_poll_details,
     _schedule_text,
     apply_quiet_hours,
     cleanup_communication_history,
@@ -23,10 +26,12 @@ from krit_bot.communications import (
     ensure_default_rules,
     reconcile_confirmation_requests,
     reconcile_daily_reminders,
+    record_message,
     save_interaction_response,
 )
 from krit_bot.db import (
     Person,
+    PersonRole,
     StudentGuardian,
     build_engine,
     build_session_factory,
@@ -525,6 +530,154 @@ async def test_history_cleanup_keeps_business_confirmation(tmp_path) -> None:
         messages = list((await session.scalars(select(CommunicationMessage))).all())
         assert [item.text for item in messages] == ["Новое сообщение"]
         assert await session.get(type(response), response.id) is not None
+    await engine.dispose()
+
+
+async def test_only_free_inbound_text_updates_unread_dialog_state(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    async with sessions() as session:
+        person = Person(full_name="Клиент", phone="+79000000062")
+        session.add(person)
+        await session.flush()
+        await record_message(
+            session,
+            person_id=person.id,
+            direction="inbound",
+            text="/start",
+            delivery_status="received",
+            message_type="command",
+        )
+        thread = await session.get(CommunicationThread, person.id)
+        assert thread is not None
+        assert thread.admin_unread_count == 0
+        assert thread.last_message_at is None
+
+        await record_message(
+            session,
+            person_id=person.id,
+            direction="inbound",
+            text="Нужна помощь администратора",
+            delivery_status="received",
+        )
+        await session.flush()
+        last_message_at = thread.last_message_at
+        assert thread.admin_unread_count == 1
+        assert thread.last_message_preview == "Нужна помощь администратора"
+
+        await record_message(
+            session,
+            person_id=person.id,
+            direction="inbound",
+            text="Ответ на запрос: Да",
+            delivery_status="received",
+            message_type="interaction_callback",
+        )
+        await session.flush()
+        assert thread.admin_unread_count == 1
+        assert thread.last_message_at == last_message_at
+        assert thread.last_message_preview == "Нужна помощь администратора"
+        messages = list(
+            (
+                await session.scalars(
+                    select(CommunicationMessage).order_by(CommunicationMessage.id)
+                )
+            ).all()
+        )
+        assert [item.message_type for item in messages] == [
+            "command",
+            "text",
+            "interaction_callback",
+        ]
+    await engine.dispose()
+
+
+async def test_poll_details_keep_answers_delivery_and_family_agreement(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    async with sessions() as session:
+        student = Person(
+            full_name="Анна Ученица",
+            phone="+79000000063",
+            role_links=[PersonRole(role="student")],
+        )
+        guardian = Person(
+            full_name="Ирина Родитель",
+            phone="+79000000064",
+            role_links=[PersonRole(role="parent")],
+        )
+        teacher = Person(
+            full_name="Олег Учитель",
+            phone="+79000000065",
+            role_links=[PersonRole(role="teacher")],
+        )
+        campaign = CommunicationCampaign(
+            campaign_type="custom_poll",
+            title="Придёте на занятие?",
+            payload={},
+            status="completed",
+        )
+        session.add_all([student, guardian, teacher, campaign])
+        await session.flush()
+        session.add(StudentGuardian(student_id=student.id, guardian_id=guardian.id))
+        requests = []
+        for person, context in (
+            (student, "student"),
+            (guardian, "guardian"),
+            (teacher, "teacher"),
+        ):
+            request = InteractionRequest(
+                request_type="yes_no",
+                question=campaign.title,
+                recipient_person_id=person.id,
+                recipient_context=context,
+                subject_person_id=student.id if context != "teacher" else None,
+                campaign_id=campaign.id,
+            )
+            session.add(request)
+            await session.flush()
+            requests.append(request)
+            session.add(
+                NotificationJob(
+                    dedupe_key=f"poll-test:{person.id}",
+                    event_type="custom_yes_no_request",
+                    recipient_context=context,
+                    recipient_person_id=person.id,
+                    subject_person_id=request.subject_person_id,
+                    campaign_id=campaign.id,
+                    interaction_request_id=request.id,
+                    scheduled_at=utcnow(),
+                    status="sent",
+                    payload={},
+                )
+            )
+        await save_interaction_response(
+            session,
+            request=requests[0],
+            respondent_person_id=student.id,
+            respondent_context="student",
+            answer="no",
+        )
+        await save_interaction_response(
+            session,
+            request=requests[1],
+            respondent_person_id=guardian.id,
+            respondent_context="guardian",
+            answer="yes",
+        )
+        await session.flush()
+
+        details = await _campaign_poll_details(session, campaign.id)
+        assert details is not None
+        assert details["counts"] == {
+            "recipients": 3,
+            "yes": 1,
+            "no": 1,
+            "no_response": 1,
+        }
+        assert details["recipients"][2]["delivery_status"] == "sent"
+        assert details["recipients"][2]["answer"] is None
+        assert details["agreements"][0]["teacher_name"] == "Олег Учитель"
+        assert details["agreements"][0]["teacher_answer"] is None
+        assert details["agreements"][0]["result"] == "conflict"
     await engine.dispose()
 
 
