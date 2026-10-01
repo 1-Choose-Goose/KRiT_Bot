@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import httpx
+from pydantic import SecretStr
 from sqlalchemy import select
 
 from krit_bot.communication_models import (
@@ -30,6 +32,7 @@ from krit_bot.communications import (
     record_message,
     save_interaction_response,
 )
+from krit_bot.config import Settings
 from krit_bot.db import (
     Person,
     PersonRole,
@@ -50,6 +53,38 @@ from krit_bot.learning_models import (
     StudyGroup,
     Subject,
 )
+from krit_bot.webhook import create_app
+
+
+async def test_schedule_publication_serializes_period_dates(tmp_path) -> None:
+    settings = Settings(
+        database_url=f"sqlite+aiosqlite:///{(tmp_path / 'schedule-publish.db').as_posix()}",
+        max_bot_token=SecretStr("test-token"),
+        jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
+        bot_mode="webhook",
+        vk_syndication_enabled=False,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            login = await client.post(
+                "/api/v1/auth/login", json={"username": "admin", "password": "admin"}
+            )
+            headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+            response = await client.post(
+                "/api/v1/communications/schedule/publish",
+                headers=headers,
+                json={
+                    "date_from": date(2026, 10, 1).isoformat(),
+                    "date_to": date(2026, 10, 8).isoformat(),
+                    "preview": False,
+                },
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["period_from"] == "2026-10-01"
+            assert response.json()["period_to"] == "2026-10-08"
 
 
 async def _database(tmp_path):

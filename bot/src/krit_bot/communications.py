@@ -1973,8 +1973,8 @@ def create_communications_router(
                     affected.add(key[:3])
                     removed_by_recipient[key[:3]].append(old.snapshot)
             preview = {
-                "period_from": payload.date_from,
-                "period_to": payload.date_to,
+                "period_from": payload.date_from.isoformat(),
+                "period_to": payload.date_to.isoformat(),
                 "recipients": len(grouped),
                 "affected_recipients": len(affected),
                 "unchanged_recipients": max(0, len(grouped) - len(affected)),
