@@ -153,9 +153,16 @@ async def ensure_default_rules(session: AsyncSession) -> None:
                         ),
                     )
                 )
-    session.add_all(rows)
-    if rows:
-        await session.flush()
+    # More than one API/reconciliation worker can enter this bootstrap path on
+    # the first start after an upgrade.  Isolate every insert in a savepoint so
+    # the unique rule key resolves the race without aborting the outer work.
+    for row in rows:
+        async with session.begin_nested():
+            session.add(row)
+            try:
+                await session.flush()
+            except IntegrityError:
+                pass
     confirmation_rules = list(
         (
             await session.scalars(
