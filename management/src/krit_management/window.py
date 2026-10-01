@@ -9,7 +9,6 @@ from PySide6.QtGui import QCloseEvent, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -45,7 +44,7 @@ from .updates import (
     launch_updater,
     updates_supported,
 )
-from .widgets import matches_word_prefix
+from .widgets import SafeComboBox, matches_word_prefix
 from .workers import ProgressWorker, Worker
 
 ASSETS_DIR = Path(__file__).with_name("assets")
@@ -376,7 +375,7 @@ class MainWindow(QMainWindow):
         self.people_search.setPlaceholderText("Поиск по ФИО или телефону")
         self.people_search.setClearButtonEnabled(True)
         self.people_search.textChanged.connect(self._render_people)
-        self.people_status = QComboBox()
+        self.people_status = SafeComboBox()
         self.people_status.addItem("Все статусы", "all")
         self.people_status.addItem("Активные", "active")
         self.people_status.addItem("Отключённые", "inactive")

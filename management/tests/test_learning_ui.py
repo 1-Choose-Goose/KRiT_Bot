@@ -5,8 +5,8 @@ from datetime import UTC, datetime, timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QDate, QSizeF
-from PySide6.QtGui import QPageLayout, QPdfWriter
+from PySide6.QtCore import QDate, QPoint, QPointF, QSizeF, Qt
+from PySide6.QtGui import QPageLayout, QPdfWriter, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -29,7 +29,7 @@ from krit_management.learning_page import (
     SchedulePreviewDialog,
 )
 from krit_management.main import build_stylesheet
-from krit_management.widgets import SearchableComboBox
+from krit_management.widgets import SafeComboBox, SearchableComboBox
 from krit_management.window import MainWindow
 
 
@@ -574,6 +574,32 @@ def test_searchable_combo_matches_prefix_of_surname_or_name() -> None:
     data_combo.setEditText("Быков Валерий Андреевич")
     assert data_combo.currentData() == 42
     data_combo.deleteLater()
+    app.processEvents()
+
+
+def test_closed_combo_does_not_change_value_with_mouse_wheel() -> None:
+    app = QApplication.instance() or QApplication([])
+    combo = SafeComboBox()
+    combo.addItems(["Первый", "Второй", "Третий"])
+    combo.setCurrentIndex(1)
+    combo.show()
+    app.processEvents()
+
+    event = QWheelEvent(
+        QPointF(5, 5),
+        QPointF(5, 5),
+        QPoint(0, 0),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate,
+        False,
+    )
+    QApplication.sendEvent(combo, event)
+
+    assert combo.currentIndex() == 1
+    assert not event.isAccepted()
+    combo.deleteLater()
     app.processEvents()
 
 

@@ -4,9 +4,11 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QComboBox, QHeaderView
 
-from krit_management.communications_page import CommunicationsPage
+from krit_management.communications_page import PERSON_SEARCH_ROLE, CommunicationsPage
+from krit_management.widgets import SearchableComboBox
 
 
 class FakeApi:
@@ -26,6 +28,47 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
         "Подтверждения",
         "Настройки",
     ]
+    page.people = [
+        {
+            "id": 1,
+            "full_name": "Алексеев Александр Фёдорович",
+            "roles": ["student", "parent"],
+            "phone": "+7 (001) 000-00-17",
+            "max_user_id": None,
+        },
+        {
+            "id": 2,
+            "full_name": "Куц Олег Олегович",
+            "roles": ["parent"],
+            "phone": "+7 (950) 722-00-00",
+            "max_user_id": "max-2",
+        },
+    ]
+    page._render_recipients()
+    assert page.recipients.item(0, 2).text() == "Ученик, Родитель"
+    assert page.recipients.item(0, 4).text() == "Не подключён"
+    header = page.recipients.horizontalHeader()
+    assert header.sectionResizeMode(1) == QHeaderView.ResizeMode.Stretch
+    assert page.recipients.columnWidth(2) == 190
+    assert page.recipients.columnWidth(3) == 165
+    assert page.recipients.columnWidth(4) == 145
+    page._recipient_cell_clicked(0, 1)
+    assert page._selected_ids() == [1]
+    assert page.recipients.item(0, 0).checkState() == Qt.CheckState.Checked
+    page._recipient_cell_clicked(1, 3)
+    assert page._selected_ids() == [1, 2]
+    assert page.selected_count.text() == "Выбрано: 2"
+    page.recipient_search.setText("нет совпадений")
+    assert page.recipients.rowCount() == 0
+    assert page._selected_ids() == [1, 2]
+    page.recipient_search.clear()
+    assert page.recipients.item(0, 0).checkState() == Qt.CheckState.Checked
+    page._clear_recipient_selection()
+    assert page._selected_ids() == []
+    page.recipient_search.setText("Куц")
+    page._select_visible_recipients()
+    assert page._selected_ids() == [2]
+    page.recipient_search.clear()
     page._messages_loaded(
         [
             {
@@ -38,6 +81,25 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     )
     assert "<script>" not in page.chat_history.toHtml()
     assert "<script>alert(1)</script>" in page.chat_history.toPlainText()
+    page.current_person_id = 1
+    page.reply_text.setText("Ответ администратора")
+    page._reply_sent(1, "Ответ администратора")
+    assert "Ответ администратора" in page.chat_history.toPlainText()
+    assert "ожидает отправки" in page.chat_history.toPlainText()
+    assert page.reply_text.text() == ""
+    page._messages_loaded_for(
+        1,
+        [
+            {
+                "direction": "outbound",
+                "created_at": "2026-10-01 10:01",
+                "delivery_status": "sent",
+                "text": "Ответ администратора",
+            }
+        ],
+    )
+    assert page.chat_history.toPlainText().count("Ответ администратора") == 1
+    assert 1 not in page.pending_replies
     page._settings_loaded(
         [
             {
@@ -58,5 +120,57 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     assert page.settings.columnCount() == 9
     assert page.settings.cellWidget(0, 7).currentData() == "once"
     assert page.settings.item(0, 8).text() == "180"
+    assert page.settings.item(0, 0).text() == "Подтверждение посещения"
+    assert page.settings.columnWidth(0) == 250
+    priority = page.settings.cellWidget(0, 4)
+    assert isinstance(priority, QComboBox)
+    assert priority.currentText() == "Обычный"
+    page._campaigns_loaded(
+        [
+            {
+                "id": 1,
+                "created_at": "2026-10-01T10:00:00",
+                "type": "manual_message",
+                "title": "Проверка",
+                "status": "completed",
+                "counts": {"sent": 2, "failed": 1},
+            }
+        ]
+    )
+    assert page.campaigns.item(0, 1).text() == "Сообщение"
+    assert page.campaigns.item(0, 3).text() == "Завершена"
+    assert page.campaigns.item(0, 4).text() == "доставлено: 2, ошибка: 1"
+    page.confirmation_rows = [
+        {
+            "student_name": "Алексеева Анна",
+            "lesson": "01.10 · 10:00 · Математика",
+            "request_sent": True,
+            "student_answer": "yes",
+            "guardian_answer": "no",
+            "status": "conflict",
+            "reason": "—",
+            "max_available": True,
+            "needs_attention": True,
+        }
+    ]
+    page._render_confirmations()
+    assert page.confirmations.item(0, 3).text() == "Да"
+    assert page.confirmations.item(0, 4).text() == "Нет"
+    page._settings_people_loaded(
+        [
+            {
+                "id": 7,
+                "full_name": "Андреева Милана Олеговна",
+                "phone": "+7 (001) 000-00-22",
+            }
+        ]
+    )
+    assert isinstance(page.settings_person, SearchableComboBox)
+    page.settings_person._search("мил")
+    assert page.settings_person._proxy.rowCount() == 1
+    page.settings_person._search("0022")
+    assert page.settings_person._proxy.rowCount() == 1
+    assert "Андреева" in str(page.settings_person.itemData(1, PERSON_SEARCH_ROLE))
+    assert page.person_overrides.columnWidth(3) == 250
     page.shutdown()
     page.close()

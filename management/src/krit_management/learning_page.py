@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 from .api import ManagementApi
 from .timeutils import center_timezone, center_wall_time, now_center, parse_center
 from .widgets import (
+    SafeComboBox,
     SearchableComboBox,
     configure_calendar,
     configure_form_layout,
@@ -186,7 +187,7 @@ class SchedulePreviewDialog(QDialog):
         controls.setSpacing(8)
         controls.addWidget(_button("По ширине", self._fit_to_width))
         controls.addWidget(_button("−", lambda: self._change_zoom(0.8)))
-        self.zoom = QComboBox()
+        self.zoom = SafeComboBox()
         self.zoom.setEditable(True)
         self.zoom.setMinimumWidth(120)
         self.zoom.addItems(["50 %", "75 %", "100 %", "125 %", "150 %", "200 %"])
@@ -906,7 +907,7 @@ class LessonCardDialog(QDialog):
             name = QTableWidgetItem(participant.get("person_name_snapshot", ""))
             name.setData(Qt.ItemDataRole.UserRole, participant.get("person_id"))
             self.table.setItem(row, 0, name)
-            combo = QComboBox()
+            combo = SafeComboBox()
             allowed = ATTENDANCE_LABELS.items()
             if lesson.get("status") == "in_progress":
                 allowed = [
@@ -1389,7 +1390,7 @@ class LearningPage(QWidget):
         period_label = QLabel("Период")
         period_label.setObjectName("controlGroupLabel")
         filters.addWidget(period_label, 0, 0)
-        self.calendar_period = QComboBox()
+        self.calendar_period = SafeComboBox()
         self.calendar_period.setMinimumWidth(190)
         self.calendar_period.addItem("День", 1)
         self.calendar_period.addItem("Неделя", 7)
@@ -1425,7 +1426,7 @@ class LearningPage(QWidget):
         object_label = QLabel("Показать")
         object_label.setObjectName("controlGroupLabel")
         filters.addWidget(object_label, 1, 0)
-        self.calendar_filter_type = QComboBox()
+        self.calendar_filter_type = SafeComboBox()
         self.calendar_filter_type.setMinimumWidth(190)
         for label, value in (
             ("Весь клуб", None),

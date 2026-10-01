@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt, QTimer
-from PySide6.QtGui import QColor, QTextCharFormat
+from PySide6.QtGui import QColor, QTextCharFormat, QWheelEvent
 from PySide6.QtWidgets import QComboBox, QCompleter, QDateEdit, QDateTimeEdit, QFormLayout
 
 
@@ -59,10 +59,23 @@ class _WordPrefixProxy(QSortFilterProxyModel):
         if model is None:
             return False
         index = model.index(source_row, self.filterKeyColumn(), source_parent)
-        return matches_word_prefix(" ".join(self._tokens), str(model.data(index) or ""))
+        return matches_word_prefix(
+            " ".join(self._tokens),
+            str(model.data(index, self.filterRole()) or ""),
+        )
 
 
-class SearchableComboBox(QComboBox):
+class SafeComboBox(QComboBox):
+    """A combo box that does not change a closed selection with the mouse wheel."""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        if self.view().isVisible():
+            super().wheelEvent(event)
+            return
+        event.ignore()
+
+
+class SearchableComboBox(SafeComboBox):
     """Combo box with case-insensitive prefix search across every word."""
 
     def __init__(self, parent=None, *, placeholder: str = "Начните вводить…") -> None:
@@ -129,6 +142,10 @@ class SearchableComboBox(QComboBox):
         self._proxy.set_query(text)
         if text.strip():
             self._completer.complete()
+
+    def setSearchRole(self, role: int) -> None:  # noqa: N802
+        """Use extra hidden text for filtering while keeping labels compact."""
+        self._proxy.setFilterRole(role)
 
     def setModelColumn(self, visible_column: int) -> None:
         super().setModelColumn(visible_column)

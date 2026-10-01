@@ -6,7 +6,6 @@ from typing import Any
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -26,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from .timeutils import parse_center
-from .widgets import configure_form_layout, matches_word_prefix
+from .widgets import SafeComboBox, configure_form_layout, matches_word_prefix
 
 ROLE_LABELS = {"student": "Ученик", "parent": "Родитель", "teacher": "Учитель"}
 ATTENDANCE_LABELS = {
@@ -220,7 +219,7 @@ class PersonDialog(QDialog):
         relations_layout.setContentsMargins(8, 12, 8, 8)
         self.relation_widgets: list[Any] = []
         relation_header = QHBoxLayout()
-        self.relation_mode = QComboBox()
+        self.relation_mode = SafeComboBox()
         self.relation_mode.currentIndexChanged.connect(lambda _index: self._render_relations())
         relation_header.addWidget(self.relation_mode)
         relation_header.addStretch(1)
