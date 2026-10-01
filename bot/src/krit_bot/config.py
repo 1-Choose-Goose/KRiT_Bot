@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     max_token_file: Path = Path("../TOKEN.txt")
     max_api_base_url: str = "https://platform-api2.max.ru"
     max_webhook_secret: SecretStr | None = None
+    max_webhook_url: str | None = None
     jwt_secret: SecretStr | None = None
     bootstrap_admin_username: str = "admin"
     bootstrap_admin_password: SecretStr = SecretStr("admin")

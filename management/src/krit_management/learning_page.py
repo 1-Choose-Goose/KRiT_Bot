@@ -776,14 +776,20 @@ class LessonDialog(QDialog):
         self.error_label.show()
 
     @staticmethod
-    def _combo(items: list[dict[str, Any]], label: str, empty: str | None = None) -> QComboBox:
+    def _combo(
+        items: list[dict[str, Any]],
+        label: str,
+        empty: str | None = None,
+        *,
+        include_inactive: bool = False,
+    ) -> QComboBox:
         combo = SearchableComboBox(
             placeholder="Фамилия или имя" if label == "full_name" else "Начните вводить…"
         )
         if empty:
             combo.addItem(empty, None)
         for item in items:
-            if item.get("active", True):
+            if include_inactive or item.get("active", True):
                 combo.addItem(str(item.get(label, "")), item.get("id"))
         return combo
 
@@ -1159,7 +1165,11 @@ class FreeSlotDialog(QDialog):
         self.duration.setRange(5, 480)
         self.duration.setValue(60)
         self.duration.setSuffix(" мин")
-        self.teacher = LessonDialog._combo(references.get("teachers", []), "full_name")
+        self.teacher = LessonDialog._combo(
+            references.get("teachers", []),
+            "full_name",
+            include_inactive=True,
+        )
         self.room = LessonDialog._combo(references.get("rooms", []), "name", empty="Любой кабинет")
         form.addRow("Дата", self.day)
         form.addRow("Продолжительность", self.duration)
@@ -2286,8 +2296,7 @@ class LearningPage(QWidget):
         teachers = [
             item
             for item in self.references.get("teachers", [])
-            if item.get("active")
-            and int(item.get("id", -1)) in qualified
+            if int(item.get("id", -1)) in qualified
             and int(item.get("id", -1)) not in participant_ids
         ]
         name, accepted = QInputDialog.getItem(

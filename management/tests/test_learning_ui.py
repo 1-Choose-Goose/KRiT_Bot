@@ -652,12 +652,16 @@ def test_subject_assignments_filter_teachers_in_group_and_lesson() -> None:
     assert lesson.teacher.findData(10) == -1
     assert lesson.teacher.findData(11) >= 0
 
+    free_slot = FreeSlotDialog(references)
+    assert free_slot.teacher.findData(10) >= 0
+
     group = ReferenceDialog("groups", {"name": "Группа"}, references=references)
     group.group_subject.setCurrentIndex(group.group_subject.findData(1))
     app.processEvents()
     assert group.group_teacher.findData(10) >= 0
     assert group.group_teacher.findData(11) == -1
     lesson.deleteLater()
+    free_slot.deleteLater()
     group.deleteLater()
     app.processEvents()
 

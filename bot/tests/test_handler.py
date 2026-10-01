@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -10,10 +11,12 @@ from krit_bot.communication_models import (
     InteractionResponse,
     MaxRegistrationPending,
 )
-from krit_bot.config import extract_first_token
+from krit_bot.config import Settings, extract_first_token
 from krit_bot.db import Base, Person, PersonRole, build_session_factory
 from krit_bot.handler import EchoHandler, parse_message_callback, parse_message_created
 from krit_bot.learning_models import PersonMaxIdentity
+from krit_bot.max_api import WEBHOOK_UPDATE_TYPES
+from krit_bot.webhook import ensure_max_webhook_subscription
 
 
 class FakeApi:
@@ -109,6 +112,34 @@ def test_parse_message_callback_accepts_documented_root_user() -> None:
     assert parsed is not None
     assert parsed.user_id == 42
     assert parsed.payload == "interaction:1:yes"
+
+
+async def test_webhook_startup_subscribes_to_button_callbacks() -> None:
+    class SubscriptionApi:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def subscribe_webhook(self, **kwargs) -> dict:
+            self.calls.append(kwargs)
+            return {"success": True}
+
+    api = SubscriptionApi()
+    settings = Settings(
+        max_bot_token=SecretStr("test-token"),
+        max_webhook_secret=SecretStr("test-secret"),
+        max_webhook_url="https://example.test/webhooks/max",
+        bot_mode="webhook",
+    )
+
+    assert await ensure_max_webhook_subscription(api, settings)  # type: ignore[arg-type]
+    assert api.calls == [
+        {
+            "url": "https://example.test/webhooks/max",
+            "secret": "test-secret",
+            "update_types": WEBHOOK_UPDATE_TYPES,
+        }
+    ]
+    assert "message_callback" in api.calls[0]["update_types"]
 
 
 def test_token_file_uses_only_first_non_empty_line() -> None:

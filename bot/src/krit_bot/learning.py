@@ -323,7 +323,6 @@ async def _participants_for(
             await session.scalars(
                 select(Person).where(
                     Person.id.in_(ids),
-                    Person.active.is_(True),
                     Person.archived_at.is_(None),
                 )
             )
@@ -356,7 +355,7 @@ async def _references(
         raise HTTPException(422, "Предмет недоступен")
     if room is None or not room.active:
         raise HTTPException(422, "Кабинет недоступен")
-    if teacher is None or not teacher.active or teacher.archived_at is not None:
+    if teacher is None or teacher.archived_at is not None:
         raise HTTPException(422, "Преподаватель недоступен")
     is_teacher = await session.scalar(
         select(PersonRole.person_id).where(
@@ -389,7 +388,6 @@ async def _replace_subject_teachers(
                     .where(
                         PersonRole.person_id.in_(unique_ids),
                         PersonRole.role == "teacher",
-                        Person.active.is_(True),
                         Person.archived_at.is_(None),
                     )
                 )
@@ -1207,7 +1205,6 @@ def create_learning_router(
                 if (
                     teacher_role is None
                     or teacher is None
-                    or not teacher.active
                     or teacher.archived_at is not None
                 ):
                     raise HTTPException(422, "Преподаватель группы не найден")
@@ -1272,7 +1269,6 @@ def create_learning_router(
                 if (
                     teacher_role is None
                     or teacher is None
-                    or not teacher.active
                     or teacher.archived_at is not None
                 ):
                     raise HTTPException(422, "Преподаватель группы не найден")
@@ -1354,8 +1350,8 @@ def create_learning_router(
                     PersonRole.role == "student",
                 )
             )
-            if student_role is None or not person.active or person.archived_at is not None:
-                raise HTTPException(422, "В группу можно добавить только активного ученика")
+            if student_role is None or person.archived_at is not None:
+                raise HTTPException(422, "В группу можно добавить только неархивного ученика")
             overlap = await session.scalar(
                 select(GroupMembership.id).where(
                     GroupMembership.group_id == group_id,
@@ -2319,7 +2315,6 @@ def create_learning_router(
             if (
                 replacement is None
                 or teacher_role is None
-                or not replacement.active
                 or replacement.archived_at is not None
             ):
                 raise HTTPException(422, "Новый преподаватель недоступен")
@@ -2735,8 +2730,8 @@ def create_learning_router(
                     PersonRole.role == "student",
                 )
             )
-            if student_role is None or not person.active or person.archived_at is not None:
-                raise HTTPException(422, "Участник должен быть активным учеником")
+            if student_role is None or person.archived_at is not None:
+                raise HTTPException(422, "Участник должен быть неархивным учеником")
             if lesson.status not in {"planned", "scheduled"}:
                 raise HTTPException(409, "Состав этого занятия уже нельзя менять")
             exists = await session.scalar(

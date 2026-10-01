@@ -50,11 +50,17 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
                 "Быков Валерий Андреевич",
                 "+79000000007",
                 ["teacher"],
-                active=True,
+                active=False,
             )
             student_one = await person("Петров Иван Олегович", "+79000000002", ["student"])
             student_two = await person("Сидорова Анна Ильинична", "+79000000003", ["student"])
             student_three = await person("Орлов Пётр Андреевич", "+79000000004", ["student"])
+            student_without_bot_access = await person(
+                "Куц Олег Олегович",
+                "+79000000008",
+                ["student"],
+                active=False,
+            )
 
             subject_response = await client.post(
                 "/api/v1/learning/subjects",
@@ -111,6 +117,16 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
                 },
             )
             assert membership_response.status_code == 201, membership_response.text
+            membership_without_bot = await client.post(
+                f"/api/v1/learning/groups/{group_id}/memberships",
+                headers=headers,
+                json={
+                    "person_id": student_without_bot_access,
+                    "start_at": datetime.now(UTC).isoformat(),
+                    "end_at": None,
+                },
+            )
+            assert membership_without_bot.status_code == 201, membership_without_bot.text
 
             references = await client.get("/api/v1/learning/reference-data", headers=headers)
             assert references.status_code == 200
@@ -120,7 +136,10 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
             group_reference = next(
                 item for item in references.json()["groups"] if item["id"] == group_id
             )
-            assert [item["person_id"] for item in group_reference["memberships"]] == [student_one]
+            assert {item["person_id"] for item in group_reference["memberships"]} == {
+                student_one,
+                student_without_bot_access,
+            }
 
             inactive_teacher_lesson = await client.post(
                 "/api/v1/learning/lessons",
@@ -130,7 +149,7 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
                     "teacher_id": teacher_without_bot_access,
                     "start_at": (end + timedelta(hours=2)).isoformat(),
                     "end_at": (end + timedelta(hours=3)).isoformat(),
-                    "participant_ids": [],
+                    "participant_ids": [student_without_bot_access],
                 },
             )
             assert inactive_teacher_lesson.status_code == 201, inactive_teacher_lesson.text

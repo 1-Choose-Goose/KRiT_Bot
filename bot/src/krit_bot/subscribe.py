@@ -4,7 +4,7 @@ import argparse
 import asyncio
 
 from .config import get_settings
-from .max_api import MaxApiClient
+from .max_api import WEBHOOK_UPDATE_TYPES, MaxApiClient
 
 
 async def subscribe(url: str) -> None:
@@ -19,15 +19,7 @@ async def subscribe(url: str) -> None:
         result = await api.subscribe_webhook(
             url=url,
             secret=settings.max_webhook_secret.get_secret_value(),
-            update_types=[
-                "message_created",
-                "message_callback",
-                "bot_added",
-                "bot_started",
-                "bot_stopped",
-                "bot_removed",
-                "user_removed",
-            ],
+            update_types=WEBHOOK_UPDATE_TYPES,
         )
     finally:
         await api.close()

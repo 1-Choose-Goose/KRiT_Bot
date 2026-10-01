@@ -44,7 +44,7 @@ from .learning_models import (
     StudyGroup,
 )
 from .learning_notifications import LearningNotificationWorker
-from .max_api import MaxApiClient
+from .max_api import WEBHOOK_UPDATE_TYPES, MaxApiClient
 from .polling import run_polling
 from .syndication import (
     SyndicationWorker,
@@ -57,6 +57,26 @@ log = structlog.get_logger()
 bearer = HTTPBearer(auto_error=False)
 ROLES = {"student", "parent", "teacher"}
 password_hash = PasswordHash.recommended()
+
+
+async def ensure_max_webhook_subscription(
+    api: MaxApiClient, settings: Settings
+) -> bool:
+    if settings.bot_mode != "webhook" or not settings.max_webhook_url:
+        return False
+    if settings.max_webhook_secret is None:
+        raise RuntimeError("MAX_WEBHOOK_SECRET is required for webhook mode")
+    result = await api.subscribe_webhook(
+        url=settings.max_webhook_url,
+        secret=settings.max_webhook_secret.get_secret_value(),
+        update_types=WEBHOOK_UPDATE_TYPES,
+    )
+    if not result.get("success"):
+        raise RuntimeError(
+            "MAX rejected webhook subscription: "
+            + str(result.get("message") or "unknown error")
+        )
+    return True
 
 
 class LoginPayload(BaseModel):
@@ -273,6 +293,18 @@ def create_app(settings: Settings) -> FastAPI:
         nonlocal learning_notifications_task, communications_task
         await ensure_schema(engine)
         await ensure_bootstrap_admin()
+        try:
+            if await ensure_max_webhook_subscription(api, settings):
+                log.info(
+                    "max_webhook_subscription_verified",
+                    url=settings.max_webhook_url,
+                    update_types=WEBHOOK_UPDATE_TYPES,
+                )
+        except Exception as exc:
+            # MAX must not take down the management API when its subscription
+            # endpoint is temporarily unavailable. The existing subscription
+            # remains usable and the next application start retries the check.
+            log.warning("max_webhook_subscription_failed", error=str(exc))
         learning_notifications_task = asyncio.create_task(
             LearningNotificationWorker(sessions=sessions, api=api).run(),
             name="learning-notifications",

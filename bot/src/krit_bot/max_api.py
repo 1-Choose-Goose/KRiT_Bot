@@ -10,6 +10,16 @@ from typing import Any
 import httpx
 import truststore
 
+WEBHOOK_UPDATE_TYPES = [
+    "message_created",
+    "message_callback",
+    "bot_added",
+    "bot_started",
+    "bot_stopped",
+    "bot_removed",
+    "user_removed",
+]
+
 
 class MaxApiError(RuntimeError):
     def __init__(
