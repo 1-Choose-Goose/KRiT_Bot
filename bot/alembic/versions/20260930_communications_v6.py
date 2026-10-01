@@ -601,7 +601,11 @@ def upgrade() -> None:
                         "quiet_hours_policy": "defer",
                         "quiet_start": "22:00",
                         "quiet_end": "08:00",
-                        "configuration": {"deadline_minutes": 60},
+                        "configuration": {
+                            "deadline_minutes": 60,
+                            "follow_up": "once",
+                            "follow_up_offset_minutes": 180,
+                        },
                         "updated_at": now,
                     }
                 )

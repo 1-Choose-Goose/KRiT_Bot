@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from collections.abc import Callable
 from typing import Any
 
@@ -217,9 +218,19 @@ class CommunicationsPage(QWidget):
         )
         help_label.setWordWrap(True)
         layout.addWidget(help_label)
-        self.settings = QTableWidget(0, 7)
+        self.settings = QTableWidget(0, 9)
         self.settings.setHorizontalHeaderLabels(
-            ["Событие", "Получатель", "За сколько, мин", "Включено", "Приоритет", "С", "До"]
+            [
+                "Событие",
+                "Получатель",
+                "За сколько, мин",
+                "Включено",
+                "Приоритет",
+                "Тихие часы с",
+                "до",
+                "Если нет ответа",
+                "Повтор за, мин",
+            ]
         )
         self.settings.verticalHeader().setVisible(False)
         self.settings.horizontalHeader().setStretchLastSection(True)
@@ -475,10 +486,11 @@ class CommunicationsPage(QWidget):
         lines = []
         for row in rows:
             who = "Администратор" if row.get("direction") == "outbound" else "Клиент"
-            status = row.get("delivery_status", "")
+            status = html.escape(str(row.get("delivery_status", "")))
+            created_at = html.escape(str(row.get("created_at", "")))
+            text = html.escape(str(row.get("text", ""))).replace("\n", "<br>")
             lines.append(
-                f"<p><b>{who}</b> <small>{row.get('created_at', '')} · {status}</small><br>"
-                f"{str(row.get('text', '')).replace(chr(10), '<br>')}</p>"
+                f"<p><b>{who}</b> <small>{created_at} · {status}</small><br>{text}</p>"
             )
         self.chat_history.setHtml("".join(lines))
         self.chat_history.verticalScrollBar().setValue(
@@ -573,6 +585,25 @@ class CommunicationsPage(QWidget):
             self.settings.setCellWidget(row, 4, priority)
             self.settings.setItem(row, 5, QTableWidgetItem(str(rule.get("quiet_start") or "")))
             self.settings.setItem(row, 6, QTableWidgetItem(str(rule.get("quiet_end") or "")))
+            configuration = rule.get("configuration") or {}
+            if rule.get("event_code") == "lesson_confirmation_request":
+                follow_up = QComboBox()
+                follow_up.addItem("Без повтора", "none")
+                follow_up.addItem("Один повтор", "once")
+                follow_up.setCurrentIndex(
+                    max(0, follow_up.findData(configuration.get("follow_up", "once")))
+                )
+                self.settings.setCellWidget(row, 7, follow_up)
+                self.settings.setItem(
+                    row,
+                    8,
+                    QTableWidgetItem(
+                        str(configuration.get("follow_up_offset_minutes", 180))
+                    ),
+                )
+            else:
+                self.settings.setItem(row, 7, QTableWidgetItem("—"))
+                self.settings.setItem(row, 8, QTableWidgetItem("—"))
         self._render_person_settings()
 
     def _settings_people_loaded(self, value: object) -> None:
@@ -699,6 +730,18 @@ class CommunicationsPage(QWidget):
         payload = []
         for row, source in enumerate(self.rules):
             priority = self.settings.cellWidget(row, 4)
+            configuration = dict(source.get("configuration") or {})
+            if source.get("event_code") == "lesson_confirmation_request":
+                follow_up = self.settings.cellWidget(row, 7)
+                configuration["follow_up"] = (
+                    follow_up.currentData() if isinstance(follow_up, QComboBox) else "once"
+                )
+                try:
+                    configuration["follow_up_offset_minutes"] = max(
+                        61, int(self.settings.item(row, 8).text())
+                    )
+                except (AttributeError, ValueError):
+                    configuration["follow_up_offset_minutes"] = 180
             payload.append(
                 {
                     "event_code": source["event_code"],
@@ -712,7 +755,7 @@ class CommunicationsPage(QWidget):
                     "quiet_hours_policy": source.get("quiet_hours_policy", "defer"),
                     "quiet_start": self.settings.item(row, 5).text() or None,
                     "quiet_end": self.settings.item(row, 6).text() or None,
-                    "configuration": source.get("configuration") or {},
+                    "configuration": configuration,
                 }
             )
         self._run(

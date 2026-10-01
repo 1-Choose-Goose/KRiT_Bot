@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, timedelta
 from typing import Any
 
 import structlog
@@ -524,7 +524,10 @@ class EchoHandler:
                     MaxRegistrationPending.status == "pending",
                 )
             )
-            if pending is None or pending.expires_at < utcnow():
+            expires_at = pending.expires_at if pending is not None else None
+            if expires_at is not None and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            if pending is None or expires_at is None or expires_at < utcnow():
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
                     notification="Снова отправьте контакт для регистрации",

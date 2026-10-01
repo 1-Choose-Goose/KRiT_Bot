@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 
 from krit_bot.communication_models import (
+    CommunicationMessage,
     GuardianNotificationOverride,
     InteractionRequest,
     InteractionRequestLesson,
@@ -13,7 +14,11 @@ from krit_bot.communication_models import (
     PersonNotificationOverride,
 )
 from krit_bot.communications import (
+    EffectivePolicy,
     NotificationPolicyResolver,
+    _schedule_text,
+    apply_quiet_hours,
+    cleanup_communication_history,
     daily_bundles,
     ensure_default_rules,
     reconcile_confirmation_requests,
@@ -131,15 +136,34 @@ async def test_daily_lessons_are_bundled_once_per_person_and_day(tmp_path) -> No
         await reconcile_confirmation_requests(session, now=utcnow(), timezone=timezone)
         jobs = list((await session.scalars(select(NotificationJob))).all())
         assert len([job for job in jobs if job.event_type == "lesson_reminder"]) == 9
-        assert len([job for job in jobs if job.event_type == "lesson_confirmation_request"]) == 2
-        confirmation = next(
+        confirmation_jobs = [
             job for job in jobs if job.event_type == "lesson_confirmation_request"
+        ]
+        assert len(confirmation_jobs) == 4
+        assert len([job for job in confirmation_jobs if job.payload.get("follow_up")]) == 2
+        confirmation = next(
+            job for job in confirmation_jobs if not job.payload.get("follow_up")
         )
         assert any(
             button.get("payload", "").endswith(":partial")
             for row in confirmation.payload["keyboard"]
             for button in row
         )
+        request = await session.get(InteractionRequest, confirmation.interaction_request_id)
+        assert request is not None
+        await save_interaction_response(
+            session,
+            request=request,
+            respondent_person_id=request.recipient_person_id,
+            respondent_context=request.recipient_context,
+            answer="yes",
+        )
+        linked_follow_up = next(
+            job
+            for job in confirmation_jobs
+            if job.interaction_request_id == request.id and job.payload.get("follow_up")
+        )
+        assert linked_follow_up.status == "cancelled"
     await engine.dispose()
 
 
@@ -268,4 +292,300 @@ async def test_student_and_guardian_disagreement_is_a_conflict(tmp_path) -> None
         intent = await session.scalar(select(LessonAttendanceIntent))
         assert intent is not None
         assert intent.status == "conflict"
+    await engine.dispose()
+
+
+async def test_anchor_moves_to_next_lesson_without_recreating_sent_offsets(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    now = datetime(2026, 10, 1, 8, 0, tzinfo=timezone).astimezone(UTC)
+    async with sessions() as session:
+        student = Person(full_name="Артём Ученик", phone="+79000000041")
+        teacher = Person(full_name="Анна Учитель", phone="+79000000042")
+        subject = Subject(name="Математика", color="#2563eb")
+        room = Room(name="Кабинет 1", capacity=10)
+        session.add_all([student, teacher, subject, room])
+        await session.flush()
+        lessons: list[Lesson] = []
+        for hour in (14, 15, 18):
+            start = datetime(2026, 10, 5, hour, 0, tzinfo=timezone)
+            lesson = Lesson(
+                subject_id=subject.id,
+                teacher_id=teacher.id,
+                room_id=room.id,
+                start_at=start.astimezone(UTC),
+                end_at=(start + timedelta(hours=1)).astimezone(UTC),
+                status="planned",
+                teacher_name_snapshot=teacher.full_name,
+                room_name_snapshot=room.name,
+                subject_name_snapshot=subject.name,
+            )
+            session.add(lesson)
+            await session.flush()
+            session.add(
+                LessonParticipant(
+                    lesson_id=lesson.id,
+                    person_id=student.id,
+                    person_name_snapshot=student.full_name,
+                )
+            )
+            lessons.append(lesson)
+        await session.flush()
+
+        await reconcile_daily_reminders(session, now=now, timezone=timezone)
+        student_jobs = list(
+            (
+                await session.scalars(
+                    select(NotificationJob).where(
+                        NotificationJob.recipient_person_id == student.id,
+                        NotificationJob.event_type == "lesson_reminder",
+                    )
+                )
+            ).all()
+        )
+        assert len(student_jobs) == 3
+        assert all(job.lesson_id == lessons[0].id for job in student_jobs)
+        assert all(len(job.payload["lesson_ids"]) == 3 for job in student_jobs)
+        sent = next(job for job in student_jobs if ":reminder:1440:" in job.dedupe_key)
+        sent.status = "sent"
+        sent_key = sent.dedupe_key
+
+        lessons[0].status = "cancelled"
+        lessons[0].notification_revision += 1
+        await reconcile_daily_reminders(session, now=now, timezone=timezone)
+        await session.flush()
+
+        assert sent.dedupe_key == sent_key
+        pending = [job for job in student_jobs if job.status != "sent"]
+        assert all(job.lesson_id == lessons[1].id for job in pending)
+        assert all(job.payload["lesson_ids"] == [lessons[1].id, lessons[2].id] for job in pending)
+        assert all("14:00" not in job.payload["text"] for job in pending)
+        assert all("15:00" in job.payload["text"] for job in pending)
+    await engine.dispose()
+
+
+async def test_confirm_all_updates_every_lesson_but_not_attendance(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    async with sessions() as session:
+        student = Person(full_name="Ученик", phone="+79000000051")
+        teacher = Person(full_name="Учитель", phone="+79000000052")
+        subject = Subject(name="Физика", color="#2563eb")
+        room = Room(name="Кабинет", capacity=10)
+        session.add_all([student, teacher, subject, room])
+        await session.flush()
+        request = InteractionRequest(
+            request_type="lesson_confirmation",
+            question="Будете на всех занятиях?",
+            recipient_person_id=student.id,
+            recipient_context="student",
+            subject_person_id=student.id,
+        )
+        session.add(request)
+        await session.flush()
+        participants: list[LessonParticipant] = []
+        for index in range(3):
+            start = utcnow() + timedelta(days=2, hours=index)
+            lesson = Lesson(
+                subject_id=subject.id,
+                teacher_id=teacher.id,
+                room_id=room.id,
+                start_at=start,
+                end_at=start + timedelta(hours=1),
+                teacher_name_snapshot=teacher.full_name,
+                room_name_snapshot=room.name,
+                subject_name_snapshot=subject.name,
+            )
+            session.add(lesson)
+            await session.flush()
+            participant = LessonParticipant(
+                lesson_id=lesson.id,
+                person_id=student.id,
+                person_name_snapshot=student.full_name,
+            )
+            participants.append(participant)
+            session.add_all(
+                [
+                    participant,
+                    InteractionRequestLesson(
+                        request_id=request.id,
+                        lesson_id=lesson.id,
+                        lesson_revision=lesson.notification_revision,
+                    ),
+                ]
+            )
+        await save_interaction_response(
+            session,
+            request=request,
+            respondent_person_id=student.id,
+            respondent_context="student",
+            answer="yes",
+        )
+        intents = list((await session.scalars(select(LessonAttendanceIntent))).all())
+        assert len(intents) == 3
+        assert {item.status for item in intents} == {"confirmed"}
+        assert {item.attendance_status for item in participants} == {"expected"}
+    await engine.dispose()
+
+
+def test_quiet_hours_defer_normal_message_and_drop_stale_reminder() -> None:
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    scheduled = datetime(2026, 10, 1, 23, 0, tzinfo=timezone).astimezone(UTC)
+    policy = EffectivePolicy(
+        enabled=True,
+        priority="normal",
+        quiet_hours_policy="defer",
+        quiet_start="22:00",
+        quiet_end="08:00",
+        configuration={},
+        source="context",
+    )
+    deferred = apply_quiet_hours(scheduled, policy=policy, timezone=timezone)
+    assert deferred is not None
+    assert deferred.astimezone(timezone) == datetime(2026, 10, 2, 8, 0, tzinfo=timezone)
+    assert (
+        apply_quiet_hours(
+            scheduled,
+            policy=policy,
+            timezone=timezone,
+            meaningful_until=datetime(2026, 10, 2, 7, 0, tzinfo=timezone),
+        )
+        is None
+    )
+
+
+def test_schedule_diff_reports_semantic_changes() -> None:
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    old = {
+        "lesson_id": 1,
+        "revision": 1,
+        "start_at": datetime(2026, 10, 5, 13, 0, tzinfo=UTC).isoformat(),
+        "end_at": datetime(2026, 10, 5, 14, 0, tzinfo=UTC).isoformat(),
+        "subject": "Математика",
+        "teacher": "Иванов И.И.",
+        "room": "Кабинет 1",
+        "students": ["Анна"],
+    }
+    new = {
+        **old,
+        "revision": 2,
+        "start_at": datetime(2026, 10, 5, 14, 0, tzinfo=UTC).isoformat(),
+        "end_at": datetime(2026, 10, 5, 15, 0, tzinfo=UTC).isoformat(),
+        "room": "Кабинет 2",
+        "students": ["Анна", "Марина"],
+    }
+    text = _schedule_text([], changed=True, changed_items=[(old, new)], timezone=timezone)
+    assert "05.10 18:00–19:00 → 05.10 19:00–20:00" in text
+    assert "кабинет: Кабинет 1 → Кабинет 2" in text
+    assert "добавлены ученики: Марина" in text
+
+
+async def test_history_cleanup_keeps_business_confirmation(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    now = utcnow()
+    async with sessions() as session:
+        student = Person(full_name="Ученик", phone="+79000000061")
+        session.add(student)
+        await session.flush()
+        request = InteractionRequest(
+            request_type="yes_no",
+            question="Подтвердите",
+            recipient_person_id=student.id,
+            recipient_context="student",
+            subject_person_id=student.id,
+        )
+        session.add(request)
+        await session.flush()
+        response = await save_interaction_response(
+            session,
+            request=request,
+            respondent_person_id=student.id,
+            respondent_context="student",
+            answer="yes",
+        )
+        session.add_all(
+            [
+                CommunicationMessage(
+                    person_id=student.id,
+                    direction="inbound",
+                    text="Старое сообщение",
+                    delivery_status="received",
+                    created_at=now - timedelta(days=31),
+                ),
+                CommunicationMessage(
+                    person_id=student.id,
+                    direction="inbound",
+                    text="Новое сообщение",
+                    delivery_status="received",
+                    created_at=now - timedelta(days=1),
+                ),
+            ]
+        )
+        await session.flush()
+        assert await cleanup_communication_history(session, now=now) == 1
+        messages = list((await session.scalars(select(CommunicationMessage))).all())
+        assert [item.text for item in messages] == ["Новое сообщение"]
+        assert await session.get(type(response), response.id) is not None
+    await engine.dispose()
+
+
+async def test_multirole_guardian_bundles_keep_each_child_separate(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    async with sessions() as session:
+        sergey = Person(full_name="Сергей", phone="+79000000071")
+        artem = Person(full_name="Артём", phone="+79000000072")
+        maria = Person(full_name="Мария", phone="+79000000073")
+        teacher = Person(full_name="Учитель", phone="+79000000074")
+        subject = Subject(name="Русский язык", color="#2563eb")
+        room = Room(name="Кабинет", capacity=10)
+        session.add_all([sergey, artem, maria, teacher, subject, room])
+        await session.flush()
+        session.add_all(
+            [
+                StudentGuardian(student_id=artem.id, guardian_id=sergey.id),
+                StudentGuardian(student_id=maria.id, guardian_id=sergey.id),
+            ]
+        )
+        start = datetime(2026, 10, 5, 14, 0, tzinfo=timezone)
+        for index, student in enumerate((sergey, artem, maria)):
+            lesson_start = start + timedelta(hours=index)
+            lesson = Lesson(
+                subject_id=subject.id,
+                teacher_id=teacher.id,
+                room_id=room.id,
+                start_at=lesson_start.astimezone(UTC),
+                end_at=(lesson_start + timedelta(hours=1)).astimezone(UTC),
+                teacher_name_snapshot=teacher.full_name,
+                room_name_snapshot=room.name,
+                subject_name_snapshot=subject.name,
+            )
+            session.add(lesson)
+            await session.flush()
+            session.add(
+                LessonParticipant(
+                    lesson_id=lesson.id,
+                    person_id=student.id,
+                    person_name_snapshot=student.full_name,
+                )
+            )
+        await session.flush()
+        bundles = await daily_bundles(
+            session,
+            date_from=start - timedelta(days=1),
+            date_to=start + timedelta(days=1),
+            timezone=timezone,
+        )
+        sergey_bundles = [item for item in bundles if item.recipient_person_id == sergey.id]
+        assert {
+            (item.recipient_context, item.subject_person_id)
+            for item in sergey_bundles
+        } == {
+            ("student", sergey.id),
+            ("guardian", artem.id),
+            ("guardian", maria.id),
+        }
+        guardian_bundles = [
+            item for item in sergey_bundles if item.recipient_context == "guardian"
+        ]
+        assert all(len(item.lessons) == 1 for item in guardian_bundles)
     await engine.dispose()

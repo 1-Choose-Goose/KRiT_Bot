@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -111,7 +111,11 @@ async def ensure_default_rules(session: AsyncSession) -> None:
                             offset_minutes=offset,
                             enabled=offset == 1440,
                             requires_confirmation=True,
-                            configuration={"deadline_minutes": 60},
+                            configuration={
+                                "deadline_minutes": 60,
+                                "follow_up": "once",
+                                "follow_up_offset_minutes": 180,
+                            },
                         )
                     )
     for event in NotificationEvent:
@@ -152,6 +156,23 @@ async def ensure_default_rules(session: AsyncSession) -> None:
     session.add_all(rows)
     if rows:
         await session.flush()
+    confirmation_rules = list(
+        (
+            await session.scalars(
+                select(NotificationGlobalRule).where(
+                    NotificationGlobalRule.event_code
+                    == NotificationEvent.LESSON_CONFIRMATION_REQUEST
+                )
+            )
+        ).all()
+    )
+    for rule in confirmation_rules:
+        configuration = dict(rule.configuration or {})
+        configuration.setdefault("deadline_minutes", 60)
+        configuration.setdefault("follow_up", "once")
+        configuration.setdefault("follow_up_offset_minutes", 180)
+        if configuration != (rule.configuration or {}):
+            rule.configuration = configuration
 
 
 @dataclass(frozen=True, slots=True)
@@ -529,6 +550,12 @@ async def reconcile_daily_reminders(
                     continue
                 if existing.status in {"pending", "retry", "cancelled"}:
                     existing.dedupe_key = prefix + bundle.fingerprint
+                    # Keep the relational anchor in sync with the recalculated
+                    # daily bundle.  Otherwise cancelling the former first
+                    # lesson can leave a valid replacement job pointing at the
+                    # cancelled lesson even though its payload already starts
+                    # with the new anchor.
+                    existing.lesson_id = first_lesson.id
                     existing.scheduled_at = max(now, scheduled)
                     existing.status = "pending"
                     existing.payload = {
@@ -613,6 +640,22 @@ async def reconcile_confirmation_requests(
             select(NotificationJob).where(NotificationJob.dedupe_key == prefix + bundle.fingerprint)
         )
         if current_job is not None:
+            request = (
+                await session.get(InteractionRequest, current_job.interaction_request_id)
+                if current_job.interaction_request_id is not None
+                else None
+            )
+            if request is not None and request.status == "active":
+                await _enqueue_confirmation_follow_up(
+                    session,
+                    bundle=bundle,
+                    request=request,
+                    policy=policy,
+                    now=now,
+                    timezone=timezone,
+                    keyboard=list(current_job.payload.get("keyboard") or []),
+                    initial_scheduled_at=current_job.scheduled_at,
+                )
             continue
         stale_jobs = list(
             (
@@ -714,7 +757,69 @@ async def reconcile_confirmation_requests(
             },
         )
         created += int(job is not None)
+        if job is not None:
+            follow_up = await _enqueue_confirmation_follow_up(
+                session,
+                bundle=bundle,
+                request=request,
+                policy=policy,
+                now=now,
+                timezone=timezone,
+                keyboard=keyboard,
+                initial_scheduled_at=job.scheduled_at,
+            )
+            created += int(follow_up is not None)
     return created
+
+
+async def _enqueue_confirmation_follow_up(
+    session: AsyncSession,
+    *,
+    bundle: DailyBundle,
+    request: InteractionRequest,
+    policy: EffectivePolicy,
+    now: datetime,
+    timezone: ZoneInfo,
+    keyboard: list[Any],
+    initial_scheduled_at: datetime,
+) -> NotificationJob | None:
+    """Schedule the optional single nudge before the last daily reminder."""
+    configuration = policy.configuration
+    if configuration.get("follow_up", "once") == "none":
+        return None
+    follow_up_offset = int(configuration.get("follow_up_offset_minutes", 180))
+    if follow_up_offset <= 60:
+        # The nudge must precede the final one-hour reminder rather than race it.
+        follow_up_offset = 180
+    scheduled = apply_quiet_hours(
+        bundle.anchor_start_at.astimezone(UTC) - timedelta(minutes=follow_up_offset),
+        policy=policy,
+        timezone=timezone,
+        meaningful_until=bundle.anchor_start_at.astimezone(UTC),
+    )
+    initial = initial_scheduled_at
+    if initial.tzinfo is None:
+        initial = initial.replace(tzinfo=UTC)
+    if scheduled is None or scheduled <= max(now, initial):
+        return None
+    return await enqueue_job(
+        session,
+        dedupe_key=f"{bundle.base_key}:confirmation:{bundle.fingerprint}:followup",
+        event_type=NotificationEvent.LESSON_CONFIRMATION_REQUEST,
+        lesson_id=bundle.lessons[0].id,
+        recipient_person_id=bundle.recipient_person_id,
+        subject_person_id=bundle.subject_person_id,
+        recipient_context=bundle.recipient_context,
+        priority=PRIORITY_VALUE[policy.priority],
+        scheduled_at=scheduled,
+        interaction_request_id=request.id,
+        payload={
+            "text": "Напоминание: ответ по занятиям ещё не получен.\n\n" + request.question,
+            "keyboard": keyboard,
+            "lesson_ids": [item.id for item in bundle.lessons],
+            "follow_up": True,
+        },
+    )
 
 
 async def expire_confirmation_requests(session: AsyncSession, *, now: datetime) -> int:
@@ -813,6 +918,29 @@ async def record_message(
     return message
 
 
+async def cleanup_communication_history(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    limit: int = 500,
+) -> int:
+    """Delete only disposable chat history, never business confirmations/audit."""
+    cutoff = now - timedelta(days=30)
+    ids = list(
+        (
+            await session.scalars(
+                select(CommunicationMessage.id)
+                .where(CommunicationMessage.created_at < cutoff)
+                .order_by(CommunicationMessage.id)
+                .limit(limit)
+            )
+        ).all()
+    )
+    if ids:
+        await session.execute(delete(CommunicationMessage).where(CommunicationMessage.id.in_(ids)))
+    return len(ids)
+
+
 def _intent_status(answers: list[str]) -> str:
     values = set(answers)
     if not values:
@@ -834,7 +962,10 @@ async def save_interaction_response(
 ) -> InteractionResponse:
     if request.status not in {"active", "answered"}:
         raise ValueError("Запрос больше не принимает ответы")
-    if request.expires_at and request.expires_at < utcnow():
+    expires_at = request.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at is not None and expires_at < utcnow():
         request.status = "expired"
         raise ValueError("Срок ответа истёк")
     if respondent_person_id != request.recipient_person_id:
@@ -960,6 +1091,15 @@ async def save_interaction_response(
                 )
     request.status = "answered"
     request.updated_at = utcnow()
+    await session.execute(
+        update(NotificationJob)
+        .where(
+            NotificationJob.interaction_request_id == request.id,
+            NotificationJob.status.in_(["pending", "retry"]),
+            NotificationJob.dedupe_key.like("%:followup"),
+        )
+        .values(status="cancelled", updated_at=utcnow())
+    )
     return current
 
 
@@ -1966,22 +2106,9 @@ def create_communications_router(
 
     @router.post("/cleanup")
     async def cleanup(admin_id: int = Depends(require_management_token)) -> dict[str, int]:
-        cutoff = utcnow() - timedelta(days=30)
+        now = utcnow()
         async with sessions() as session:
-            ids = list(
-                (
-                    await session.scalars(
-                        select(CommunicationMessage.id)
-                        .where(CommunicationMessage.created_at < cutoff)
-                        .order_by(CommunicationMessage.id)
-                        .limit(500)
-                    )
-                ).all()
-            )
-            if ids:
-                await session.execute(
-                    delete(CommunicationMessage).where(CommunicationMessage.id.in_(ids))
-                )
+            deleted = await cleanup_communication_history(session, now=now)
             from .learning_models import AuditEvent
 
             session.add(
@@ -1989,11 +2116,14 @@ def create_communications_router(
                     actor_admin_id=admin_id,
                     action="communications.history_cleanup",
                     entity_type="communication_message",
-                    details={"deleted": len(ids), "cutoff": cutoff.isoformat()},
+                    details={
+                        "deleted": deleted,
+                        "cutoff": (now - timedelta(days=30)).isoformat(),
+                    },
                 )
             )
             await session.commit()
-            return {"deleted": len(ids)}
+            return {"deleted": deleted}
 
     return router
 
@@ -2011,21 +2141,7 @@ async def run_communications_maintenance(
                 await expire_confirmation_requests(session, now=utcnow())
                 await reconcile_daily_reminders(session, now=utcnow(), timezone=timezone)
                 await reconcile_confirmation_requests(session, now=utcnow(), timezone=timezone)
-                cutoff = utcnow() - timedelta(days=30)
-                stale_ids = list(
-                    (
-                        await session.scalars(
-                            select(CommunicationMessage.id)
-                            .where(CommunicationMessage.created_at < cutoff)
-                            .order_by(CommunicationMessage.id)
-                            .limit(500)
-                        )
-                    ).all()
-                )
-                if stale_ids:
-                    await session.execute(
-                        delete(CommunicationMessage).where(CommunicationMessage.id.in_(stale_ids))
-                    )
+                await cleanup_communication_history(session, now=utcnow())
                 await session.commit()
         except asyncio.CancelledError:
             raise
