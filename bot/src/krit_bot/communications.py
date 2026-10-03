@@ -437,7 +437,11 @@ def render_bundle(bundle: DailyBundle, *, confirmation: bool = False) -> str:
             lines.append(lesson.teacher)
         lines.append(lesson.room)
         if bundle.recipient_context == "teacher":
-            lines.append("Ученики: " + (", ".join(lesson.students) if lesson.students else "нет"))
+            lines.append(
+                "Ученики: " + ", ".join(lesson.students)
+                if lesson.students
+                else "Ученики пока не назначены"
+            )
         blocks.append("\n".join(lines))
     suffix = "\n\nПодтвердите присутствие." if confirmation else ""
     return f"{heading}\n{day}\n\n" + "\n\n".join(blocks) + suffix
@@ -450,6 +454,19 @@ async def daily_bundles(
     date_to: datetime,
     timezone: ZoneInfo,
 ) -> list[DailyBundle]:
+    lessons = list(
+        (
+            await session.scalars(
+                select(Lesson)
+                .where(
+                    Lesson.start_at >= date_from.astimezone(UTC),
+                    Lesson.start_at < date_to.astimezone(UTC),
+                    Lesson.status != "cancelled",
+                )
+                .order_by(Lesson.start_at, Lesson.id)
+            )
+        ).all()
+    )
     rows = (
         await session.execute(
             select(Lesson, LessonParticipant, Person)
@@ -465,10 +482,8 @@ async def daily_bundles(
         )
     ).all()
     lesson_students: dict[int, list[str]] = defaultdict(list)
-    lesson_by_id: dict[int, Lesson] = {}
     students: dict[int, Person] = {}
     for lesson, participant, student in rows:
-        lesson_by_id[lesson.id] = lesson
         students[student.id] = student
         lesson_students[lesson.id].append(participant.person_name_snapshot)
     guardian_rows = (
@@ -507,10 +522,21 @@ async def daily_bundles(
             if item not in grouped[key]:
                 grouped[key].append(item)
                 names[key] = student.full_name
+    for lesson in lessons:
+        local_start = lesson.start_at.astimezone(timezone)
+        teacher_item = BundleLesson(
+            id=lesson.id,
+            revision=lesson.notification_revision,
+            start_at=local_start,
+            end_at=lesson.end_at.astimezone(timezone),
+            subject=lesson.subject_name_snapshot,
+            teacher=lesson.teacher_name_snapshot,
+            room=lesson.room_name_snapshot,
+            students=tuple(sorted(lesson_students[lesson.id])),
+        )
         teacher_key = (local_start.date(), lesson.teacher_id, lesson.teacher_id, "teacher")
-        if item not in grouped[teacher_key]:
-            grouped[teacher_key].append(item)
-            names[teacher_key] = lesson.teacher_name_snapshot
+        grouped[teacher_key].append(teacher_item)
+        names[teacher_key] = lesson.teacher_name_snapshot
     return [
         DailyBundle(
             local_date=key[0],
@@ -1427,13 +1453,18 @@ async def save_interaction_response(
             InteractionResponse.respondent_context == respondent_context,
         )
     )
+    merged_lesson_map = (
+        {**(current.lesson_answers or {}), **lesson_map}
+        if answer == "partial" and current is not None
+        else lesson_map
+    )
     if current is None:
         current = InteractionResponse(
             request_id=request.id,
             respondent_person_id=respondent_person_id,
             respondent_context=respondent_context,
             answer=answer,
-            lesson_answers=lesson_map,
+            lesson_answers=merged_lesson_map,
             reason=reason,
         )
         session.add(current)
@@ -1445,16 +1476,16 @@ async def save_interaction_response(
                 old_answer=current.answer,
                 new_answer=answer,
                 old_lesson_answers=current.lesson_answers or {},
-                new_lesson_answers=lesson_map,
+                new_lesson_answers=merged_lesson_map,
             )
         )
         current.answer = answer
-        current.lesson_answers = lesson_map
+        current.lesson_answers = merged_lesson_map
         current.reason = reason or current.reason
         current.revision += 1
         current.updated_at = utcnow()
     for link in links:
-        per_lesson = lesson_map.get(str(link.lesson_id), answer)
+        per_lesson = merged_lesson_map.get(str(link.lesson_id), answer)
         if request.recipient_context == "teacher":
             continue
         intent = await session.scalar(
@@ -1531,17 +1562,22 @@ async def save_interaction_response(
                         lesson_id=intent.lesson_id,
                     )
                 )
-    request.status = "answered"
-    request.updated_at = utcnow()
-    await session.execute(
-        update(NotificationJob)
-        .where(
-            NotificationJob.interaction_request_id == request.id,
-            NotificationJob.status.in_(["pending", "retry"]),
-            NotificationJob.dedupe_key.like("%:followup"),
-        )
-        .values(status="cancelled", updated_at=utcnow())
+    complete = answer in {"yes", "no"} or all(
+        merged_lesson_map.get(str(link.lesson_id)) in {"yes", "no"}
+        for link in links
     )
+    request.status = "answered" if complete else "active"
+    request.updated_at = utcnow()
+    if complete:
+        await session.execute(
+            update(NotificationJob)
+            .where(
+                NotificationJob.interaction_request_id == request.id,
+                NotificationJob.status.in_(["pending", "retry"]),
+                NotificationJob.dedupe_key.like("%:followup"),
+            )
+            .values(status="cancelled", updated_at=utcnow())
+        )
     return current
 
 
@@ -1609,6 +1645,7 @@ class MessagePayload(BaseModel):
 
 
 class PollPayload(MessagePayload):
+    target_mode: Literal["selected", "family", "family_teacher"] | None = None
     related_lesson_id: int | None = None
     expires_at: datetime | None = None
 
@@ -1635,8 +1672,10 @@ class SchedulePublicationPayload(BaseModel):
     preview: bool = False
 
 
-def _lesson_snapshot(item: BundleLesson) -> dict[str, Any]:
-    return {
+def _lesson_snapshot(
+    item: BundleLesson, *, recipient_context: str
+) -> dict[str, Any]:
+    snapshot = {
         "lesson_id": item.id,
         "revision": item.revision,
         "start_at": item.start_at.astimezone(UTC).isoformat(),
@@ -1644,14 +1683,30 @@ def _lesson_snapshot(item: BundleLesson) -> dict[str, Any]:
         "subject": item.subject,
         "teacher": item.teacher,
         "room": item.room,
-        "students": list(item.students),
     }
+    if recipient_context == "teacher":
+        snapshot["students"] = list(item.students)
+    return snapshot
+
+
+def _normalize_schedule_snapshot(
+    value: dict[str, Any], *, recipient_context: str
+) -> dict[str, Any]:
+    """Compare old and current snapshots without leaking legacy participant lists."""
+    normalized = {
+        key: value.get(key)
+        for key in ("lesson_id", "start_at", "end_at", "subject", "teacher", "room")
+    }
+    if recipient_context == "teacher":
+        normalized["students"] = sorted(value.get("students") or [])
+    return normalized
 
 
 def _schedule_text(
     bundles: list[DailyBundle],
     *,
     changed: bool,
+    added: list[dict[str, Any]] | None = None,
     removed: list[dict[str, Any]] | None = None,
     changed_items: list[tuple[dict[str, Any], dict[str, Any]]] | None = None,
     timezone: ZoneInfo | None = None,
@@ -1665,6 +1720,19 @@ def _schedule_text(
             "teacher": "преподаватель",
             "room": "кабинет",
         }
+        for snapshot in added or []:
+            start = datetime.fromisoformat(str(snapshot["start_at"])).astimezone(zone)
+            end = datetime.fromisoformat(str(snapshot["end_at"])).astimezone(zone)
+            lines.extend(
+                [
+                    "Добавлено занятие",
+                    f"{start:%d.%m %H:%M}–{end:%H:%M}",
+                    str(snapshot.get("subject") or "—"),
+                    f"Преподаватель: {snapshot.get('teacher') or '—'}",
+                    f"Кабинет: {snapshot.get('room') or '—'}",
+                    "",
+                ]
+            )
         for old, new in changed_items or []:
             start = datetime.fromisoformat(str(new["start_at"])).astimezone(zone)
             lines.append(f"{start:%d.%m} · {new['subject']}")
@@ -1792,9 +1860,12 @@ class PollTarget:
 
 
 async def _poll_targets(
-    session: AsyncSession, selected_people: list[Person]
+    session: AsyncSession,
+    selected_people: list[Person],
+    *,
+    mode: Literal["selected", "family", "family_teacher"] = "family_teacher",
 ) -> list[PollTarget]:
-    """Expand a selected student into one student-family-teacher response card."""
+    """Resolve the administrator's explicit recipient-expansion mode."""
     selected_student_ids = {
         person.id
         for person in selected_people
@@ -1835,6 +1906,9 @@ async def _poll_targets(
         if not roles:
             add(person.id, "student", person.id)
 
+    if mode == "selected":
+        return list(targets.values())
+
     if selected_student_ids:
         relations = list(
             (
@@ -1847,6 +1921,9 @@ async def _poll_targets(
         )
         for relation in relations:
             add(relation.guardian_id, "guardian", relation.student_id)
+
+        if mode == "family":
+            return list(targets.values())
 
         current_time = utcnow()
         teacher_rows = (
@@ -2421,10 +2498,52 @@ def create_communications_router(
             existing = {person.id for person in selected_people}
             if existing != set(person_ids):
                 raise HTTPException(404, "Один из получателей не найден")
-            targets = await _poll_targets(session, selected_people)
+            target_mode = payload.target_mode or "family_teacher"
+            targets = await _poll_targets(session, selected_people, mode=target_mode)
+            if payload.related_lesson_id is not None:
+                lesson = await session.get(Lesson, payload.related_lesson_id)
+                if lesson is None:
+                    raise HTTPException(404, "Занятие не найдено")
+                lesson_start = lesson.start_at
+                if lesson_start.tzinfo is None:
+                    lesson_start = lesson_start.replace(tzinfo=UTC)
+                if lesson.status not in {"planned", "scheduled"} or lesson_start <= utcnow():
+                    raise HTTPException(
+                        422, "Опрос можно связать только с предстоящим занятием"
+                    )
+                participant_ids = set(
+                    (
+                        await session.scalars(
+                            select(LessonParticipant.person_id).where(
+                                LessonParticipant.lesson_id == lesson.id,
+                                LessonParticipant.attendance_status != "excused",
+                            )
+                        )
+                    ).all()
+                )
+                guardian_ids = set(
+                    (
+                        await session.scalars(
+                            select(StudentGuardian.guardian_id).where(
+                                StudentGuardian.student_id.in_(participant_ids)
+                            )
+                        )
+                    ).all()
+                )
+                related_people = participant_ids | guardian_ids | {int(lesson.teacher_id)}
+                if any(target.recipient_person_id not in related_people for target in targets):
+                    raise HTTPException(
+                        422, "В опросе есть получатель, не связанный с выбранным занятием"
+                    )
             target_person_ids = list(
                 dict.fromkeys(target.recipient_person_id for target in targets)
             )
+            target_people = {
+                person.id: person.full_name
+                for person in (
+                    await session.scalars(select(Person).where(Person.id.in_(target_person_ids)))
+                ).all()
+            }
             available, unavailable = await availability(session, target_person_ids)
             available_people = set(available)
             await ensure_default_rules(session)
@@ -2464,6 +2583,16 @@ def create_communications_router(
                 "excluded": excluded,
                 "messages": len(eligible_targets),
                 "sample": payload.text,
+                "target_mode": target_mode,
+                "targets": [
+                    {
+                        "person_id": target.recipient_person_id,
+                        "name": target_people.get(target.recipient_person_id, "—"),
+                        "recipient_context": target.recipient_context,
+                        "subject_person_id": target.subject_person_id,
+                    }
+                    for target in targets
+                ],
             }
             if payload.preview:
                 return preview
@@ -2619,19 +2748,27 @@ def create_communications_router(
             changed_by_recipient: dict[
                 tuple[int, str, int], list[tuple[dict[str, Any], dict[str, Any]]]
             ] = defaultdict(list)
+            added_by_recipient: dict[tuple[int, str, int], list[dict[str, Any]]] = defaultdict(
+                list
+            )
             removed_by_recipient: dict[tuple[int, str, int], list[dict[str, Any]]] = defaultdict(
                 list
             )
             for key, (_bundle, lesson) in current.items():
                 old = previous.get(key)
+                new_snapshot = _lesson_snapshot(lesson, recipient_context=key[1])
                 if old is None:
                     affected.add(key[:3])
                     if not any(previous_key[:3] == key[:3] for previous_key in previous):
                         new_recipients.add(key[:3])
-                elif old.snapshot != _lesson_snapshot(lesson):
+                    else:
+                        added_by_recipient[key[:3]].append(new_snapshot)
+                elif _normalize_schedule_snapshot(
+                    old.snapshot, recipient_context=key[1]
+                ) != _normalize_schedule_snapshot(new_snapshot, recipient_context=key[1]):
                     affected.add(key[:3])
                     changed_by_recipient[key[:3]].append(
-                        (old.snapshot, _lesson_snapshot(lesson))
+                        (old.snapshot, new_snapshot)
                     )
             for key, old in previous.items():
                 if key not in current:
@@ -2694,18 +2831,40 @@ def create_communications_router(
                 text_value = _schedule_text(
                     recipient_bundles,
                     changed=event == NotificationEvent.SCHEDULE_CHANGED,
+                    added=added_by_recipient.get(recipient_key),
                     removed=removed_by_recipient.get(recipient_key),
                     changed_items=changed_by_recipient.get(recipient_key),
                     timezone=timezone,
                 )
                 snapshot_values = [
-                    _lesson_snapshot(lesson)
+                    _lesson_snapshot(lesson, recipient_context=context)
                     for key, (_bundle, lesson) in current.items()
                     if key[:3] == recipient_key
                 ]
+                removed_lesson_ids = [
+                    int(value["lesson_id"])
+                    for value in removed_by_recipient.get(recipient_key, [])
+                ]
+                delivery_fingerprint = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "event": event.value,
+                            "snapshots": sorted(
+                                snapshot_values, key=lambda value: int(value["lesson_id"])
+                            ),
+                            "removed_lesson_ids": sorted(removed_lesson_ids),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()[:24]
                 job = await enqueue_job(
                     session,
-                    dedupe_key=f"schedule:{publication.id}:{person_id}:{context}:{subject_person_id}",
+                    dedupe_key=(
+                        f"schedule:{person_id}:{context}:{subject_person_id}:"
+                        f"{delivery_fingerprint}"
+                    ),
                     event_type=event,
                     recipient_person_id=person_id,
                     recipient_context=context,
@@ -2718,10 +2877,7 @@ def create_communications_router(
                         "schedule_delivery": {
                             "publication_id": publication.id,
                             "snapshots": snapshot_values,
-                            "removed_lesson_ids": [
-                                int(value["lesson_id"])
-                                for value in removed_by_recipient.get(recipient_key, [])
-                            ],
+                            "removed_lesson_ids": removed_lesson_ids,
                         },
                     },
                 )

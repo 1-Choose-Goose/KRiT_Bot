@@ -16,6 +16,7 @@ from krit_bot.communication_models import (
     InteractionRequest,
     InteractionRequestLesson,
     InteractionResponse,
+    InteractionResponseHistory,
     LessonAttendanceIntent,
     PersonNotificationOverride,
 )
@@ -23,6 +24,8 @@ from krit_bot.communications import (
     EffectivePolicy,
     NotificationPolicyResolver,
     _campaign_poll_details,
+    _lesson_snapshot,
+    _normalize_schedule_snapshot,
     _poll_targets,
     _schedule_text,
     apply_quiet_hours,
@@ -33,6 +36,7 @@ from krit_bot.communications import (
     reconcile_confirmation_requests,
     reconcile_daily_reminders,
     record_message,
+    render_bundle,
     save_interaction_response,
 )
 from krit_bot.config import Settings
@@ -355,6 +359,7 @@ async def test_manual_message_applies_policy_and_reports_excluded_recipient(tmp_
                     "person_ids": [blocked.id],
                     "text": "Будете?",
                     "preview": True,
+                    "target_mode": "selected",
                 },
             )
             assert poll_preview.status_code == 200, poll_preview.text
@@ -367,6 +372,26 @@ async def test_manual_message_applies_policy_and_reports_excluded_recipient(tmp_
                     "reason": "disabled_by_policy",
                 }
             ]
+            assert poll_preview.json()["targets"] == [
+                {
+                    "person_id": blocked.id,
+                    "name": blocked.full_name,
+                    "recipient_context": "student",
+                    "subject_person_id": blocked.id,
+                }
+            ]
+            invalid_lesson = await client.post(
+                "/api/v1/communications/polls",
+                headers=headers,
+                json={
+                    "person_ids": [allowed.id],
+                    "text": "Будете?",
+                    "preview": True,
+                    "target_mode": "selected",
+                    "related_lesson_id": 999_999,
+                },
+            )
+            assert invalid_lesson.status_code == 404
 
             body["preview"] = False
             sent = await client.post(
@@ -509,6 +534,44 @@ async def test_daily_lessons_are_bundled_once_per_person_and_day(tmp_path) -> No
     await engine.dispose()
 
 
+async def test_teacher_bundle_exists_when_lesson_has_no_students(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    async with sessions() as session:
+        teacher = Person(full_name="Учитель без группы", phone="+79000000231")
+        subject = Subject(name="Информатика", color="#2563eb")
+        room = Room(name="Кабинет", capacity=10)
+        session.add_all([teacher, subject, room])
+        await session.flush()
+        start = datetime(2026, 10, 6, 10, 0, tzinfo=timezone)
+        session.add(
+            Lesson(
+                subject_id=subject.id,
+                teacher_id=teacher.id,
+                room_id=room.id,
+                start_at=start.astimezone(UTC),
+                end_at=(start + timedelta(hours=1)).astimezone(UTC),
+                teacher_name_snapshot=teacher.full_name,
+                room_name_snapshot=room.name,
+                subject_name_snapshot=subject.name,
+            )
+        )
+        await session.flush()
+
+        bundles = await daily_bundles(
+            session,
+            date_from=start - timedelta(days=1),
+            date_to=start + timedelta(days=1),
+            timezone=timezone,
+        )
+
+        assert len(bundles) == 1
+        assert bundles[0].recipient_context == "teacher"
+        assert bundles[0].lessons[0].students == ()
+        assert "Ученики пока не назначены" in render_bundle(bundles[0])
+    await engine.dispose()
+
+
 async def test_partial_confirmation_is_saved_for_each_lesson(tmp_path) -> None:
     engine, sessions = await _database(tmp_path)
     async with sessions() as session:
@@ -519,7 +582,7 @@ async def test_partial_confirmation_is_saved_for_each_lesson(tmp_path) -> None:
         session.add_all([student, teacher, subject, room])
         await session.flush()
         lessons = []
-        for index in range(2):
+        for index in range(3):
             start = utcnow() + timedelta(days=2, hours=index * 2)
             lesson = Lesson(
                 subject_id=subject.id,
@@ -554,6 +617,18 @@ async def test_partial_confirmation_is_saved_for_each_lesson(tmp_path) -> None:
                 for lesson in lessons
             ]
         )
+        follow_up = NotificationJob(
+            dedupe_key=f"confirmation-test:{request.id}:followup",
+            event_type="lesson_confirmation_request",
+            recipient_context="student",
+            recipient_person_id=student.id,
+            subject_person_id=student.id,
+            interaction_request_id=request.id,
+            scheduled_at=utcnow() + timedelta(hours=1),
+            status="pending",
+            payload={"follow_up": True},
+        )
+        session.add(follow_up)
         await save_interaction_response(
             session,
             request=request,
@@ -569,7 +644,31 @@ async def test_partial_confirmation_is_saved_for_each_lesson(tmp_path) -> None:
                 )
             ).all()
         )
-        assert [item.status for item in intents] == ["confirmed", "declined"]
+        assert [item.status for item in intents] == ["confirmed", "declined", "pending"]
+        assert request.status == "active"
+        assert follow_up.status == "pending"
+
+        await save_interaction_response(
+            session,
+            request=request,
+            respondent_person_id=student.id,
+            respondent_context="student",
+            answer="partial",
+            lesson_answers={str(lessons[2].id): "yes"},
+        )
+        await session.flush()
+
+        assert request.status == "answered"
+        assert follow_up.status == "cancelled"
+        assert [item.status for item in intents] == ["confirmed", "declined", "confirmed"]
+        response = await session.scalar(select(InteractionResponse))
+        assert response is not None
+        assert response.lesson_answers == {
+            str(lessons[0].id): "yes",
+            str(lessons[1].id): "no",
+            str(lessons[2].id): "yes",
+        }
+        assert await session.scalar(select(InteractionResponseHistory)) is not None
     await engine.dispose()
 
 
@@ -952,6 +1051,44 @@ def test_schedule_diff_reports_semantic_changes() -> None:
     assert "добавлены ученики: Марина" in text
 
 
+def test_added_lesson_text_is_specific_and_snapshots_are_recipient_safe() -> None:
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    lesson = type(
+        "LessonValue",
+        (),
+        {
+            "id": 7,
+            "revision": 2,
+            "start_at": datetime(2026, 10, 5, 10, 0, tzinfo=timezone),
+            "end_at": datetime(2026, 10, 5, 11, 0, tzinfo=timezone),
+            "subject": "Информатика",
+            "teacher": "Олег Учитель",
+            "room": "Кабинет 1",
+            "students": ("Анна", "Марина"),
+        },
+    )()
+    guardian_snapshot = _lesson_snapshot(lesson, recipient_context="guardian")
+    teacher_snapshot = _lesson_snapshot(lesson, recipient_context="teacher")
+
+    assert "students" not in guardian_snapshot
+    assert teacher_snapshot["students"] == ["Анна", "Марина"]
+    legacy = {**guardian_snapshot, "students": ["Чужой ребёнок"]}
+    assert _normalize_schedule_snapshot(legacy, recipient_context="guardian") == (
+        _normalize_schedule_snapshot(guardian_snapshot, recipient_context="guardian")
+    )
+
+    text = _schedule_text(
+        [],
+        changed=True,
+        added=[guardian_snapshot],
+        timezone=timezone,
+    )
+    assert "Добавлено занятие" in text
+    assert "05.10 10:00–11:00" in text
+    assert "Информатика" in text
+    assert "Олег Учитель" in text
+
+
 async def test_history_cleanup_keeps_business_confirmation(tmp_path) -> None:
     engine, sessions = await _database(tmp_path)
     now = utcnow()
@@ -1265,6 +1402,15 @@ async def test_poll_target_expansion_builds_student_family_teacher_card(tmp_path
             type(targets[0])(student.id, "student", student.id),
             type(targets[0])(guardian.id, "guardian", student.id),
             type(targets[0])(teacher.id, "teacher", student.id),
+        }
+
+        selected_only = await _poll_targets(session, [student], mode="selected")
+        assert selected_only == [type(targets[0])(student.id, "student", student.id)]
+
+        family = await _poll_targets(session, [student], mode="family")
+        assert set(family) == {
+            type(targets[0])(student.id, "student", student.id),
+            type(targets[0])(guardian.id, "guardian", student.id),
         }
     await engine.dispose()
 

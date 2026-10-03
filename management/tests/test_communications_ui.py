@@ -45,6 +45,26 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     assert page.schedule_dialog.windowTitle() == "Публикация расписания — КРиТ"
     assert page.campaigns.window() is page.schedule_dialog
     assert not page.schedule_dialog.isVisible()
+    assert page.poll_target_mode.currentData() == "selected"
+    page._poll_lessons_loaded(
+        [
+            {
+                "id": 77,
+                "subject_name_snapshot": "Информатика",
+                "start_at": "2099-10-05T10:00:00+05:00",
+                "status": "planned",
+            },
+            {
+                "id": 78,
+                "subject_name_snapshot": "Архив",
+                "start_at": "2020-10-05T10:00:00+05:00",
+                "status": "completed",
+            },
+        ]
+    )
+    assert page.poll_lesson.count() == 2
+    assert page.poll_lesson.itemData(1) == 77
+    assert "05.10.2099 10:00" in page.poll_lesson.itemText(1)
     page._run = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     page.open_schedule_publication()
     app.processEvents()

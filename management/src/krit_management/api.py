@@ -493,12 +493,27 @@ class ManagementApi:
         return data if isinstance(data, dict) else {}
 
     def communication_poll(
-        self, person_ids: list[int], text: str, *, preview: bool = False
+        self,
+        person_ids: list[int],
+        text: str,
+        *,
+        preview: bool = False,
+        target_mode: str | None = None,
+        related_lesson_id: int | None = None,
     ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "person_ids": person_ids,
+            "text": text,
+            "preview": preview,
+        }
+        if target_mode is not None:
+            payload["target_mode"] = target_mode
+        if related_lesson_id is not None:
+            payload["related_lesson_id"] = related_lesson_id
         data = self._request(
             "POST",
             "/communications/polls",
-            json={"person_ids": person_ids, "text": text, "preview": preview},
+            json=payload,
         )
         return data if isinstance(data, dict) else {}
 

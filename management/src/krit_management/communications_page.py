@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 from collections import Counter
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from PySide6.QtCore import QDate, QSize, Qt, QThreadPool, QTimer
@@ -369,6 +369,18 @@ class CommunicationsPage(QWidget):
         self.message_text.setPlaceholderText("Введите сообщение (до 4000 символов)")
         self.message_text.setMaximumHeight(120)
         layout.addWidget(self.message_text)
+        poll_options = QHBoxLayout()
+        poll_options.addWidget(QLabel("Получатели опроса"))
+        self.poll_target_mode = SafeComboBox()
+        self.poll_target_mode.addItem("Только выбранные", "selected")
+        self.poll_target_mode.addItem("Ученик и родители", "family")
+        self.poll_target_mode.addItem("Ученик, родители и преподаватель", "family_teacher")
+        poll_options.addWidget(self.poll_target_mode)
+        poll_options.addWidget(QLabel("Занятие"))
+        self.poll_lesson = SafeComboBox()
+        self.poll_lesson.addItem("Не связывать с занятием", None)
+        poll_options.addWidget(self.poll_lesson, 1)
+        layout.addLayout(poll_options)
         actions = QHBoxLayout()
         self.urgent = QCheckBox("Срочное сообщение")
         actions.addWidget(self.urgent)
@@ -1005,6 +1017,13 @@ class CommunicationsPage(QWidget):
     def refresh(self) -> None:
         if self.tabs.currentIndex() == 0:
             self._run(self.api.people, self._people_loaded)
+            today = now_center().date()
+            self._run(
+                lambda: self.api.learning_lessons(
+                    today.isoformat(), (today + timedelta(days=90)).isoformat()
+                ),
+                self._poll_lessons_loaded,
+            )
             if self.schedule_dialog.isVisible():
                 self._run(self.api.communication_campaigns, self._campaigns_loaded)
         elif self.tabs.currentIndex() == 1:
@@ -1018,6 +1037,27 @@ class CommunicationsPage(QWidget):
     def _people_loaded(self, value: object) -> None:
         self.people = list(value) if isinstance(value, list) else []
         self._render_recipients()
+
+    def _poll_lessons_loaded(self, value: object) -> None:
+        current_id = self.poll_lesson.currentData()
+        lessons = list(value) if isinstance(value, list) else []
+        self.poll_lesson.clear()
+        self.poll_lesson.addItem("Не связывать с занятием", None)
+        now = now_center()
+        for lesson in lessons:
+            start_value = lesson.get("start_at")
+            if not start_value or lesson.get("status") not in {"planned", "scheduled"}:
+                continue
+            start = parse_center(start_value)
+            if start <= now:
+                continue
+            label = (
+                f"{lesson.get('subject_name_snapshot', 'Занятие')} · "
+                f"{start:%d.%m.%Y %H:%M}"
+            )
+            self.poll_lesson.addItem(label, int(lesson["id"]))
+        index = self.poll_lesson.findData(current_id)
+        self.poll_lesson.setCurrentIndex(max(0, index))
 
     def _render_recipients(self) -> None:
         query = self.recipient_search.text().strip().casefold()
@@ -1144,7 +1184,58 @@ class CommunicationsPage(QWidget):
     def send_poll(self) -> None:
         values = self._message_payload()
         if values:
-            self._run(lambda: self.api.communication_poll(*values), self._sent)
+            target_mode = str(self.poll_target_mode.currentData() or "selected")
+            lesson_id = self.poll_lesson.currentData()
+            self._run(
+                lambda: self.api.communication_poll(
+                    *values,
+                    preview=True,
+                    target_mode=target_mode,
+                    related_lesson_id=int(lesson_id) if lesson_id is not None else None,
+                ),
+                lambda result: self._confirm_poll_send(
+                    values,
+                    target_mode=target_mode,
+                    lesson_id=int(lesson_id) if lesson_id is not None else None,
+                    preview=result,
+                ),
+            )
+
+    def _confirm_poll_send(
+        self,
+        values: tuple[list[int], str],
+        *,
+        target_mode: str,
+        lesson_id: int | None,
+        preview: object,
+    ) -> None:
+        data = preview if isinstance(preview, dict) else {}
+        target_lines = [
+            f"• {item.get('name', '—')} ({CONTEXT_LABELS.get(item.get('recipient_context'), '—')})"
+            for item in (data.get("targets") or [])
+        ]
+        if len(target_lines) > 20:
+            target_lines = [*target_lines[:20], f"… ещё {len(target_lines) - 20}"]
+        details = self._delivery_summary(data)
+        if target_lines:
+            details += "\n\nФактический список:\n" + "\n".join(target_lines)
+        answer = QMessageBox.question(
+            self,
+            "Отправить опрос?",
+            details,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._run(
+            lambda: self.api.communication_poll(
+                *values,
+                target_mode=target_mode,
+                related_lesson_id=lesson_id,
+            ),
+            self._sent,
+        )
 
     def _sent(self, result: object) -> None:
         data = result if isinstance(result, dict) else {}
