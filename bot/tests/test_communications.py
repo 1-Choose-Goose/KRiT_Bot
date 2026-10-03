@@ -579,6 +579,77 @@ async def test_history_cleanup_keeps_business_confirmation(tmp_path) -> None:
     await engine.dispose()
 
 
+async def test_history_cleanup_removes_undelivered_messages_and_repairs_threads(
+    tmp_path,
+) -> None:
+    engine, sessions = await _database(tmp_path)
+    now = utcnow()
+    async with sessions() as session:
+        delivered_person = Person(full_name="Получатель", phone="+79000000063")
+        unavailable_person = Person(full_name="Без MAX", phone="+79000000064")
+        command_person = Person(full_name="Команды бота", phone="+79000000065")
+        session.add_all([delivered_person, unavailable_person, command_person])
+        await session.flush()
+
+        delivered = await record_message(
+            session,
+            person_id=delivered_person.id,
+            direction="outbound",
+            text="Доставленное сообщение",
+            delivery_status="sent",
+        )
+        delivered.created_at = now - timedelta(minutes=2)
+        await record_message(
+            session,
+            person_id=delivered_person.id,
+            direction="outbound",
+            text="Не доставлено",
+            delivery_status="failed",
+        )
+        await record_message(
+            session,
+            person_id=unavailable_person.id,
+            direction="outbound",
+            text="MAX недоступен",
+            delivery_status="unavailable",
+        )
+        await record_message(
+            session,
+            person_id=command_person.id,
+            direction="inbound",
+            text="/start",
+            delivery_status="received",
+            message_type="command",
+        )
+        await record_message(
+            session,
+            person_id=command_person.id,
+            direction="outbound",
+            text="MAX недоступен после команды",
+            delivery_status="unavailable",
+        )
+        await session.flush()
+
+        assert await cleanup_communication_history(session, now=now) == 3
+        messages = list(
+            (
+                await session.scalars(
+                    select(CommunicationMessage).order_by(CommunicationMessage.id)
+                )
+            ).all()
+        )
+        assert [item.text for item in messages] == ["Доставленное сообщение", "/start"]
+
+        repaired = await session.get(CommunicationThread, delivered_person.id)
+        assert repaired is not None
+        assert repaired.last_message_preview == "Доставленное сообщение"
+        assert await session.get(CommunicationThread, unavailable_person.id) is None
+        command_thread = await session.get(CommunicationThread, command_person.id)
+        assert command_thread is not None
+        assert command_thread.last_message_at is None
+    await engine.dispose()
+
+
 async def test_only_free_inbound_text_updates_unread_dialog_state(tmp_path) -> None:
     engine, sessions = await _database(tmp_path)
     async with sessions() as session:

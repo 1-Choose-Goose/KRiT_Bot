@@ -107,19 +107,8 @@ class LearningNotificationWorker:
                             lesson_id=job.lesson_id,
                         )
                     )
-                from .communications import record_message, refresh_campaign_status
+                from .communications import refresh_campaign_status
 
-                await record_message(
-                    session,
-                    person_id=job.recipient_person_id,
-                    direction="outbound",
-                    text=str(job.payload.get("text") or "Уведомление КРиТ"),
-                    delivery_status="unavailable",
-                    outbox_job_id=job.id,
-                    interaction_request_id=job.interaction_request_id,
-                    campaign_id=job.campaign_id,
-                    related_lesson_id=job.lesson_id,
-                )
                 await refresh_campaign_status(session, job.campaign_id)
                 await session.commit()
                 return True
@@ -183,20 +172,6 @@ class LearningNotificationWorker:
                     )
                 job.last_error = str(exc)[:2000]
                 job.updated_at = utcnow()
-                if job.status == "failed":
-                    from .communications import record_message
-
-                    await record_message(
-                        session,
-                        person_id=job.recipient_person_id,
-                        direction="outbound",
-                        text=str(job.payload.get("text") or "Уведомление КРиТ"),
-                        delivery_status="failed",
-                        outbox_job_id=job.id,
-                        interaction_request_id=job.interaction_request_id,
-                        campaign_id=job.campaign_id,
-                        related_lesson_id=job.lesson_id,
-                    )
                 from .communications import refresh_campaign_status
 
                 await refresh_campaign_status(session, job.campaign_id)

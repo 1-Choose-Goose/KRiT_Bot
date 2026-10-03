@@ -942,18 +942,120 @@ async def cleanup_communication_history(
 ) -> int:
     """Delete only disposable chat history, never business confirmations/audit."""
     cutoff = now - timedelta(days=30)
-    ids = list(
+    rows = list(
         (
-            await session.scalars(
-                select(CommunicationMessage.id)
-                .where(CommunicationMessage.created_at < cutoff)
+            await session.execute(
+                select(CommunicationMessage.id, CommunicationMessage.person_id)
+                .where(
+                    or_(
+                        CommunicationMessage.created_at < cutoff,
+                        CommunicationMessage.delivery_status.in_(["failed", "unavailable"]),
+                    )
+                )
                 .order_by(CommunicationMessage.id)
                 .limit(limit)
             )
         ).all()
     )
+    ids = [message_id for message_id, _person_id in rows]
     if ids:
         await session.execute(delete(CommunicationMessage).where(CommunicationMessage.id.in_(ids)))
+        person_ids = {person_id for _message_id, person_id in rows}
+        ranked_messages = (
+            select(
+                CommunicationMessage.id.label("message_id"),
+                CommunicationMessage.person_id,
+                func.row_number()
+                .over(
+                    partition_by=CommunicationMessage.person_id,
+                    order_by=(
+                        CommunicationMessage.created_at.desc(),
+                        CommunicationMessage.id.desc(),
+                    ),
+                )
+                .label("position"),
+            )
+            .where(
+                CommunicationMessage.person_id.in_(person_ids),
+                or_(
+                    (
+                        (CommunicationMessage.direction == "inbound")
+                        & (CommunicationMessage.message_type == "text")
+                    ),
+                    (
+                        (CommunicationMessage.direction == "outbound")
+                        & (CommunicationMessage.delivery_status == "sent")
+                    ),
+                ),
+            )
+            .subquery()
+        )
+        latest_messages = {
+            message.person_id: message
+            for message in (
+                await session.scalars(
+                    select(CommunicationMessage)
+                    .join(
+                        ranked_messages,
+                        CommunicationMessage.id == ranked_messages.c.message_id,
+                    )
+                    .where(ranked_messages.c.position == 1)
+                )
+            ).all()
+        }
+        unread_counts = dict(
+            (
+                await session.execute(
+                    select(CommunicationMessage.person_id, func.count(CommunicationMessage.id))
+                    .join(
+                        CommunicationThread,
+                        CommunicationThread.person_id == CommunicationMessage.person_id,
+                    )
+                    .where(
+                        CommunicationMessage.person_id.in_(person_ids),
+                        CommunicationMessage.direction == "inbound",
+                        CommunicationMessage.message_type == "text",
+                        or_(
+                            CommunicationThread.admin_read_at.is_(None),
+                            CommunicationMessage.created_at
+                            > CommunicationThread.admin_read_at,
+                        ),
+                    )
+                    .group_by(CommunicationMessage.person_id)
+                )
+            ).all()
+        )
+        remaining_person_ids = set(
+            (
+                await session.scalars(
+                    select(CommunicationMessage.person_id)
+                    .where(CommunicationMessage.person_id.in_(person_ids))
+                    .distinct()
+                )
+            ).all()
+        )
+        threads = list(
+            (
+                await session.scalars(
+                    select(CommunicationThread).where(
+                        CommunicationThread.person_id.in_(person_ids)
+                    )
+                )
+            ).all()
+        )
+        for thread in threads:
+            latest = latest_messages.get(thread.person_id)
+            if latest is None:
+                if thread.person_id in remaining_person_ids:
+                    thread.last_message_at = None
+                    thread.last_message_preview = None
+                    thread.admin_unread_count = 0
+                else:
+                    await session.delete(thread)
+                continue
+            thread.last_message_at = latest.created_at
+            thread.last_message_preview = latest.text[:240]
+            thread.admin_unread_count = int(unread_counts.get(thread.person_id, 0))
     return len(ids)
 
 

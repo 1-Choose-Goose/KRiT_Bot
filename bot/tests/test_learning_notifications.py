@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from krit_bot.communication_models import CommunicationMessage, CommunicationThread
 from krit_bot.db import (
     Person,
     PersonRole,
@@ -33,6 +34,43 @@ class FakeMax:
     async def send_text(self, *, user_id: int, text: str, **_: Any) -> dict[str, Any]:
         self.sent.append((user_id, text))
         return {}
+
+
+async def test_unavailable_recipient_is_not_added_to_dialog_history(tmp_path) -> None:
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'unavailable.db'}")
+    await ensure_schema(engine)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(
+            full_name="Получатель без MAX",
+            phone="+79000000109",
+            active=True,
+        )
+        session.add(person)
+        await session.flush()
+        session.add(
+            NotificationJob(
+                dedupe_key="test:unavailable",
+                event_type="test",
+                recipient_person_id=person.id,
+                scheduled_at=utcnow() - timedelta(minutes=1),
+                payload={"text": "Не должно попасть в диалог"},
+            )
+        )
+        await session.commit()
+        person_id = person.id
+
+    worker = LearningNotificationWorker(sessions=sessions, api=FakeMax())  # type: ignore[arg-type]
+    assert await worker.process_one() is True
+    async with sessions() as session:
+        assert list((await session.scalars(select(CommunicationMessage))).all()) == []
+        assert await session.get(CommunicationThread, person_id) is None
+        job = await session.scalar(
+            select(NotificationJob).where(NotificationJob.dedupe_key == "test:unavailable")
+        )
+        assert job is not None
+        assert job.status == "cancelled"
+    await engine.dispose()
 
 
 async def test_notification_recovery_and_deduplicated_delivery(tmp_path) -> None:
