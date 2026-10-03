@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QInputDialog,
+    QLabel,
     QPushButton,
     QStyle,
     QStyleOptionSpinBox,
@@ -25,6 +26,7 @@ from krit_management.dialogs import PersonDialog
 from krit_management.learning_page import (
     FreeSlotDialog,
     LearningPage,
+    LessonCardDialog,
     LessonDialog,
     ReasonDialog,
     ReferenceDialog,
@@ -299,7 +301,7 @@ def test_today_table_shows_current_participant_count() -> None:
     app.processEvents()
 
 
-def test_today_action_buttons_are_compact_and_share_available_width() -> None:
+def test_today_action_buttons_keep_only_operational_actions() -> None:
     app = QApplication.instance() or QApplication([])
     page = LearningPage(FakeApi())  # type: ignore[arg-type]
     assert page.pool.waitForDone(3_000)
@@ -324,11 +326,71 @@ def test_today_action_buttons_are_compact_and_share_available_width() -> None:
 
     action_cell = page.today_lessons.cellWidget(0, 6)
     buttons = action_cell.findChildren(QPushButton)
-    assert page.today_lessons.columnWidth(6) == 290
-    assert [button.text() for button in buttons] == ["Начать", "Изменить", "Карточка"]
+    assert page.today_lessons.columnWidth(6) == 120
+    assert [button.text() for button in buttons] == ["Начать"]
     assert all(button.property("density") == "compact" for button in buttons)
     page.shutdown()
     page.deleteLater()
+    app.processEvents()
+
+
+def test_today_row_double_click_opens_one_card_for_planned_and_completed(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.shutdown()
+    app.processEvents()
+    planned = {
+        "id": 1,
+        "start_at": "2099-09-30T10:30:00+05:00",
+        "end_at": "2099-09-30T11:30:00+05:00",
+        "subject_name_snapshot": "Информатика",
+        "teacher_name_snapshot": "Быков Валерий Андреевич",
+        "room_name_snapshot": "Кабинет №1",
+        "participants": [],
+        "status": "planned",
+    }
+    completed = {**planned, "id": 2, "status": "completed"}
+    page._today_loaded(
+        {"alerts": [], "present": [], "lessons": [planned, completed]}
+    )
+    opened: list[int] = []
+    monkeypatch.setattr(page, "open_lesson", lambda lesson: opened.append(lesson["id"]))
+
+    page.today_lessons.cellDoubleClicked.emit(0, 0)
+    page.today_lessons.cellDoubleClicked.emit(1, 0)
+
+    assert opened == [1, 2]
+    assert page.today_lessons.cellWidget(1, 6) is None
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_planned_lesson_card_contains_edit_action() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = LessonCardDialog(
+        {
+            "id": 1,
+            "start_at": "2099-09-30T10:30:00+05:00",
+            "end_at": "2099-09-30T11:30:00+05:00",
+            "subject_name_snapshot": "Информатика",
+            "teacher_name_snapshot": "Быков Валерий Андреевич",
+            "room_name_snapshot": "Кабинет №1",
+            "participants": [],
+            "status": "planned",
+        }
+    )
+    edit_button = next(
+        button
+        for button in dialog.findChildren(QPushButton)
+        if button.text() == "Изменить занятие"
+    )
+
+    edit_button.click()
+
+    assert dialog.operation == "edit"
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    dialog.deleteLater()
     app.processEvents()
 
 
@@ -894,7 +956,49 @@ def test_subject_dialog_uses_palette_button_and_saves_teacher_ids() -> None:
     app.processEvents()
 
 
-def test_double_clicking_present_person_selects_departure_target() -> None:
+def test_departure_uses_selected_present_row_instead_of_arrival_field(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeApi())  # type: ignore[arg-type]
+    assert window.learning_page.pool.waitForDone(3_000)
+    assert window.pool.waitForDone(3_000)
+    app.processEvents()
+    page = window.learning_page
+    page.presence_person.addItem("Алексеев Александр Фёдорович", 55)
+    page._today_loaded(
+        {
+            "lessons": [],
+            "alerts": [],
+            "present": [
+                {
+                    "person_id": 77,
+                    "person_name": "Пупкин Иван Пупкович",
+                    "arrived_at": datetime.now(UTC).isoformat(),
+                }
+            ],
+        }
+    )
+    calls: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        page.api,
+        "presence_action",
+        lambda person_id, action: calls.append((person_id, action)) or {},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        page,
+        "_run",
+        lambda function, *args, **_kwargs: function(*args),
+    )
+    page.present_table.selectRow(0)
+
+    page.presence("departure")
+
+    assert calls == [(77, "departure")]
+    window.close()
+    app.processEvents()
+
+
+def test_double_clicking_present_person_immediately_marks_departure(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     window = MainWindow(FakeApi())  # type: ignore[arg-type]
     assert window.learning_page.pool.waitForDone(3_000)
@@ -915,11 +1019,23 @@ def test_double_clicking_present_person_selects_departure_target() -> None:
             ],
         }
     )
+    calls: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        page.api,
+        "presence_action",
+        lambda person_id, action: calls.append((person_id, action)) or {},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        page,
+        "_run",
+        lambda function, *args, **_kwargs: function(*args),
+    )
 
     page._select_present_person(0)
 
     assert page.presence_person.currentData() == 77
-    assert page.departure_button.isEnabled()
+    assert calls == [(77, "departure")]
     window.close()
     app.processEvents()
 
@@ -975,6 +1091,40 @@ def test_group_defaults_fill_new_lesson_without_changing_override_support() -> N
     assert dialog.duration.value() == 90
     assert dialog.end_display.text() == dialog._end_datetime().toString("HH:mm")
     dialog.deleteLater()
+
+
+def test_lesson_dialog_keeps_selected_students_at_top() -> None:
+    app = QApplication.instance() or QApplication([])
+    references = {
+        "subjects": [],
+        "teachers": [],
+        "rooms": [],
+        "groups": [],
+        "students": [
+            {"id": 1, "full_name": "Алексеев Александр"},
+            {"id": 2, "full_name": "Белов Борис"},
+            {"id": 3, "full_name": "Волкова Алиса"},
+        ],
+    }
+    dialog = LessonDialog(
+        references,
+        {
+            "participants": [{"person_id": 3}],
+            "notes": None,
+        },
+    )
+
+    assert dialog.students.item(0, 1).text() == "Волкова Алиса"
+    first_unselected = dialog.students.cellWidget(1, 0).findChild(QCheckBox)
+    first_unselected.setChecked(True)
+    app.processEvents()
+
+    assert [dialog.students.item(row, 1).text() for row in range(2)] == [
+        "Алексеев Александр",
+        "Волкова Алиса",
+    ]
+    dialog.deleteLater()
+    app.processEvents()
 
 
 def test_group_selection_loads_members_and_keeps_extra_student_available() -> None:
@@ -1226,7 +1376,7 @@ def test_multirole_person_history_loads_student_and_teacher_together() -> None:
     app.processEvents()
 
 
-def test_person_payload_separates_contact_and_max_authorization_phone() -> None:
+def test_person_uses_one_phone_for_contact_and_max_authorization() -> None:
     app = QApplication.instance() or QApplication([])
     dialog = PersonDialog(
         {
@@ -1240,7 +1390,11 @@ def test_person_payload_separates_contact_and_max_authorization_phone() -> None:
     payload = dialog.payload()
 
     assert payload["phone"] == "+79991112233"
-    assert payload["max_auth_phone"] == "+79990000001"
+    assert payload["max_auth_phone"] == "+79991112233"
+    assert all(
+        label.text() != "Личный телефон для входа в MAX"
+        for label in dialog.findChildren(QLabel)
+    )
     dialog.deleteLater()
     app.processEvents()
 

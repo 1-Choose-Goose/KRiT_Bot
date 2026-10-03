@@ -176,15 +176,6 @@ class PersonDialog(QDialog):
         if len(digits) == 11 and digits[0] in {"7", "8"}:
             digits = digits[1:]
         self.phone.setText(digits[:10])
-        self.max_auth_phone = QLineEdit()
-        self.max_auth_phone.setInputMask("+7 (000) 000-00-00;_")
-        auth_digits = "".join(
-            c for c in str(self.person.get("max_auth_phone") or "") if c.isdigit()
-        )
-        if len(auth_digits) == 11 and auth_digits[0] in {"7", "8"}:
-            auth_digits = auth_digits[1:]
-        self.max_auth_phone.setText(auth_digits[:10])
-        self.max_auth_phone.setPlaceholderText("Оставьте пустым, если личного номера нет")
         roles = person_roles(self.person)
         self.role_checks: dict[str, QCheckBox] = {}
         roles_widget = QWidget()
@@ -205,7 +196,6 @@ class PersonDialog(QDialog):
         self.active.setChecked(bool(self.person.get("bot_access_enabled", True)))
         form.addRow("ФИО", self.full_name)
         form.addRow("Телефон", self.phone)
-        form.addRow("Личный телефон для входа в MAX", self.max_auth_phone)
         form.addRow("Роли", roles_widget)
         form.addRow("ID в MAX", self.max_user_id)
         form.addRow("Статус MAX", self.authorization)
@@ -403,12 +393,6 @@ class PersonDialog(QDialog):
         return str(value) if value else None
 
     def _role_changed(self) -> None:
-        if (
-            not self.person.get("id")
-            and not self.max_auth_phone.text().strip()
-            and (self.role_checks["parent"].isChecked() or self.role_checks["teacher"].isChecked())
-        ):
-            self.max_auth_phone.setText(self.phone.text())
         previous = self._target_role()
         targets = []
         if self.role_checks["student"].isChecked():
@@ -504,11 +488,11 @@ class PersonDialog(QDialog):
 
     def payload(self) -> dict[str, Any]:
         digits = "".join(c for c in self.phone.text() if c.isdigit())
-        auth_digits = "".join(c for c in self.max_auth_phone.text() if c.isdigit())
+        normalized_phone = "+" + digits
         return {
             "full_name": " ".join(self.full_name.text().split()),
-            "phone": "+" + digits,
-            "max_auth_phone": "+" + auth_digits if len(auth_digits) == 11 else None,
+            "phone": normalized_phone,
+            "max_auth_phone": normalized_phone,
             "roles": [role for role, check in self.role_checks.items() if check.isChecked()],
             "active": bool(self.person.get("active", True)),
             "bot_access_enabled": self.active.isChecked(),

@@ -575,6 +575,9 @@ class LessonDialog(QDialog):
             holder_layout.setContentsMargins(0, 0, 0, 0)
             holder_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             holder_layout.addWidget(check)
+            sort_item = QTableWidgetItem()
+            sort_item.setForeground(QColor("transparent"))
+            self.students.setItem(row, 0, sort_item)
             self.students.setCellWidget(row, 0, holder)
             self.students.setItem(row, 1, QTableWidgetItem(person.get("full_name", "")))
             self.students.setItem(row, 2, QTableWidgetItem("Вручную" if check.isChecked() else "—"))
@@ -706,7 +709,21 @@ class LessonDialog(QDialog):
                     if check.isChecked()
                     else "—"
                 )
+        self._sort_students()
         self._student_selection_changed()
+
+    def _sort_students(self) -> None:
+        for row in range(self.students.rowCount()):
+            holder = self.students.cellWidget(row, 0)
+            check = holder.findChild(QCheckBox) if holder else None
+            name = self.students.item(row, 1)
+            sort_item = self.students.item(row, 0)
+            if check is None or name is None or sort_item is None:
+                continue
+            selected_rank = "0" if check.isChecked() else "1"
+            sort_item.setText(f"{selected_rank}|{name.text().casefold()}")
+        self.students.sortItems(0, Qt.SortOrder.AscendingOrder)
+        self._filter_students()
 
     def _student_checkbox_toggled(self, check: QCheckBox, checked: bool) -> None:
         person_id = int(check.property("person_id"))
@@ -1013,6 +1030,17 @@ class LessonCardDialog(QDialog):
                     "Завершить досрочно",
                     lambda: self._select_operation("finish_early"),
                     "danger",
+                )
+            )
+            layout.addLayout(operations)
+        elif lesson.get("status") in {"planned", "scheduled"}:
+            operations = QHBoxLayout()
+            operations.addStretch(1)
+            operations.addWidget(
+                _button(
+                    "Изменить занятие",
+                    lambda: self._select_operation("edit"),
+                    "primary",
                 )
             )
             layout.addLayout(operations)
@@ -1419,7 +1447,10 @@ class LearningPage(QWidget):
                 "Действия",
             ],
             stretch=(1, 2, 3),
-            fixed={0: 110, 4: 90, 5: 125, 6: 290},
+            fixed={0: 110, 4: 90, 5: 125, 6: 120},
+        )
+        self.today_lessons.cellDoubleClicked.connect(
+            lambda row, _column: self._open_today_lesson(row)
         )
         layout.addWidget(self.today_lessons, 2)
         present_header = QHBoxLayout()
@@ -1826,30 +1857,18 @@ class LearningPage(QWidget):
             actions = QWidget()
             bar = QHBoxLayout(actions)
             bar.setContentsMargins(2, 2, 2, 2)
-            if _lesson_requires_reconciliation(lesson):
-                bar.addWidget(
-                    _button(
-                        "Уточнить",
-                        lambda checked=False, item=lesson: self.reconcile_lesson(item),
-                        "primary",
-                        compact=True,
-                    ),
-                    1,
-                )
-            elif lesson.get("status") in {"planned", "scheduled"}:
+            has_action = False
+            if lesson.get("status") in {"planned", "scheduled"} and not (
+                _lesson_requires_reconciliation(lesson)
+            ):
                 start_button = _button(
                     "Начать",
                     lambda checked=False, item=lesson: self.lesson_action(item, "start"),
                     "primary",
                     compact=True,
                 )
-                edit_button = _button(
-                    "Изменить",
-                    lambda checked=False, item=lesson: self.edit_lesson(item),
-                    compact=True,
-                )
                 bar.addWidget(start_button, 1)
-                bar.addWidget(edit_button, 1)
+                has_action = True
             elif lesson.get("status") == "in_progress":
                 bar.addWidget(
                     _button(
@@ -1860,15 +1879,9 @@ class LearningPage(QWidget):
                     ),
                     1,
                 )
-            bar.addWidget(
-                _button(
-                    "Карточка",
-                    lambda checked=False, item=lesson: self.open_lesson(item),
-                    compact=True,
-                ),
-                1,
-            )
-            self.today_lessons.setCellWidget(row, 6, actions)
+                has_action = True
+            if has_action:
+                self.today_lessons.setCellWidget(row, 6, actions)
         present = self.today_data.get("present", [])
         self.present_table.setRowCount(len(present))
         for row, person in enumerate(present):
@@ -2010,6 +2023,20 @@ class LearningPage(QWidget):
             if planned
             else "Выберите запланированное занятие в таблице"
         )
+
+    def _open_today_lesson(self, row: int) -> None:
+        lessons = [
+            lesson
+            for lesson in self.today_data.get("lessons", [])
+            if lesson.get("status") != "cancelled"
+        ]
+        if not 0 <= row < len(lessons):
+            return
+        lesson = lessons[row]
+        if _lesson_requires_reconciliation(lesson):
+            self.reconcile_lesson(lesson)
+        else:
+            self.open_lesson(lesson)
 
     def reconcile_lesson(self, lesson: dict[str, Any]) -> None:
         if not _lesson_requires_reconciliation(lesson):
@@ -2341,6 +2368,9 @@ class LearningPage(QWidget):
 
     def _handle_lesson_operation(self, lesson: dict[str, Any], dialog: LessonCardDialog) -> None:
         lesson_id = int(lesson["id"])
+        if dialog.operation == "edit":
+            self.edit_lesson(lesson)
+            return
         if dialog.operation == "leave_early":
             person_id = dialog.selected_person_id()
             reason_dialog = ReasonDialog(
@@ -2525,6 +2555,12 @@ class LearningPage(QWidget):
 
     def presence(self, action: str) -> None:
         person_id = self.presence_person.currentData()
+        if action == "departure":
+            row = self.present_table.currentRow()
+            item = self.present_table.item(row, 0) if row >= 0 else None
+            selected_id = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+            if selected_id is not None:
+                person_id = selected_id
         if person_id is not None:
             self._run(self.api.presence_action, int(person_id), action, done=self._action_done)
 
@@ -2539,6 +2575,12 @@ class LearningPage(QWidget):
         self.presence_person.setCurrentIndex(index)
         self.presence_person.setFocus()
         self.departure_button.setFocus()
+        self._run(
+            self.api.presence_action,
+            int(person_id),
+            "departure",
+            done=self._action_done,
+        )
 
     def edit_reference(self, kind: str, item: dict[str, Any] | None = None) -> None:
         dialog = ReferenceDialog(kind, item, self, references=self.references)
