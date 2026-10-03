@@ -224,6 +224,27 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
             assert corrected.status_code == 200, corrected.text
             assert corrected.json()["attendance_status"] == "excused"
 
+            corrected_present = await client.post(
+                f"/api/v1/learning/lessons/{lesson_id}/participants/{student_two}/correct",
+                headers=headers,
+                json={
+                    "attendance_status": "present",
+                    "reason": "Посещаемость внесена задним числом",
+                },
+            )
+            assert corrected_present.status_code == 200, corrected_present.text
+            assert corrected_present.json()["attendance_status"] == "present"
+            assert datetime.fromisoformat(
+                corrected_present.json()["arrived_at"]
+            ).replace(tzinfo=UTC) == datetime.fromisoformat(
+                finished.json()["actual_start_at"]
+            ).replace(tzinfo=UTC)
+            assert datetime.fromisoformat(corrected_present.json()["left_at"]).replace(
+                tzinfo=UTC
+            ) == datetime.fromisoformat(finished.json()["actual_end_at"]).replace(
+                tzinfo=UTC
+            )
+
             corrected_time = await client.post(
                 f"/api/v1/learning/lessons/{lesson_id}/correct-time",
                 headers=headers,

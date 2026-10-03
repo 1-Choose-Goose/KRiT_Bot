@@ -3226,6 +3226,11 @@ def create_learning_router(
             }
             arrived_at = _aware(payload.arrived_at) if payload.arrived_at else None
             left_at = _aware(payload.left_at) if payload.left_at else None
+            if payload.attendance_status == "present":
+                arrived_at = arrived_at or _db_utc(
+                    lesson.actual_start_at or lesson.start_at
+                )
+                left_at = left_at or _db_utc(lesson.actual_end_at or lesson.end_at)
             late_minutes = (
                 max(1, int((arrived_at - _db_utc(lesson.start_at)).total_seconds() // 60))
                 if arrived_at is not None and payload.attendance_status == "late"
@@ -3260,6 +3265,10 @@ def create_learning_router(
                 )
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
+            if payload.attendance_status in {"present", "late"} and left_at is not None:
+                if arrived_at is not None and left_at < arrived_at:
+                    raise HTTPException(422, "Время ухода не может быть раньше времени прихода")
+                participant.left_at = left_at
             session.add(
                 AuditEvent(
                     actor_admin_id=admin_id,

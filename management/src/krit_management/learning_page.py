@@ -7,7 +7,7 @@ from math import ceil
 from typing import Any
 
 from PySide6.QtCore import QDate, QDateTime, QMarginsF, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QColor, QPageLayout, QPageSize, QTextDocument
+from PySide6.QtGui import QColor, QIcon, QPageLayout, QPageSize, QPixmap, QTextDocument
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter, QPrintPreviewWidget
 from PySide6.QtWidgets import (
     QApplication,
@@ -1819,7 +1819,10 @@ class LearningPage(QWidget):
                 _lesson_status_label(lesson),
             ]
             for column, value in enumerate(values):
-                self.today_lessons.setItem(row, column, QTableWidgetItem(str(value)))
+                cell = QTableWidgetItem(str(value))
+                if column == 1:
+                    self._apply_subject_color(cell, lesson)
+                self.today_lessons.setItem(row, column, cell)
             actions = QWidget()
             bar = QHBoxLayout(actions)
             bar.setContentsMargins(2, 2, 2, 2)
@@ -1962,8 +1965,35 @@ class LearningPage(QWidget):
                 _lesson_status_label(lesson),
             ]
             for column, value in enumerate(values):
-                self.calendar_table.setItem(row, column, QTableWidgetItem(str(value)))
+                cell = QTableWidgetItem(str(value))
+                if column == 1:
+                    self._apply_subject_color(cell, lesson)
+                self.calendar_table.setItem(row, column, cell)
         self._calendar_selection_changed()
+
+    def _apply_subject_color(
+        self, item: QTableWidgetItem, lesson: dict[str, Any]
+    ) -> None:
+        subject_id = lesson.get("subject_id")
+        subject = next(
+            (
+                entry
+                for entry in self.references.get("subjects", [])
+                if entry.get("id") == subject_id
+            ),
+            None,
+        )
+        if not isinstance(subject, dict):
+            return
+        color = QColor(str(subject.get("color", "")))
+        if not color.isValid():
+            return
+        marker = QPixmap(12, 12)
+        marker.fill(color)
+        item.setIcon(QIcon(marker))
+        item.setToolTip(
+            f"Цвет предмета «{lesson.get('subject_name_snapshot', '')}»"
+        )
 
     def _calendar_selection_changed(self) -> None:
         row = self.calendar_table.currentRow()
@@ -2231,13 +2261,22 @@ class LearningPage(QWidget):
                             for item in lesson.get("participants", [])
                             if int(item["person_id"]) == person_id
                         )
+                        arrived_at = participant.get("arrived_at")
+                        left_at = participant.get("left_at")
+                        if attendance_status == "present":
+                            arrived_at = arrived_at or lesson.get(
+                                "actual_start_at"
+                            ) or lesson.get("start_at")
+                            left_at = left_at or lesson.get("actual_end_at") or lesson.get(
+                                "end_at"
+                            )
                         self.api.correct_attendance(
                             int(lesson["id"]),
                             person_id,
                             {
                                 "attendance_status": attendance_status,
-                                "arrived_at": participant.get("arrived_at"),
-                                "left_at": participant.get("left_at"),
+                                "arrived_at": arrived_at,
+                                "left_at": left_at,
                                 "reason": reason,
                             },
                         )
@@ -2260,10 +2299,15 @@ class LearningPage(QWidget):
                 for person_id, attendance_status in changes:
                     if attendance_status == original.get(person_id):
                         continue
+                    if attendance_status == "present":
+                        correction_reasons[person_id] = (
+                            "Посещаемость внесена задним числом"
+                        )
+                        continue
                     reason, accepted = QInputDialog.getText(
                         self,
                         "Корректировка завершённого занятия",
-                        "Причина изменения посещаемости:",
+                        "Почему отметка изменяется задним числом?",
                     )
                     if not accepted or len(reason.strip()) < 3:
                         return

@@ -12,12 +12,14 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QInputDialog,
     QPushButton,
     QStyle,
     QStyleOptionSpinBox,
     QTableWidget,
 )
 
+import krit_management.learning_page as learning_page_module
 from krit_management.api import ApiError, ManagementApi
 from krit_management.dialogs import PersonDialog
 from krit_management.learning_page import (
@@ -421,6 +423,87 @@ def test_overdue_calendar_lesson_reconciles_only_by_double_click(monkeypatch) ->
     app.processEvents()
 
 
+def test_completed_lesson_presence_uses_actual_times_without_reason_prompt(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.shutdown()
+    app.processEvents()
+
+    class AcceptedLessonCard:
+        operation = None
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def exec(self) -> int:
+            return 1
+
+        def attendance(self) -> list[tuple[int, str]]:
+            return [(44, "present")]
+
+        def actual_time_change(self):
+            return None
+
+    calls: list[tuple[int, int, dict[str, object]]] = []
+    monkeypatch.setattr(learning_page_module, "LessonCardDialog", AcceptedLessonCard)
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Для обычного присутствия причина не запрашивается")
+        ),
+    )
+    monkeypatch.setattr(
+        page.api,
+        "correct_attendance",
+        lambda lesson_id, person_id, payload: calls.append(
+            (lesson_id, person_id, payload)
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        page,
+        "_run",
+        lambda function, *args, **_kwargs: function(*args),
+    )
+    page.open_lesson(
+        {
+            "id": 18,
+            "status": "completed",
+            "start_at": "2026-10-03T12:00:00+05:00",
+            "end_at": "2026-10-03T13:00:00+05:00",
+            "actual_start_at": "2026-10-03T12:00:00+05:00",
+            "actual_end_at": "2026-10-03T13:00:00+05:00",
+            "subject_name_snapshot": "Информатика",
+            "participants": [
+                {
+                    "person_id": 44,
+                    "person_name_snapshot": "Куц Олег Олегович",
+                    "attendance_status": "expected",
+                    "arrived_at": None,
+                    "left_at": None,
+                }
+            ],
+        }
+    )
+
+    assert calls == [
+        (
+            18,
+            44,
+            {
+                "attendance_status": "present",
+                "arrived_at": "2026-10-03T12:00:00+05:00",
+                "left_at": "2026-10-03T13:00:00+05:00",
+                "reason": "Посещаемость внесена задним числом",
+            },
+        )
+    ]
+    page.deleteLater()
+    app.processEvents()
+
+
 def test_reference_data_refreshes_group_memberships_for_immediate_preview(monkeypatch) -> None:
     api = ManagementApi("http://127.0.0.1:1")
     calls: list[str] = []
@@ -749,6 +832,38 @@ def test_subject_table_uses_visible_color_swatch_and_reports_old_server() -> Non
         assert "не поддерживает" in str(exc)
     else:
         raise AssertionError("Старый сервер должен быть обнаружен")
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_subject_color_marks_lessons_in_today_and_calendar() -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.shutdown()
+    app.processEvents()
+    page.references["subjects"] = [
+        {"id": 7, "name": "Информатика", "color": "#c00000"}
+    ]
+    lesson = {
+        "id": 18,
+        "subject_id": 7,
+        "start_at": "2099-10-03T12:00:00+05:00",
+        "end_at": "2099-10-03T13:00:00+05:00",
+        "subject_name_snapshot": "Информатика",
+        "teacher_name_snapshot": "Быков Валерий Андреевич",
+        "room_name_snapshot": "Кабинет №1",
+        "participants": [],
+        "status": "planned",
+    }
+
+    page._calendar_loaded([lesson])
+    page._today_loaded({"lessons": [lesson], "present": [], "alerts": []})
+
+    for item in (page.calendar_table.item(0, 1), page.today_lessons.item(0, 1)):
+        assert not item.icon().isNull()
+        assert item.icon().pixmap(12, 12).toImage().pixelColor(6, 6).name() == "#c00000"
+        assert item.toolTip() == "Цвет предмета «Информатика»"
     page.deleteLater()
     app.processEvents()
 
