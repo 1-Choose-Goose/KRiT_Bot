@@ -1211,15 +1211,23 @@ class FreeSlotDialog(QDialog):
         layout.addWidget(self.students)
         search_row = QHBoxLayout()
         search_row.addStretch(1)
-        search_row.addWidget(_button("Найти варианты", self._request, "primary"))
+        self.search_button = _button("Найти варианты", self._request, "primary")
+        search_row.addWidget(self.search_button)
         layout.addLayout(search_row)
+        self.search_status = QLabel("Задайте параметры и нажмите «Найти варианты».")
+        self.search_status.setObjectName("supportingText")
+        self.search_status.setWordWrap(True)
+        layout.addWidget(self.search_status)
         self.results = _table(["Дата", "Время", "Кабинет"], stretch=(2,), compact=(0, 1))
         self.results.doubleClicked.connect(lambda _index: self.accept())
+        self.results.itemSelectionChanged.connect(self._update_create_button)
         layout.addWidget(self.results, 1)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Создать занятие")
+        self.create_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.create_button.setText("Создать занятие")
+        self.create_button.setEnabled(False)
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -1264,10 +1272,23 @@ class FreeSlotDialog(QDialog):
         }
 
     def _request(self) -> None:
+        self.search_button.setEnabled(False)
+        self.search_button.setText("Ищем…")
+        self.search_status.setText("Идёт поиск свободного времени…")
+        self.results.clearContents()
+        self.results.setRowCount(0)
+        self.create_button.setEnabled(False)
         self.search_requested.emit(self.criteria())
 
     def set_slots(self, slots: list[dict[str, Any]]) -> None:
         self.slots = slots
+        self.search_button.setEnabled(True)
+        self.search_button.setText("Найти варианты")
+        self.search_status.setText(
+            f"Найдено вариантов: {len(slots)}. Выберите подходящий."
+            if slots
+            else "Подходящих вариантов не найдено."
+        )
         self.results.setRowCount(len(slots))
         for row, slot in enumerate(slots):
             start = parse_center(slot["start_at"])
@@ -1278,6 +1299,16 @@ class FreeSlotDialog(QDialog):
                 cell = QTableWidgetItem(str(value))
                 cell.setData(Qt.ItemDataRole.UserRole, slot)
                 self.results.setItem(row, column, cell)
+        self._update_create_button()
+
+    def search_failed(self, message: str) -> None:
+        self.search_button.setEnabled(True)
+        self.search_button.setText("Найти варианты")
+        self.search_status.setText("Не удалось выполнить поиск. Повторите попытку.")
+        QMessageBox.critical(self, "Свободное время", message)
+
+    def _update_create_button(self) -> None:
+        self.create_button.setEnabled(self.results.currentRow() >= 0)
 
     def selected_slot(self) -> dict[str, Any] | None:
         row = self.results.currentRow()
@@ -1991,6 +2022,7 @@ class LearningPage(QWidget):
             self._run(
                 lambda: self.api.free_slots(**criteria),
                 done=lambda result: dialog.set_slots(result if isinstance(result, list) else []),
+                on_error=dialog.search_failed,
             )
 
         dialog.search_requested.connect(search)

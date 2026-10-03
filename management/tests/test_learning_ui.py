@@ -944,6 +944,29 @@ def test_free_slot_student_search_keeps_selected_students() -> None:
     assert not dialog.students.isRowHidden(1)
     assert first.isChecked()
     assert dialog.student_count.text() == "Выбрано: 1"
+    requested: list[dict] = []
+    dialog.search_requested.connect(requested.append)
+    dialog._request()
+    assert requested
+    assert not dialog.search_button.isEnabled()
+    assert dialog.search_status.text() == "Идёт поиск свободного времени…"
+    dialog.set_slots([])
+    assert dialog.search_button.isEnabled()
+    assert dialog.search_status.text() == "Подходящих вариантов не найдено."
+    dialog.set_slots(
+        [
+            {
+                "start_at": "2026-10-04T10:00:00+05:00",
+                "end_at": "2026-10-04T11:00:00+05:00",
+                "room_id": 3,
+                "room_name": "Кабинет №1",
+            }
+        ]
+    )
+    assert dialog.search_status.text() == "Найдено вариантов: 1. Выберите подходящий."
+    assert not dialog.create_button.isEnabled()
+    dialog.results.selectRow(0)
+    assert dialog.create_button.isEnabled()
     dialog.deleteLater()
     app.processEvents()
 

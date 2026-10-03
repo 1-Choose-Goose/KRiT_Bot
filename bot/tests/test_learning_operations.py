@@ -187,6 +187,20 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
                 < datetime.fromisoformat(slot["end_at"]).replace(tzinfo=UTC)
                 for slot in free_slots.json()
             )
+            future_slots = await client.get(
+                "/api/v1/learning/free-slots",
+                headers=headers,
+                params={
+                    "day": (factual_now + timedelta(days=1, hours=5)).date().isoformat(),
+                    "duration_minutes": 30,
+                    "teacher_id": substitute,
+                },
+            )
+            assert future_slots.status_code == 200, future_slots.text
+            assert future_slots.json(), (
+                "Незакрытый сегмент идущего занятия не должен занимать кабинеты "
+                "на следующий день"
+            )
             returned_teacher = await client.post(
                 f"/api/v1/learning/lessons/{lesson_id}/teacher-transition",
                 headers=headers,

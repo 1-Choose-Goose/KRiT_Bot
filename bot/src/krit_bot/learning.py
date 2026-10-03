@@ -3755,6 +3755,7 @@ def create_learning_router(
             tz = timezone(timedelta(minutes=timezone_offset_minutes))
         start = datetime.combine(day, time(8), tzinfo=tz).astimezone(UTC)
         end = datetime.combine(day, time(21), tzinfo=tz).astimezone(UTC)
+        now = utcnow()
         async with sessions() as session:
             room_query = select(Room).where(Room.active.is_(True))
             if room_id is not None:
@@ -3811,7 +3812,11 @@ def create_learning_router(
         selected_students = set(student_ids or [])
         slots: list[dict[str, Any]] = []
         duration = timedelta(minutes=duration_minutes)
-        cursor = start
+        rounded_now = now.replace(second=0, microsecond=0)
+        remainder = rounded_now.minute % 30
+        if remainder or now.second or now.microsecond:
+            rounded_now += timedelta(minutes=30 - remainder if remainder else 30)
+        cursor = max(start, rounded_now)
         while cursor + duration <= end:
             candidate_end = cursor + duration
             for room in rooms:
@@ -3822,13 +3827,20 @@ def create_learning_router(
                     planned_overlap = (
                         _db_utc(lesson.start_at) < candidate_end and _db_utc(lesson.end_at) > cursor
                     )
-                    factual_teachers = {
-                        person_id
-                        for lesson_id, person_id, segment_start, segment_end in segment_rows
-                        if lesson_id == lesson.id
-                        and _db_utc(segment_start) < candidate_end
-                        and (segment_end is None or _db_utc(segment_end) > cursor)
-                    }
+                    factual_teachers: set[int] = set()
+                    for lesson_id, person_id, segment_start, segment_end in segment_rows:
+                        if lesson_id != lesson.id:
+                            continue
+                        effective_end = (
+                            _db_utc(segment_end)
+                            if segment_end is not None
+                            else max(_db_utc(lesson.end_at), now)
+                        )
+                        if (
+                            _db_utc(segment_start) < candidate_end
+                            and effective_end > cursor
+                        ):
+                            factual_teachers.add(person_id)
                     factual_overlap = bool(factual_teachers)
                     if not planned_overlap and not factual_overlap:
                         continue
