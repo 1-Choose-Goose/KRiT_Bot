@@ -148,6 +148,7 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     page._settings_loaded(
         [
             {
+                "id": 42,
                 "event_code": "lesson_confirmation_request",
                 "recipient_context": "student",
                 "offset_minutes": 1440,
@@ -182,9 +183,23 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     page._run = lambda fn, _done=None: fn()  # type: ignore[method-assign]
     page.save_settings()
     assert api.saved_rules is not None
+    assert api.saved_rules[0]["id"] == 42
     assert api.saved_rules[0]["offset_minutes"] == 60
     assert api.saved_rules[0]["quiet_start"] == "21:30"
     assert api.saved_rules[0]["configuration"]["follow_up"] == "once"
+    summary = page._delivery_summary(
+        {
+            "recipients": 3,
+            "messages": 1,
+            "excluded": [
+                {"person_id": 2, "reason": "max_unavailable"},
+                {"person_id": 3, "reason": "disabled_by_policy"},
+            ],
+        }
+    )
+    assert "Поставлено в очередь: 1" in summary
+    assert "MAX недоступен: 1" in summary
+    assert "отключено настройками: 1" in summary
     assert page.settings.columnCount() == 9
     assert page.settings.cellWidget(0, 7).currentData() == "once"
     assert page.settings.item(0, 8).text() == "180"

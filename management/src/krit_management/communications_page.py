@@ -1100,6 +1100,27 @@ class CommunicationsPage(QWidget):
             return None
         return ids, text
 
+    @staticmethod
+    def _delivery_summary(result: dict[str, Any]) -> str:
+        reason_labels = {
+            "max_unavailable": "MAX недоступен",
+            "disabled_by_policy": "отключено настройками",
+            "quiet_hours": "перенесено тихими часами",
+        }
+        reason_counts = Counter(
+            str(item.get("reason") or "unknown")
+            for item in (result.get("excluded") or [])
+        )
+        lines = [
+            f"Получателей: {result.get('recipients', 0)}",
+            f"Поставлено в очередь: {result.get('messages', 0)}",
+        ]
+        lines.extend(
+            f"Исключено — {reason_labels.get(reason, reason)}: {count}"
+            for reason, count in reason_counts.items()
+        )
+        return "\n".join(lines)
+
     def preview_message(self) -> None:
         values = self._message_payload()
         if values:
@@ -1108,9 +1129,7 @@ class CommunicationsPage(QWidget):
                 lambda result: QMessageBox.information(
                     self,
                     "Предпросмотр",
-                    f"Получателей: {result.get('recipients', 0)}\n"
-                    f"Доступны в MAX: {result.get('available', 0)}\n"
-                    f"Недоступны: {len(result.get('unavailable', []))}",
+                    self._delivery_summary(result),
                 ),
             )
 
@@ -1133,7 +1152,7 @@ class CommunicationsPage(QWidget):
         QMessageBox.information(
             self,
             "Рассылка создана",
-            f"Поставлено в очередь: {data.get('available', data.get('queued', 0))}",
+            self._delivery_summary(data),
         )
         self.refresh()
 
@@ -1698,6 +1717,7 @@ class CommunicationsPage(QWidget):
                     configuration["follow_up_offset_minutes"] = 180
             payload.append(
                 {
+                    "id": source.get("id"),
                     "event_code": source["event_code"],
                     "recipient_context": source["recipient_context"],
                     "offset_minutes": int(source.get("offset_minutes", -1)),

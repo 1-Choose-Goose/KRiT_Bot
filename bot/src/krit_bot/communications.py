@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -87,7 +88,17 @@ async def ensure_default_rules(session: AsyncSession) -> None:
     )
     rows: list[NotificationGlobalRule] = []
     for context in sorted(RECIPIENT_CONTEXTS):
-        for offset in DEFAULT_RULES[NotificationEvent.LESSON_REMINDER]:
+        reminder_offsets = {
+            offset
+            for event_code, recipient_context, offset in existing
+            if event_code == NotificationEvent.LESSON_REMINDER.value
+            and recipient_context == context
+        }
+        for offset in (
+            ()
+            if reminder_offsets
+            else DEFAULT_RULES[NotificationEvent.LESSON_REMINDER]
+        ):
             key = (NotificationEvent.LESSON_REMINDER.value, context, offset)
             if key not in existing:
                 rows.append(
@@ -98,7 +109,17 @@ async def ensure_default_rules(session: AsyncSession) -> None:
                         configuration={"after_confirmation": "all"},
                     )
                 )
-        for offset in DEFAULT_RULES[NotificationEvent.LESSON_CONFIRMATION_REQUEST]:
+        confirmation_offsets = {
+            offset
+            for event_code, recipient_context, offset in existing
+            if event_code == NotificationEvent.LESSON_CONFIRMATION_REQUEST.value
+            and recipient_context == context
+        }
+        for offset in (
+            ()
+            if confirmation_offsets
+            else DEFAULT_RULES[NotificationEvent.LESSON_CONFIRMATION_REQUEST]
+        ):
             confirmation_key = (
                 NotificationEvent.LESSON_CONFIRMATION_REQUEST.value,
                 context,
@@ -176,11 +197,12 @@ async def ensure_default_rules(session: AsyncSession) -> None:
     for rule in confirmation_rules:
         configuration = dict(rule.configuration or {})
         configuration.setdefault("deadline_minutes", 60)
-        if configuration.get("follow_up") == "once":
+        legacy_rule = configuration.get("follow_up") == "once"
+        if legacy_rule:
             configuration["follow_up"] = "none"
         else:
             configuration.setdefault("follow_up", "none")
-        if rule.offset_minutes != 1440:
+        if legacy_rule and rule.offset_minutes != 1440:
             rule.enabled = False
         if configuration != (rule.configuration or {}):
             rule.configuration = configuration
@@ -195,10 +217,11 @@ async def ensure_default_rules(session: AsyncSession) -> None:
     )
     for rule in reminder_rules:
         configuration = dict(rule.configuration or {})
-        if configuration.get("after_confirmation") == "one_hour_only":
+        legacy_rule = configuration.get("after_confirmation") == "one_hour_only"
+        if legacy_rule:
             configuration["after_confirmation"] = "all"
             rule.configuration = configuration
-        if rule.offset_minutes == 1440:
+        if legacy_rule and rule.offset_minutes == 1440:
             rule.enabled = False
     await session.execute(
         update(NotificationJob)
@@ -346,6 +369,28 @@ class NotificationPolicyResolver:
             configuration=configuration,
             source=source,
         )
+
+
+async def configured_offsets(
+    session: AsyncSession,
+    *,
+    event_code: NotificationEvent,
+    recipient_context: str,
+) -> list[int]:
+    values = list(
+        (
+            await session.scalars(
+                select(NotificationGlobalRule.offset_minutes).where(
+                    NotificationGlobalRule.event_code == event_code,
+                    NotificationGlobalRule.recipient_context.in_(["*", recipient_context]),
+                    NotificationGlobalRule.offset_minutes >= 0,
+                )
+            )
+        ).all()
+    )
+    if not values:
+        values = list(DEFAULT_RULES.get(event_code, ()))
+    return sorted({int(value) for value in values})
 
 
 def apply_quiet_hours(
@@ -563,7 +608,13 @@ async def reconcile_daily_reminders(
             )
             or 0
         ) > 0
-        for offset in DEFAULT_RULES[NotificationEvent.LESSON_REMINDER]:
+        offsets = await configured_offsets(
+            session,
+            event_code=NotificationEvent.LESSON_REMINDER,
+            recipient_context=bundle.recipient_context,
+        )
+        catch_up_reserved = False
+        for offset in offsets:
             policy = await resolver.resolve(
                 recipient_person_id=bundle.recipient_person_id,
                 recipient_context=bundle.recipient_context,
@@ -580,8 +631,6 @@ async def reconcile_daily_reminders(
                 after_confirmation == "none"
                 or (after_confirmation == "one_hour_only" and offset != 60)
             )
-            if existing is not None and existing.status == "sent":
-                continue
             scheduled = bundle.anchor_start_at.astimezone(UTC) - timedelta(minutes=offset)
             scheduled = apply_quiet_hours(
                 scheduled,
@@ -589,6 +638,17 @@ async def reconcile_daily_reminders(
                 timezone=timezone,
                 meaningful_until=bundle.anchor_start_at.astimezone(UTC),
             )
+            catch_up = scheduled is not None and scheduled <= now.astimezone(UTC)
+            if existing is not None and existing.status == "sent":
+                if catch_up:
+                    catch_up_reserved = True
+                continue
+            if catch_up and catch_up_reserved:
+                if existing is not None and existing.status in {"pending", "retry"}:
+                    existing.status = "cancelled"
+                continue
+            if catch_up and policy.enabled and not suppressed:
+                catch_up_reserved = True
             if existing is not None:
                 if not policy.enabled or suppressed or scheduled is None:
                     if existing.status in {"pending", "retry"}:
@@ -602,7 +662,7 @@ async def reconcile_daily_reminders(
                     # cancelled lesson even though its payload already starts
                     # with the new anchor.
                     existing.lesson_id = first_lesson.id
-                    existing.scheduled_at = max(now, scheduled)
+                    existing.scheduled_at = max(now.astimezone(UTC), scheduled)
                     existing.status = "pending"
                     existing.payload = {
                         "text": render_bundle(bundle),
@@ -627,7 +687,7 @@ async def reconcile_daily_reminders(
                 subject_person_id=bundle.subject_person_id,
                 recipient_context=bundle.recipient_context,
                 priority=PRIORITY_VALUE[policy.priority],
-                scheduled_at=max(now, scheduled),
+                scheduled_at=max(now.astimezone(UTC), scheduled),
                 payload={
                     "text": render_bundle(bundle),
                     "bundle_fingerprint": bundle.fingerprint,
@@ -647,6 +707,7 @@ async def reconcile_confirmation_requests(
     window_days: int = 7,
 ) -> int:
     """Create one confirmation per person/child/day, with lesson-level answers."""
+    await ensure_default_rules(session)
     local_now = now.astimezone(timezone)
     start = datetime.combine(local_now.date(), time.min, tzinfo=timezone)
     end = start + timedelta(days=window_days + 1)
@@ -657,7 +718,12 @@ async def reconcile_confirmation_requests(
         if bundle.anchor_start_at.astimezone(UTC) <= now.astimezone(UTC):
             continue
         selected: tuple[int, EffectivePolicy] | None = None
-        for offset in DEFAULT_RULES[NotificationEvent.LESSON_CONFIRMATION_REQUEST]:
+        offsets = await configured_offsets(
+            session,
+            event_code=NotificationEvent.LESSON_CONFIRMATION_REQUEST,
+            recipient_context=bundle.recipient_context,
+        )
+        for offset in reversed(offsets):
             candidate = await resolver.resolve(
                 recipient_person_id=bundle.recipient_person_id,
                 recipient_context=bundle.recipient_context,
@@ -1480,6 +1546,7 @@ async def save_interaction_response(
 
 
 class RulePayload(BaseModel):
+    id: int | None = None
     event_code: str
     recipient_context: str = "*"
     offset_minutes: int = -1
@@ -1490,6 +1557,39 @@ class RulePayload(BaseModel):
     quiet_start: str | None = "22:00"
     quiet_end: str | None = "08:00"
     configuration: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("quiet_start", "quiet_end")
+    @classmethod
+    def validate_quiet_time(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+            raise ValueError("время тихих часов должно иметь формат HH:MM")
+        return value
+
+    @field_validator("quiet_hours_policy")
+    @classmethod
+    def validate_quiet_policy(cls, value: str) -> str:
+        if value not in {"defer", "bypass"}:
+            raise ValueError("неизвестная политика тихих часов")
+        return value
+
+    @field_validator("priority")
+    @classmethod
+    def validate_priority(cls, value: str) -> str:
+        if value not in PRIORITY_VALUE:
+            raise ValueError("неизвестный приоритет")
+        return value
+
+    @model_validator(mode="after")
+    def validate_quiet_interval(self) -> RulePayload:
+        if (self.quiet_start is None) != (self.quiet_end is None):
+            raise ValueError("начало и окончание тихих часов указываются вместе")
+        if (
+            self.quiet_hours_policy == "defer"
+            and self.quiet_start is not None
+            and self.quiet_start == self.quiet_end
+        ):
+            raise ValueError("границы тихих часов не должны совпадать")
+        return self
 
 
 class OverridePayload(BaseModel):
@@ -1942,18 +2042,132 @@ def create_communications_router(
             for value in payload:
                 if value.recipient_context not in RECIPIENT_CONTEXTS | {"*"}:
                     raise HTTPException(422, "Неизвестный контекст получателя")
-                item = await session.scalar(
-                    select(NotificationGlobalRule).where(
-                        NotificationGlobalRule.event_code == value.event_code,
-                        NotificationGlobalRule.recipient_context == value.recipient_context,
-                        NotificationGlobalRule.offset_minutes == value.offset_minutes,
+                item = (
+                    await session.get(NotificationGlobalRule, value.id)
+                    if value.id is not None
+                    else await session.scalar(
+                        select(NotificationGlobalRule).where(
+                            NotificationGlobalRule.event_code == value.event_code,
+                            NotificationGlobalRule.recipient_context == value.recipient_context,
+                            NotificationGlobalRule.offset_minutes == value.offset_minutes,
+                        )
                     )
                 )
+                if value.id is not None and item is None:
+                    raise HTTPException(404, "Правило уведомлений не найдено")
                 if item is None:
-                    item = NotificationGlobalRule(**value.model_dump())
+                    item = NotificationGlobalRule(**value.model_dump(exclude={"id"}))
                     session.add(item)
                 else:
-                    for key, field_value in value.model_dump().items():
+                    if (
+                        item.event_code != value.event_code
+                        or item.recipient_context != value.recipient_context
+                    ):
+                        raise HTTPException(
+                            422,
+                            "Тип события и роль существующего правила изменять нельзя",
+                        )
+                    old_offset = item.offset_minutes
+                    if old_offset != value.offset_minutes:
+                        duplicate = await session.scalar(
+                            select(NotificationGlobalRule.id).where(
+                                NotificationGlobalRule.event_code == value.event_code,
+                                NotificationGlobalRule.recipient_context
+                                == value.recipient_context,
+                                NotificationGlobalRule.offset_minutes == value.offset_minutes,
+                                NotificationGlobalRule.id != item.id,
+                            )
+                        )
+                        if duplicate is not None:
+                            raise HTTPException(
+                                409, "Правило с таким интервалом уже существует"
+                            )
+                        contexts = (
+                            RECIPIENT_CONTEXTS
+                            if value.recipient_context == "*"
+                            else {value.recipient_context}
+                        )
+                        person_overrides = list(
+                            (
+                                await session.scalars(
+                                    select(PersonNotificationOverride).where(
+                                        PersonNotificationOverride.recipient_context.in_(contexts),
+                                        PersonNotificationOverride.event_code == value.event_code,
+                                        PersonNotificationOverride.offset_minutes == old_offset,
+                                    )
+                                )
+                            ).all()
+                        )
+                        for override in person_overrides:
+                            conflict = await session.scalar(
+                                select(PersonNotificationOverride.id).where(
+                                    PersonNotificationOverride.person_id == override.person_id,
+                                    PersonNotificationOverride.recipient_context
+                                    == override.recipient_context,
+                                    PersonNotificationOverride.event_code == value.event_code,
+                                    PersonNotificationOverride.offset_minutes
+                                    == value.offset_minutes,
+                                    PersonNotificationOverride.id != override.id,
+                                )
+                            )
+                            if conflict is not None:
+                                raise HTTPException(
+                                    409,
+                                    "Изменению мешает индивидуальное правило на новом интервале",
+                                )
+                            override.offset_minutes = value.offset_minutes
+                            override.updated_at = utcnow()
+                        if "guardian" in contexts:
+                            guardian_overrides = list(
+                                (
+                                    await session.scalars(
+                                        select(GuardianNotificationOverride).where(
+                                            GuardianNotificationOverride.event_code
+                                            == value.event_code,
+                                            GuardianNotificationOverride.offset_minutes
+                                            == old_offset,
+                                        )
+                                    )
+                                ).all()
+                            )
+                            for override in guardian_overrides:
+                                conflict = await session.scalar(
+                                    select(GuardianNotificationOverride.id).where(
+                                        GuardianNotificationOverride.guardian_person_id
+                                        == override.guardian_person_id,
+                                        GuardianNotificationOverride.student_person_id
+                                        == override.student_person_id,
+                                        GuardianNotificationOverride.event_code == value.event_code,
+                                        GuardianNotificationOverride.offset_minutes
+                                        == value.offset_minutes,
+                                        GuardianNotificationOverride.id != override.id,
+                                    )
+                                )
+                                if conflict is not None:
+                                    raise HTTPException(
+                                        409,
+                                        "Изменению мешает настройка родителя на новом интервале",
+                                    )
+                                override.offset_minutes = value.offset_minutes
+                                override.updated_at = utcnow()
+                        if value.event_code == NotificationEvent.LESSON_REMINDER:
+                            stale_jobs = update(NotificationJob).where(
+                                NotificationJob.event_type
+                                == NotificationEvent.LESSON_REMINDER,
+                                NotificationJob.status.in_(["pending", "retry"]),
+                                NotificationJob.dedupe_key.like(
+                                    f"%:reminder:{old_offset}:%"
+                                ),
+                            )
+                            if value.recipient_context != "*":
+                                stale_jobs = stale_jobs.where(
+                                    NotificationJob.recipient_context
+                                    == value.recipient_context
+                                )
+                            await session.execute(
+                                stale_jobs.values(status="cancelled", updated_at=utcnow())
+                            )
+                    for key, field_value in value.model_dump(exclude={"id"}).items():
                         setattr(item, key, field_value)
                     item.updated_at = utcnow()
             from .learning_models import AuditEvent
@@ -2097,17 +2311,57 @@ def create_communications_router(
     ) -> dict[str, Any]:
         person_ids = list(dict.fromkeys(payload.person_ids))
         async with sessions() as session:
-            existing = set(
-                (await session.scalars(select(Person.id).where(Person.id.in_(person_ids)))).all()
+            people = list(
+                (await session.scalars(select(Person).where(Person.id.in_(person_ids)))).all()
             )
-            if existing != set(person_ids):
+            people_by_id = {person.id: person for person in people}
+            if set(people_by_id) != set(person_ids):
                 raise HTTPException(404, "Один из получателей не найден")
             available, unavailable = await availability(session, person_ids)
+            available_people = set(available)
+            await ensure_default_rules(session)
+            resolver = NotificationPolicyResolver(session)
+            eligible: list[tuple[int, str, EffectivePolicy, datetime]] = []
+            excluded = [
+                {"person_id": person_id, "reason": "max_unavailable"}
+                for person_id in unavailable
+            ]
+            now = utcnow()
+            for person_id in person_ids:
+                if person_id not in available_people:
+                    continue
+                person = people_by_id[person_id]
+                roles = {link.role for link in person.role_links}
+                recipient_context = (
+                    "teacher"
+                    if "teacher" in roles and "student" not in roles
+                    else "guardian"
+                    if "parent" in roles and "student" not in roles
+                    else "student"
+                )
+                policy = await resolver.resolve(
+                    recipient_person_id=person_id,
+                    recipient_context=recipient_context,
+                    event_code=NotificationEvent.CUSTOM_MESSAGE,
+                )
+                if not policy.enabled:
+                    excluded.append(
+                        {"person_id": person_id, "reason": "disabled_by_policy"}
+                    )
+                    continue
+                scheduled_at = apply_quiet_hours(now, policy=policy, timezone=timezone)
+                if scheduled_at is None:
+                    excluded.append(
+                        {"person_id": person_id, "reason": "quiet_hours"}
+                    )
+                    continue
+                eligible.append((person_id, recipient_context, policy, scheduled_at))
             preview = {
                 "recipients": len(person_ids),
                 "available": len(available),
                 "unavailable": unavailable,
-                "messages": len(available),
+                "excluded": excluded,
+                "messages": len(eligible),
                 "sample": payload.text,
             }
             if payload.preview:
@@ -2121,26 +2375,35 @@ def create_communications_router(
             )
             session.add(campaign)
             await session.flush()
-            for person_id in person_ids:
+            for person_id, recipient_context, policy, scheduled_at in eligible:
                 await enqueue_job(
                     session,
                     dedupe_key=f"campaign:{campaign.id}:{person_id}",
                     event_type=NotificationEvent.CUSTOM_MESSAGE,
                     recipient_person_id=person_id,
-                    recipient_context="student",
-                    priority=2 if payload.urgent else 1,
-                    scheduled_at=utcnow(),
+                    recipient_context=recipient_context,
+                    priority=(
+                        max(2, PRIORITY_VALUE[policy.priority])
+                        if payload.urgent
+                        else PRIORITY_VALUE[policy.priority]
+                    ),
+                    scheduled_at=scheduled_at,
                     campaign_id=campaign.id,
                     payload={"text": payload.text, "manual": True},
                 )
-            campaign.status = "scheduled"
+            campaign.status = "scheduled" if eligible else "failed"
             session.add(
                 AuditEvent(
                     actor_admin_id=admin_id,
                     action="communications.manual_campaign_created",
                     entity_type="communication_campaign",
                     entity_id=campaign.id,
-                    details={"recipients": len(person_ids), "urgent": payload.urgent},
+                    details={
+                        "recipients": len(person_ids),
+                        "scheduled": len(eligible),
+                        "excluded": excluded,
+                        "urgent": payload.urgent,
+                    },
                 )
             )
             await session.commit()
@@ -2164,14 +2427,42 @@ def create_communications_router(
             )
             available, unavailable = await availability(session, target_person_ids)
             available_people = set(available)
-            available_targets = sum(
-                target.recipient_person_id in available_people for target in targets
-            )
+            await ensure_default_rules(session)
+            resolver = NotificationPolicyResolver(session)
+            now = utcnow()
+            eligible_targets: list[tuple[PollTarget, EffectivePolicy, datetime]] = []
+            excluded: list[dict[str, Any]] = []
+            for target in targets:
+                exclusion = {
+                    "person_id": target.recipient_person_id,
+                    "recipient_context": target.recipient_context,
+                    "subject_person_id": target.subject_person_id,
+                }
+                if target.recipient_person_id not in available_people:
+                    excluded.append({**exclusion, "reason": "max_unavailable"})
+                    continue
+                policy = await resolver.resolve(
+                    recipient_person_id=target.recipient_person_id,
+                    recipient_context=target.recipient_context,
+                    subject_person_id=target.subject_person_id,
+                    event_code=NotificationEvent.CUSTOM_YES_NO_REQUEST,
+                )
+                if not policy.enabled:
+                    excluded.append({**exclusion, "reason": "disabled_by_policy"})
+                    continue
+                scheduled_at = apply_quiet_hours(now, policy=policy, timezone=timezone)
+                if scheduled_at is None:
+                    excluded.append({**exclusion, "reason": "quiet_hours"})
+                    continue
+                eligible_targets.append((target, policy, scheduled_at))
             preview = {
                 "recipients": len(targets),
-                "available": available_targets,
+                "available": sum(
+                    target.recipient_person_id in available_people for target in targets
+                ),
                 "unavailable": unavailable,
-                "messages": available_targets,
+                "excluded": excluded,
+                "messages": len(eligible_targets),
                 "sample": payload.text,
             }
             if payload.preview:
@@ -2188,7 +2479,7 @@ def create_communications_router(
             request_ids = []
             subject_ids = {
                 target.subject_person_id
-                for target in targets
+                for target, _policy, _scheduled_at in eligible_targets
                 if target.subject_person_id is not None
             }
             subjects = {
@@ -2197,7 +2488,7 @@ def create_communications_router(
                     await session.scalars(select(Person).where(Person.id.in_(subject_ids)))
                 ).all()
             }
-            for target in targets:
+            for target, policy, scheduled_at in eligible_targets:
                 person_id = target.recipient_person_id
                 recipient_context = target.recipient_context
                 subject_person_id = target.subject_person_id
@@ -2239,8 +2530,8 @@ def create_communications_router(
                     recipient_person_id=person_id,
                     recipient_context=recipient_context,
                     subject_person_id=subject_person_id,
-                    priority=1,
-                    scheduled_at=utcnow(),
+                    priority=PRIORITY_VALUE[policy.priority],
+                    scheduled_at=scheduled_at,
                     campaign_id=campaign.id,
                     interaction_request_id=request.id,
                     lesson_id=payload.related_lesson_id,
@@ -2254,14 +2545,18 @@ def create_communications_router(
                         "keyboard": keyboard,
                     },
                 )
-            campaign.status = "scheduled"
+            campaign.status = "scheduled" if eligible_targets else "failed"
             session.add(
                 AuditEvent(
                     actor_admin_id=admin_id,
                     action="communications.poll_campaign_created",
                     entity_type="communication_campaign",
                     entity_id=campaign.id,
-                    details={"recipients": len(targets)},
+                    details={
+                        "recipients": len(targets),
+                        "scheduled": len(eligible_targets),
+                        "excluded": excluded,
+                    },
                 )
             )
             await session.commit()

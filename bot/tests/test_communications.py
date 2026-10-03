@@ -52,6 +52,7 @@ from krit_bot.learning_models import (
     LessonParticipant,
     LessonTeacherSegment,
     NotificationJob,
+    PersonMaxIdentity,
     Room,
     StudyGroup,
     Subject,
@@ -94,6 +95,298 @@ async def _database(tmp_path):
     engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'communications.db'}")
     await ensure_schema(engine)
     return engine, build_session_factory(engine)
+
+
+async def test_global_rule_update_keeps_identity_and_moves_person_override(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'rule-update.db').as_posix()}"
+    settings = Settings(
+        database_url=database_url,
+        max_bot_token=SecretStr("test-token"),
+        jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
+        bot_mode="webhook",
+        vk_syndication_enabled=False,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            login = await client.post(
+                "/api/v1/auth/login", json={"username": "admin", "password": "admin"}
+            )
+            headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+            current = await client.get("/api/v1/communications/settings/global", headers=headers)
+            assert current.status_code == 200
+            rules = current.json()
+            target = next(
+                item
+                for item in rules
+                if item["event_code"] == "lesson_reminder"
+                and item["recipient_context"] == "student"
+                and item["offset_minutes"] == 180
+            )
+
+            engine = build_engine(database_url)
+            sessions = build_session_factory(engine)
+            async with sessions() as session:
+                person = Person(full_name="Ученик", phone="+79000000201")
+                session.add(person)
+                await session.flush()
+                session.add(
+                    PersonNotificationOverride(
+                        person_id=person.id,
+                        recipient_context="student",
+                        event_code="lesson_reminder",
+                        offset_minutes=180,
+                        state="off",
+                    )
+                )
+                await session.commit()
+
+            target["offset_minutes"] = 120
+            saved = await client.put(
+                "/api/v1/communications/settings/global", headers=headers, json=rules
+            )
+            assert saved.status_code == 200, saved.text
+            matching = [
+                item
+                for item in saved.json()
+                if item["event_code"] == "lesson_reminder"
+                and item["recipient_context"] == "student"
+                and item["offset_minutes"] in {120, 180}
+            ]
+            assert [(item["id"], item["offset_minutes"]) for item in matching] == [
+                (target["id"], 120)
+            ]
+
+            async with sessions() as session:
+                override = await session.scalar(select(PersonNotificationOverride))
+                assert override is not None
+                assert override.offset_minutes == 120
+            await engine.dispose()
+
+
+async def test_invalid_quiet_hours_are_rejected_without_saving(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'quiet-hours.db').as_posix()}"
+    settings = Settings(
+        database_url=database_url,
+        max_bot_token=SecretStr("test-token"),
+        jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
+        bot_mode="webhook",
+        vk_syndication_enabled=False,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            login = await client.post(
+                "/api/v1/auth/login", json={"username": "admin", "password": "admin"}
+            )
+            headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+            current = await client.get("/api/v1/communications/settings/global", headers=headers)
+            rules = current.json()
+            rules[0]["quiet_start"] = "25:99"
+
+            response = await client.put(
+                "/api/v1/communications/settings/global", headers=headers, json=rules
+            )
+
+            assert response.status_code == 422
+            unchanged = await client.get(
+                "/api/v1/communications/settings/global", headers=headers
+            )
+            assert unchanged.json()[0]["quiet_start"] != "25:99"
+
+
+async def test_late_lesson_queues_only_one_current_reminder_per_recipient(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    now = datetime(2026, 10, 4, 10, 0, tzinfo=UTC)
+    async with sessions() as session:
+        student = Person(full_name="Поздний ученик", phone="+79000000211")
+        teacher = Person(full_name="Поздний учитель", phone="+79000000212")
+        subject = Subject(name="Информатика", color="#2563eb")
+        room = Room(name="Кабинет", capacity=10)
+        session.add_all([student, teacher, subject, room])
+        await session.flush()
+        lesson = Lesson(
+            subject_id=subject.id,
+            teacher_id=teacher.id,
+            room_id=room.id,
+            start_at=now + timedelta(minutes=30),
+            end_at=now + timedelta(minutes=90),
+            teacher_name_snapshot=teacher.full_name,
+            room_name_snapshot=room.name,
+            subject_name_snapshot=subject.name,
+        )
+        session.add(lesson)
+        await session.flush()
+        session.add(
+            LessonParticipant(
+                lesson_id=lesson.id,
+                person_id=student.id,
+                person_name_snapshot=student.full_name,
+            )
+        )
+        await session.flush()
+
+        await reconcile_daily_reminders(session, now=now, timezone=ZoneInfo("UTC"))
+        jobs = list(
+            (
+                await session.scalars(
+                    select(NotificationJob).where(
+                        NotificationJob.event_type == "lesson_reminder"
+                    )
+                )
+            ).all()
+        )
+
+        assert len(jobs) == 2
+        assert {job.recipient_context for job in jobs} == {"student", "teacher"}
+        assert all(":reminder:60:" in job.dedupe_key for job in jobs)
+        assert all(
+            (
+                job.scheduled_at.replace(tzinfo=UTC)
+                if job.scheduled_at.tzinfo is None
+                else job.scheduled_at
+            )
+            == now
+            for job in jobs
+        )
+        for job in jobs:
+            job.status = "sent"
+        await session.flush()
+
+        await reconcile_daily_reminders(session, now=now, timezone=ZoneInfo("UTC"))
+        all_jobs = list(
+            (
+                await session.scalars(
+                    select(NotificationJob).where(
+                        NotificationJob.event_type == "lesson_reminder"
+                    )
+                )
+            ).all()
+        )
+        assert len(all_jobs) == 2
+    await engine.dispose()
+
+
+async def test_manual_message_applies_policy_and_reports_excluded_recipient(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'manual-policy.db').as_posix()}"
+    settings = Settings(
+        database_url=database_url,
+        max_bot_token=SecretStr("test-token"),
+        jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
+        bot_mode="webhook",
+        vk_syndication_enabled=False,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        engine = build_engine(database_url)
+        sessions = build_session_factory(engine)
+        async with sessions() as session:
+            allowed = Person(
+                full_name="Учитель с рассылкой",
+                phone="+79000000221",
+                role_links=[PersonRole(role="teacher")],
+            )
+            blocked = Person(
+                full_name="Ученик без рассылки",
+                phone="+79000000222",
+                role_links=[PersonRole(role="student")],
+            )
+            session.add_all([allowed, blocked])
+            await session.flush()
+            session.add_all(
+                [
+                    PersonMaxIdentity(
+                        person_id=allowed.id,
+                        verified_phone=allowed.phone,
+                        max_user_id=2201,
+                    ),
+                    PersonMaxIdentity(
+                        person_id=blocked.id,
+                        verified_phone=blocked.phone,
+                        max_user_id=2202,
+                    ),
+                    PersonNotificationOverride(
+                        person_id=blocked.id,
+                        recipient_context="student",
+                        event_code="custom_message",
+                        offset_minutes=-1,
+                        state="off",
+                    ),
+                    PersonNotificationOverride(
+                        person_id=blocked.id,
+                        recipient_context="student",
+                        event_code="custom_yes_no_request",
+                        offset_minutes=-1,
+                        state="off",
+                    ),
+                ]
+            )
+            await session.commit()
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            login = await client.post(
+                "/api/v1/auth/login", json={"username": "admin", "password": "admin"}
+            )
+            headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+            body = {
+                "person_ids": [allowed.id, blocked.id],
+                "text": "Проверка ручной рассылки",
+                "preview": True,
+            }
+            preview = await client.post(
+                "/api/v1/communications/send-message", headers=headers, json=body
+            )
+            assert preview.status_code == 200, preview.text
+            assert preview.json()["messages"] == 1
+            assert preview.json()["excluded"] == [
+                {"person_id": blocked.id, "reason": "disabled_by_policy"}
+            ]
+
+            poll_preview = await client.post(
+                "/api/v1/communications/polls",
+                headers=headers,
+                json={
+                    "person_ids": [blocked.id],
+                    "text": "Будете?",
+                    "preview": True,
+                },
+            )
+            assert poll_preview.status_code == 200, poll_preview.text
+            assert poll_preview.json()["messages"] == 0
+            assert poll_preview.json()["excluded"] == [
+                {
+                    "person_id": blocked.id,
+                    "recipient_context": "student",
+                    "subject_person_id": blocked.id,
+                    "reason": "disabled_by_policy",
+                }
+            ]
+
+            body["preview"] = False
+            sent = await client.post(
+                "/api/v1/communications/send-message", headers=headers, json=body
+            )
+            assert sent.status_code == 200, sent.text
+            async with sessions() as session:
+                jobs = list(
+                    (
+                        await session.scalars(
+                            select(NotificationJob).where(
+                                NotificationJob.campaign_id == sent.json()["campaign_id"]
+                            )
+                        )
+                    ).all()
+                )
+                assert [(job.recipient_person_id, job.recipient_context) for job in jobs] == [
+                    (allowed.id, "teacher")
+                ]
+        await engine.dispose()
 
 
 async def test_policy_hierarchy_uses_person_and_guardian_child_overrides(tmp_path) -> None:
