@@ -6,6 +6,7 @@ import hmac
 import ssl
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import truststore
@@ -51,9 +52,15 @@ class MaxApiClient:
             timeout=httpx.Timeout(100, connect=15),
             verify=ssl_context,
         )
+        self._upload_client = httpx.AsyncClient(
+            headers={"User-Agent": "KRiT-Bot/0.1"},
+            timeout=httpx.Timeout(100, connect=15),
+            verify=ssl_context,
+        )
 
     async def close(self) -> None:
         await self._client.aclose()
+        await self._upload_client.aclose()
 
     async def get_me(self) -> dict[str, Any]:
         return await self._request("GET", "/me")
@@ -126,15 +133,31 @@ class MaxApiClient:
     async def upload_media(
         self, *, upload_url: str, content: bytes, filename: str, content_type: str
     ) -> dict[str, Any]:
-        response = await self._client.post(
-            upload_url,
-            files={"data": (filename, content, content_type)},
-        )
+        parsed = urlsplit(upload_url)
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise MaxApiError("MAX upload URL must be a valid HTTPS URL", code="invalid_upload_url")
+        try:
+            response = await self._upload_client.post(
+                upload_url,
+                files={"data": (filename, content, content_type)},
+            )
+        except httpx.HTTPError as exc:
+            raise self._transport_error(exc, operation="upload") from exc
         if response.is_error:
             raise MaxApiError(
                 f"MAX upload returned {response.status_code}", status_code=response.status_code
             )
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise MaxApiError(
+                "MAX upload returned invalid JSON", code="invalid_response"
+            ) from exc
         if not isinstance(data, dict):
             raise MaxApiError("MAX upload returned a non-object JSON response")
         return data
@@ -189,7 +212,10 @@ class MaxApiClient:
         )
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        response = await self._client.request(method, path, **kwargs)
+        try:
+            response = await self._client.request(method, path, **kwargs)
+        except httpx.HTTPError as exc:
+            raise self._transport_error(exc, operation="request") from exc
         if response.is_error:
             safe_body = response.text[:500]
             code = None
@@ -204,7 +230,24 @@ class MaxApiClient:
                 status_code=response.status_code,
                 code=code,
             )
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise MaxApiError("MAX API returned invalid JSON", code="invalid_response") from exc
         if not isinstance(data, dict):
             raise MaxApiError("MAX API returned a non-object JSON response")
         return data
+
+    @staticmethod
+    def _transport_error(exc: httpx.HTTPError, *, operation: str) -> MaxApiError:
+        if isinstance(exc, httpx.ConnectTimeout):
+            code = "connect_timeout"
+        elif isinstance(exc, httpx.ReadTimeout):
+            code = "read_timeout"
+        elif isinstance(exc, httpx.TimeoutException):
+            code = "timeout"
+        elif isinstance(exc, httpx.NetworkError):
+            code = "network_error"
+        else:
+            code = "transport_error"
+        return MaxApiError(f"MAX {operation} transport error: {exc}", code=code)

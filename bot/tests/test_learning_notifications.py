@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 
 from krit_bot.communication_models import CommunicationMessage, CommunicationThread
@@ -73,6 +74,55 @@ async def test_unavailable_recipient_is_not_added_to_dialog_history(tmp_path) ->
     await engine.dispose()
 
 
+async def test_read_timeout_moves_notification_from_processing_to_retry(tmp_path) -> None:
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'read-timeout.db'}")
+    await ensure_schema(engine)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(full_name="Получатель", phone="+79000000111", active=True)
+        session.add(person)
+        await session.flush()
+        session.add_all(
+            [
+                PersonMaxIdentity(
+                    person_id=person.id,
+                    verified_phone=person.phone,
+                    max_user_id=111,
+                ),
+                NotificationJob(
+                    dedupe_key="test:read-timeout",
+                    event_type="test",
+                    recipient_person_id=person.id,
+                    scheduled_at=utcnow() - timedelta(minutes=1),
+                    payload={"text": "Проверка таймаута"},
+                ),
+            ]
+        )
+        await session.commit()
+
+    class ReadTimeoutMax:
+        async def send_text(self, **_: Any) -> dict[str, Any]:
+            raise httpx.ReadTimeout("MAX did not respond")
+
+    worker = LearningNotificationWorker(
+        sessions=sessions,
+        api=ReadTimeoutMax(),  # type: ignore[arg-type]
+        max_attempts=2,
+    )
+    assert await worker.process_one() is True
+
+    async with sessions() as session:
+        job = await session.scalar(
+            select(NotificationJob).where(
+                NotificationJob.dedupe_key == "test:read-timeout"
+            )
+        )
+        assert job is not None
+        assert job.status == "retry"
+        assert job.last_error == "MAX did not respond"
+    await engine.dispose()
+
+
 async def test_notification_recovery_and_deduplicated_delivery(tmp_path) -> None:
     engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'notifications.db'}")
     await ensure_schema(engine)
@@ -98,6 +148,7 @@ async def test_notification_recovery_and_deduplicated_delivery(tmp_path) -> None
                     recipient_person_id=person.id,
                     scheduled_at=utcnow() - timedelta(minutes=1),
                     status="processing",
+                    last_attempt_at=utcnow() - timedelta(minutes=20),
                     payload={"text": "Проверка"},
                 ),
             ]
@@ -116,6 +167,41 @@ async def test_notification_recovery_and_deduplicated_delivery(tmp_path) -> None
         assert job is not None
         assert job.status == "sent"
         assert job.attempts == 1
+    await engine.dispose()
+
+
+async def test_notification_recovery_keeps_fresh_processing_job(tmp_path) -> None:
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'fresh-processing.db'}")
+    await ensure_schema(engine)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(full_name="Получатель", phone="+79000000110", active=True)
+        session.add(person)
+        await session.flush()
+        session.add(
+            NotificationJob(
+                dedupe_key="test:fresh-processing",
+                event_type="test",
+                recipient_person_id=person.id,
+                scheduled_at=utcnow() - timedelta(minutes=1),
+                status="processing",
+                last_attempt_at=utcnow(),
+                payload={"text": "Ещё выполняется"},
+            )
+        )
+        await session.commit()
+
+    worker = LearningNotificationWorker(sessions=sessions, api=FakeMax())  # type: ignore[arg-type]
+    await worker.recover_interrupted()
+
+    async with sessions() as session:
+        job = await session.scalar(
+            select(NotificationJob).where(
+                NotificationJob.dedupe_key == "test:fresh-processing"
+            )
+        )
+        assert job is not None
+        assert job.status == "processing"
     await engine.dispose()
 
 

@@ -340,11 +340,16 @@ class SyndicationWorker:
         await self._download.aclose()
 
     async def recover(self) -> None:
+        now = utcnow()
+        stale_before = now - timedelta(minutes=10)
         async with self.sessions() as session:
             await session.execute(
                 update(SyndicationJob)
-                .where(SyndicationJob.status == "processing")
-                .values(status="retry", next_attempt_at=utcnow(), updated_at=utcnow())
+                .where(
+                    SyndicationJob.status == "processing",
+                    SyndicationJob.updated_at < stale_before,
+                )
+                .values(status="retry", next_attempt_at=now, updated_at=now)
             )
             await session.commit()
 

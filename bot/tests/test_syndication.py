@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from sqlalchemy import select
 
-from krit_bot.db import SyndicationJob, build_engine, build_session_factory, ensure_schema
+from krit_bot.db import (
+    SyndicationJob,
+    build_engine,
+    build_session_factory,
+    ensure_schema,
+    utcnow,
+)
 from krit_bot.max_api import MaxApiError
 from krit_bot.syndication import (
     PreparedPost,
@@ -397,10 +403,27 @@ async def test_recover_processing_job_after_restart(sessions) -> None:
     async with sessions() as session:
         job = await session.get(SyndicationJob, job_id)
         job.status = "processing"
+        job.updated_at = utcnow() - timedelta(minutes=20)
         await session.commit()
     worker = _worker(sessions, FakeVk({"text": "x"}), FakeMax())
     await worker.recover()
     async with sessions() as session:
         job = await session.get(SyndicationJob, job_id)
         assert job.status == "retry"
+    await worker.close()
+
+
+@pytest.mark.asyncio
+async def test_recover_keeps_fresh_processing_job(sessions) -> None:
+    job_id = await _add_job(sessions)
+    async with sessions() as session:
+        job = await session.get(SyndicationJob, job_id)
+        job.status = "processing"
+        job.updated_at = utcnow()
+        await session.commit()
+    worker = _worker(sessions, FakeVk({"text": "x"}), FakeMax())
+    await worker.recover()
+    async with sessions() as session:
+        job = await session.get(SyndicationJob, job_id)
+        assert job.status == "processing"
     await worker.close()

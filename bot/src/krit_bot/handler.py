@@ -366,13 +366,16 @@ class EchoHandler:
             if not await claim_message(session, f"callback:{callback.callback_id}"):
                 return
             callback_message: dict[str, Any] = {"attachments": []}
-            person_id = await session.scalar(
-                select(PersonMaxIdentity.person_id).where(
-                    PersonMaxIdentity.max_user_id == callback.user_id
+            person_id = await self._authorized_callback_person_id(session, callback.user_id)
+            if person_id is None:
+                await session.commit()
+                await self._api.answer_callback(
+                    callback_id=callback.callback_id,
+                    notification="Доступ к боту отключён. Обратитесь к администратору.",
                 )
-            )
+                return
             request = await session.get(InteractionRequest, int(parts[1]))
-            if person_id is None or request is None or request.recipient_person_id != person_id:
+            if request is None or request.recipient_person_id != person_id:
                 await session.commit()
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
@@ -500,13 +503,16 @@ class EchoHandler:
         async with self._sessions() as session:
             if not await claim_message(session, f"callback:{callback.callback_id}"):
                 return
-            person_id = await session.scalar(
-                select(PersonMaxIdentity.person_id).where(
-                    PersonMaxIdentity.max_user_id == callback.user_id
+            person_id = await self._authorized_callback_person_id(session, callback.user_id)
+            if person_id is None:
+                await session.commit()
+                await self._api.answer_callback(
+                    callback_id=callback.callback_id,
+                    notification="Доступ к боту отключён. Обратитесь к администратору.",
                 )
-            )
+                return
             request = await session.get(InteractionRequest, request_id)
-            if person_id is None or request is None or request.recipient_person_id != person_id:
+            if request is None or request.recipient_person_id != person_id:
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
                     notification="Этот запрос предназначен другому получателю",
@@ -565,13 +571,16 @@ class EchoHandler:
         async with self._sessions() as session:
             if not await claim_message(session, f"callback:{callback.callback_id}"):
                 return
-            person_id = await session.scalar(
-                select(PersonMaxIdentity.person_id).where(
-                    PersonMaxIdentity.max_user_id == callback.user_id
+            person_id = await self._authorized_callback_person_id(session, callback.user_id)
+            if person_id is None:
+                await session.commit()
+                await self._api.answer_callback(
+                    callback_id=callback.callback_id,
+                    notification="Доступ к боту отключён. Обратитесь к администратору.",
                 )
-            )
+                return
             request = await session.get(InteractionRequest, request_id)
-            if person_id is None or request is None or request.recipient_person_id != person_id:
+            if request is None or request.recipient_person_id != person_id:
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
                     notification="Этот запрос предназначен другому получателю",
@@ -601,6 +610,21 @@ class EchoHandler:
                 else "Ответ сохранён без причины"
             ),
             message={"attachments": []},
+        )
+
+    @staticmethod
+    async def _authorized_callback_person_id(
+        session: AsyncSession, max_user_id: int
+    ) -> int | None:
+        return await session.scalar(
+            select(PersonMaxIdentity.person_id)
+            .join(Person, Person.id == PersonMaxIdentity.person_id)
+            .where(
+                PersonMaxIdentity.max_user_id == max_user_id,
+                Person.active.is_(True),
+                Person.bot_access_enabled.is_(True),
+                Person.archived_at.is_(None),
+            )
         )
 
     async def _handle_registration_callback(self, callback: IncomingCallback) -> None:

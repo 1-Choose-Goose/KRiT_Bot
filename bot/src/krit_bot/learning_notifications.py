@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 
+import httpx
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .db import Person, utcnow
@@ -57,11 +58,22 @@ class LearningNotificationWorker:
                 await asyncio.sleep(0.5)
 
     async def recover_interrupted(self) -> None:
+        now = utcnow()
+        stale_before = now - timedelta(minutes=10)
         async with self.sessions() as session:
             await session.execute(
                 update(NotificationJob)
-                .where(NotificationJob.status == "processing")
-                .values(status="retry", scheduled_at=utcnow(), updated_at=utcnow())
+                .where(
+                    NotificationJob.status == "processing",
+                    or_(
+                        NotificationJob.last_attempt_at < stale_before,
+                        and_(
+                            NotificationJob.last_attempt_at.is_(None),
+                            NotificationJob.updated_at < stale_before,
+                        ),
+                    ),
+                )
+                .values(status="retry", scheduled_at=now, updated_at=now)
             )
             await session.commit()
 
@@ -148,7 +160,7 @@ class LearningNotificationWorker:
             )
         try:
             result = await self.api.send_text(user_id=user_id, text=text, attachments=attachments)
-        except (MaxApiError, OSError, TimeoutError) as exc:
+        except (MaxApiError, httpx.TransportError, OSError, TimeoutError) as exc:
             async with self.sessions() as session:
                 job = await session.get(NotificationJob, job_id)
                 if job is None:

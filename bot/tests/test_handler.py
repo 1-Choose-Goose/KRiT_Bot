@@ -279,6 +279,66 @@ async def test_poll_button_with_root_user_saves_answer_and_acknowledges_callback
     await engine.dispose()
 
 
+async def test_disabled_person_cannot_answer_old_callback() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(
+            full_name="Иван Иванов",
+            phone="+79990000000",
+            role_links=[PersonRole(role="student")],
+            active=True,
+            bot_access_enabled=False,
+        )
+        session.add(person)
+        await session.flush()
+        session.add(
+            PersonMaxIdentity(
+                person_id=person.id,
+                verified_phone=person.phone,
+                max_user_id=42,
+            )
+        )
+        request = InteractionRequest(
+            request_type="yes_no",
+            question="Вы придёте?",
+            recipient_person_id=person.id,
+            recipient_context="student",
+            subject_person_id=person.id,
+        )
+        session.add(request)
+        await session.commit()
+        request_id = request.id
+    api = FakeApi()
+    handler = EchoHandler(sessions=sessions, api=api)  # type: ignore[arg-type]
+
+    await handler.handle(
+        callback_update_with_root_user(42, f"interaction:{request_id}:yes", "disabled")
+    )
+    await handler.handle(
+        callback_update_with_root_user(
+            42, f"interaction:{request_id}:partial", "disabled-partial"
+        )
+    )
+    await handler.handle(
+        callback_update_with_root_user(42, f"reason:{request_id}:skip", "disabled-reason")
+    )
+
+    async with sessions() as session:
+        assert await session.scalar(select(InteractionResponse)) is None
+    assert api.callback_answers[-3:] == [
+        (
+            callback_id,
+            "Доступ к боту отключён. Обратитесь к администратору.",
+            None,
+        )
+        for callback_id in ("disabled", "disabled-partial", "disabled-reason")
+    ]
+    await engine.dispose()
+
+
 async def test_duplicate_message_is_ignored() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
