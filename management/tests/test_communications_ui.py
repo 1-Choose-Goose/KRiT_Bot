@@ -5,7 +5,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QComboBox, QHeaderView, QLabel
+from PySide6.QtWidgets import QApplication, QComboBox, QHeaderView, QLabel, QPushButton
 
 from krit_management.communications_page import (
     PERSON_SEARCH_ROLE,
@@ -16,12 +16,21 @@ from krit_management.widgets import SearchableComboBox
 
 
 class FakeApi:
-    pass
+    def __init__(self) -> None:
+        self.saved_rules: list[dict] | None = None
+
+    def communication_campaigns(self) -> list[dict]:
+        return []
+
+    def save_communication_global_settings(self, payload: list[dict]) -> list[dict]:
+        self.saved_rules = payload
+        return payload
 
 
 def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> None:
     app = QApplication.instance() or QApplication([])
-    page = CommunicationsPage(FakeApi())  # type: ignore[arg-type]
+    api = FakeApi()
+    page = CommunicationsPage(api)  # type: ignore[arg-type]
     page.resize(1100, 760)
     page.show()
     app.processEvents()
@@ -32,6 +41,15 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
         "Подтверждения",
         "Настройки",
     ]
+    assert page.open_schedule_button.text() == "Публикация расписания…"
+    assert page.schedule_dialog.windowTitle() == "Публикация расписания — КРиТ"
+    assert page.campaigns.window() is page.schedule_dialog
+    assert not page.schedule_dialog.isVisible()
+    page._run = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    page.open_schedule_publication()
+    app.processEvents()
+    assert page.schedule_dialog.isVisible()
+    page.schedule_dialog.hide()
     page.people = [
         {
             "id": 1,
@@ -124,7 +142,6 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     assert dialog_widget.findChild(QLabel, "dialogPreview").text() == "Расписание занятий"
     assert dialog_widget.findChild(QLabel, "dialogTime").text()
     assert dialog_widget.findChild(QLabel, "unreadBadge").text() == "3"
-    page._run = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     page._dialog_selected(dialog_item)
     assert dialog_item.data(Qt.ItemDataRole.UserRole + 2) == 0
     assert page.dialogs.itemWidget(dialog_item).findChild(QLabel, "unreadBadge") is None
@@ -145,6 +162,29 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
             }
         ]
     )
+    assert page.settings_mode_general.text() == "Общие правила"
+    assert page.settings_mode_person.text() == "Персональные исключения"
+    assert page.settings_mode_pages.currentIndex() == 0
+    assert page.settings_events.currentItem().data(Qt.ItemDataRole.UserRole) == (
+        "lesson_confirmation_request"
+    )
+    assert page.settings_editor_title.text() == "Подтверждение посещения"
+    assert page.settings_role_controls["student"]["enabled"].isChecked()
+    assert page.settings_role_controls["student"]["priority"].currentText() == "Обычный"
+    assert page.settings_role_controls["student"]["offset"].text() == "1440"
+    page.settings_mode_person.click()
+    assert page.settings_mode_pages.currentIndex() == 1
+    assert not page.person_empty_state.isHidden()
+    page.settings_mode_general.click()
+    assert page.settings_mode_pages.currentIndex() == 0
+    page.settings_role_controls["student"]["offset"].setText("60")
+    page.settings_role_controls["student"]["quiet_start"].setText("21:30")
+    page._run = lambda fn, _done=None: fn()  # type: ignore[method-assign]
+    page.save_settings()
+    assert api.saved_rules is not None
+    assert api.saved_rules[0]["offset_minutes"] == 60
+    assert api.saved_rules[0]["quiet_start"] == "21:30"
+    assert api.saved_rules[0]["configuration"]["follow_up"] == "once"
     assert page.settings.columnCount() == 9
     assert page.settings.cellWidget(0, 7).currentData() == "once"
     assert page.settings.item(0, 8).text() == "180"
@@ -172,8 +212,30 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     )
     assert page.campaigns.item(0, 1).text() == "Сообщение"
     assert page.campaigns.item(0, 3).text() == "Завершена"
-    assert page.campaigns.item(0, 4).text() == "доставлено: 2, ошибка: 1"
+    assert page.campaigns.item(0, 4).text() == "Доставлено: 2, Ошибка: 1"
     assert page.campaigns.rowHeight(0) >= 44
+    assert page.campaigns.columnWidth(1) == 190
+    assert page.campaigns.columnWidth(3) == 175
+    retry_container = page.campaigns.cellWidget(0, 5)
+    retry_button = retry_container.findChild(QPushButton)
+    assert retry_button.text() == "Повторить"
+    assert "ошибкой" in retry_button.toolTip()
+    page._campaigns_loaded(
+        [
+            {
+                "id": 2,
+                "created_at": "2026-10-01T10:00:00",
+                "type": "schedule_change",
+                "title": "Расписание 01.10–08.10.2026",
+                "status": "partial",
+                "counts": {"cancelled": 10, "sent": 1},
+            }
+        ]
+    )
+    assert page.campaigns.item(0, 1).text() == "Изменения расписания"
+    assert page.campaigns.item(0, 3).text() == "Выполнена частично"
+    assert page.campaigns.item(0, 4).text() == "Доставлено: 1, Отменено: 10"
+    assert page.campaigns.cellWidget(0, 5) is None
     page.confirmation_rows = [
         {
             "student_name": "Алексеева Анна",
@@ -190,6 +252,33 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     page._render_confirmations()
     assert page.confirmations.item(0, 3).text() == "Да"
     assert page.confirmations.item(0, 4).text() == "Нет"
+    assert page.confirmations.item(0, 2).text() == "Отправлен"
+    assert page.confirmations.item(0, 5).text() == "Ответы расходятся"
+    assert page.confirmations.item(0, 5).toolTip() == "Ответы расходятся"
+    confirmations_header = page.confirmations.horizontalHeader()
+    assert confirmations_header.sectionResizeMode(0) == QHeaderView.ResizeMode.Stretch
+    assert confirmations_header.sectionResizeMode(1) == QHeaderView.ResizeMode.Stretch
+    assert confirmations_header.sectionResizeMode(5) == QHeaderView.ResizeMode.Stretch
+    assert page.confirmations.columnWidth(2) == 105
+    assert page.confirmations.columnWidth(3) == 125
+    assert page.confirmations.rowHeight(0) >= 42
+    page.confirmation_rows = [
+        {
+            "student_name": "Волкова Алиса Дмитриевна",
+            "lesson": "02.10 · 10:30 · Информатика",
+            "request_sent": False,
+            "student_answer": None,
+            "guardian_answer": None,
+            "status": "pending",
+            "reason": None,
+            "max_available": False,
+            "needs_attention": True,
+        }
+    ]
+    page._render_confirmations()
+    assert page.confirmations.item(0, 2).text() == "Не отправлен"
+    assert page.confirmations.item(0, 5).text() == "Запрос недоступен"
+    assert page.confirmations.item(0, 6).text() == "Пользователь не подключён к MAX"
     page._settings_people_loaded(
         [
             {

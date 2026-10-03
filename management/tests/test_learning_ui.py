@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QDate, QPoint, QPointF, QSizeF, Qt
+from PySide6.QtCore import QDate, QDateTime, QPoint, QPointF, QSizeF, Qt, QTime
 from PySide6.QtGui import QPageLayout, QPdfWriter, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -794,6 +794,7 @@ def test_group_defaults_fill_new_lesson_without_changing_override_support() -> N
         "students": [],
     }
     dialog = LessonDialog(references)
+    dialog.start.setDateTime(QDateTime(QDate(2026, 10, 1), QTime(10, 0)))
     dialog.group.setCurrentIndex(dialog.group.findData(4))
     app.processEvents()
 
