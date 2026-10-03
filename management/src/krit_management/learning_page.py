@@ -67,6 +67,27 @@ ATTENDANCE_LABELS = {
 }
 
 
+def _lesson_requires_reconciliation(
+    lesson: dict[str, Any], *, current_time: datetime | None = None
+) -> bool:
+    if lesson.get("status") not in {"planned", "scheduled", "in_progress"}:
+        return False
+    end_at = lesson.get("end_at")
+    if not end_at:
+        return False
+    try:
+        return parse_center(end_at) <= (current_time or now_center())
+    except (TypeError, ValueError):
+        return False
+
+
+def _lesson_status_label(lesson: dict[str, Any]) -> str:
+    if _lesson_requires_reconciliation(lesson):
+        return "Требует уточнения"
+    status = str(lesson.get("status", ""))
+    return STATUS_LABELS.get(status, status)
+
+
 def _participant_counts(lesson: dict[str, Any]) -> tuple[int, int]:
     participants = lesson.get("participants")
     participant_rows = participants if isinstance(participants, list) else []
@@ -1498,6 +1519,14 @@ class LearningPage(QWidget):
         self.delete_calendar_button.setEnabled(False)
         self.delete_calendar_button.setToolTip("Сначала выберите занятие в таблице")
         actions.addWidget(self.delete_calendar_button)
+        self.reconcile_calendar_button = _button(
+            "Уточнить статус", self._reconcile_calendar_selected
+        )
+        self.reconcile_calendar_button.setEnabled(False)
+        self.reconcile_calendar_button.setToolTip(
+            "Доступно для занятия, плановое время которого уже прошло"
+        )
+        actions.addWidget(self.reconcile_calendar_button)
         actions.addStretch(1)
         actions.addWidget(_button("Предпросмотр", self.preview_calendar))
         actions.addWidget(_button("Сохранить PDF", self.save_calendar_pdf))
@@ -1506,7 +1535,7 @@ class LearningPage(QWidget):
         self.calendar_table = _table(
             ["Время", "Предмет", "Учитель", "Кабинет", "Участников", "Статус"],
             stretch=(1, 2, 3),
-            fixed={0: 125, 4: 105, 5: 130},
+            fixed={0: 125, 4: 105, 5: 165},
         )
         self.calendar_table.doubleClicked.connect(self._edit_calendar_selected)
         self.calendar_table.itemSelectionChanged.connect(self._calendar_selection_changed)
@@ -1795,14 +1824,24 @@ class LearningPage(QWidget):
                 lesson.get("teacher_name_snapshot", ""),
                 lesson.get("room_name_snapshot", ""),
                 _participant_summary(lesson),
-                STATUS_LABELS.get(lesson.get("status"), lesson.get("status", "")),
+                _lesson_status_label(lesson),
             ]
             for column, value in enumerate(values):
                 self.today_lessons.setItem(row, column, QTableWidgetItem(str(value)))
             actions = QWidget()
             bar = QHBoxLayout(actions)
             bar.setContentsMargins(2, 2, 2, 2)
-            if lesson.get("status") in {"planned", "scheduled"}:
+            if _lesson_requires_reconciliation(lesson):
+                bar.addWidget(
+                    _button(
+                        "Уточнить",
+                        lambda checked=False, item=lesson: self.reconcile_lesson(item),
+                        "primary",
+                        compact=True,
+                    ),
+                    1,
+                )
+            elif lesson.get("status") in {"planned", "scheduled"}:
                 start_button = _button(
                     "Начать",
                     lambda checked=False, item=lesson: self.lesson_action(item, "start"),
@@ -1928,7 +1967,7 @@ class LearningPage(QWidget):
                 lesson.get("teacher_name_snapshot", ""),
                 lesson.get("room_name_snapshot", ""),
                 _participant_details(lesson),
-                STATUS_LABELS.get(lesson.get("status"), lesson.get("status", "")),
+                _lesson_status_label(lesson),
             ]
             for column, value in enumerate(values):
                 self.calendar_table.setItem(row, column, QTableWidgetItem(str(value)))
@@ -1937,13 +1976,80 @@ class LearningPage(QWidget):
     def _calendar_selection_changed(self) -> None:
         row = self.calendar_table.currentRow()
         lesson = self.calendar_lessons[row] if 0 <= row < len(self.calendar_lessons) else None
-        planned = bool(lesson and lesson.get("status") in {"planned", "scheduled"})
+        requires_reconciliation = bool(lesson and _lesson_requires_reconciliation(lesson))
+        planned = bool(
+            lesson
+            and lesson.get("status") in {"planned", "scheduled"}
+            and not requires_reconciliation
+        )
         self.delete_calendar_button.setEnabled(planned)
         self.delete_calendar_button.setToolTip(
             "Удалить выбранное занятие из расписания"
             if planned
             else "Выберите запланированное занятие в таблице"
         )
+        self.reconcile_calendar_button.setEnabled(requires_reconciliation)
+        self.reconcile_calendar_button.setToolTip(
+            "Уточнить, состоялось ли выбранное занятие"
+            if requires_reconciliation
+            else "Выберите занятие с истёкшим плановым временем"
+        )
+
+    def _reconcile_calendar_selected(self) -> None:
+        row = self.calendar_table.currentRow()
+        if 0 <= row < len(self.calendar_lessons):
+            self.reconcile_lesson(self.calendar_lessons[row])
+
+    def reconcile_lesson(self, lesson: dict[str, Any]) -> None:
+        if not _lesson_requires_reconciliation(lesson):
+            return
+        payload = self._choose_reconciliation(lesson)
+        if payload is None:
+            return
+        self._run(
+            self.api.reconcile_lesson,
+            int(lesson["id"]),
+            payload,
+            done=self._action_done,
+        )
+
+    def _choose_reconciliation(self, lesson: dict[str, Any]) -> dict[str, str] | None:
+        start = parse_center(lesson["start_at"])
+        end = parse_center(lesson["end_at"])
+        choice = QMessageBox(self)
+        choice.setIcon(QMessageBox.Icon.Question)
+        choice.setWindowTitle("Уточнение статуса занятия")
+        choice.setText(
+            f"{lesson.get('subject_name_snapshot', 'Занятие')} · "
+            f"{start:%d.%m.%Y %H:%M}–{end:%H:%M}"
+        )
+        choice.setInformativeText(
+            "Если занятие состоялось, фактическим временем будет указано плановое. "
+            "Посещаемость без отметок останется на проверку в карточке занятия."
+        )
+        held_button = choice.addButton(
+            "Проведено по расписанию", QMessageBox.ButtonRole.AcceptRole
+        )
+        not_held_button = choice.addButton(
+            "Не проводилось", QMessageBox.ButtonRole.DestructiveRole
+        )
+        choice.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        choice.exec()
+        if choice.clickedButton() == held_button:
+            return {
+                "outcome": "held",
+                "reason": "Администратор внёс отметку после занятия",
+            }
+        if choice.clickedButton() != not_held_button:
+            return None
+        reason, accepted = QInputDialog.getText(
+            self,
+            "Занятие не проводилось",
+            "Укажите причину:",
+        )
+        if not accepted or len(reason.strip()) < 3:
+            return None
+        return {"outcome": "not_held", "reason": reason.strip()}
 
     def _delete_calendar_selected(self) -> None:
         row = self.calendar_table.currentRow()
@@ -1985,7 +2091,11 @@ class LearningPage(QWidget):
     def _edit_calendar_selected(self, _index: object = None) -> None:
         row = self.calendar_table.currentRow()
         if 0 <= row < len(self.calendar_lessons):
-            self.edit_lesson(self.calendar_lessons[row])
+            lesson = self.calendar_lessons[row]
+            if _lesson_requires_reconciliation(lesson):
+                self.reconcile_lesson(lesson)
+            else:
+                self.edit_lesson(lesson)
 
     def add_lesson(self) -> None:
         dialog = LessonDialog(self.references, parent=self)

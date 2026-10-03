@@ -348,6 +348,11 @@ class ManagementApi:
     ) -> dict[str, Any]:
         return self._request("POST", f"/learning/lessons/{lesson_id}/{action}", json=payload or {})
 
+    def reconcile_lesson(self, lesson_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request(
+            "POST", f"/learning/lessons/{lesson_id}/reconcile", json=payload
+        )
+
     def presence_action(self, person_id: int, action: str) -> dict[str, Any]:
         return self._request("POST", f"/learning/presence/{person_id}/{action}")
 

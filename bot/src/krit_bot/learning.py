@@ -164,6 +164,11 @@ class ActualTimeCorrectionPayload(BaseModel):
         return self
 
 
+class LessonReconciliationPayload(BaseModel):
+    outcome: Literal["held", "not_held"]
+    reason: str = Field(min_length=3, max_length=500)
+
+
 def _aware(value: datetime) -> datetime:
     if value.tzinfo is None:
         raise HTTPException(422, "Дата и время должны содержать часовой пояс")
@@ -2240,6 +2245,139 @@ def create_learning_router(
             )
             await session.commit()
             return _lesson_view(item, participants, await _teacher_segments(session, item.id))
+
+    @router.post("/lessons/{lesson_id}/reconcile")
+    async def reconcile_lesson(
+        lesson_id: int,
+        payload: LessonReconciliationPayload,
+        admin_id: int = Depends(require_management_token),
+    ) -> dict[str, Any]:
+        """Resolve a lesson whose planned end passed without a complete workflow.
+
+        Retrospective correction must not infer attendance or send stale state
+        notifications to participants.
+        """
+        async with sessions() as session:
+            item = await session.get(Lesson, lesson_id, with_for_update=True)
+            if item is None:
+                raise HTTPException(404)
+            if item.status not in {"planned", "scheduled", "in_progress"}:
+                raise HTTPException(409, "Статус этого занятия уже уточнён")
+            if _db_utc(item.end_at) > utcnow():
+                raise HTTPException(409, "Статус уточняется только после окончания занятия")
+
+            participants = list(
+                (
+                    await session.scalars(
+                        select(LessonParticipant).where(
+                            LessonParticipant.lesson_id == lesson_id
+                        )
+                    )
+                ).all()
+            )
+            previous_status = item.status
+            correction_time = utcnow()
+            segments = await _teacher_segments(session, item.id)
+            if payload.outcome == "held":
+                actual_start = _db_utc(item.start_at)
+                actual_end = _db_utc(item.end_at)
+                item.status = "completed"
+                item.actual_start_at = actual_start
+                item.actual_end_at = actual_end
+                item.cancelled_reason = None
+                item.completion_type = "normal"
+                item.completion_reason = payload.reason.strip()
+                item.completion_public_comment = None
+                for participant in participants:
+                    if participant.attendance_status in {"present", "late"}:
+                        if participant.arrived_at is not None and _db_utc(
+                            participant.arrived_at
+                        ) <= actual_end:
+                            participant.left_at = actual_end
+                        else:
+                            apply_attendance_state(participant, "expected")
+                if not segments:
+                    session.add(
+                        LessonTeacherSegment(
+                            lesson_id=item.id,
+                            teacher_person_id=item.teacher_id,
+                            teacher_name_snapshot=item.teacher_name_snapshot,
+                            started_at=actual_start,
+                            ended_at=actual_end,
+                            segment_type="primary",
+                            created_by_admin_id=admin_id,
+                        )
+                    )
+                else:
+                    for segment in segments:
+                        segment.started_at = min(
+                            max(_db_utc(segment.started_at), actual_start), actual_end
+                        )
+                        if segment.ended_at is None:
+                            segment.ended_at = actual_end
+                        else:
+                            segment.ended_at = min(
+                                max(_db_utc(segment.ended_at), _db_utc(segment.started_at)),
+                                actual_end,
+                            )
+                    segments[0].started_at = actual_start
+                    segments[-1].ended_at = actual_end
+                action = "lesson.reconciled_held"
+            else:
+                item.status = "cancelled"
+                item.cancelled_reason = payload.reason.strip()
+                item.actual_start_at = None
+                item.actual_end_at = None
+                item.completion_type = None
+                item.completion_reason = None
+                item.completion_public_comment = None
+                item.notification_revision += 1
+                for participant in participants:
+                    if participant.attendance_status != "excused":
+                        apply_attendance_state(participant, "expected")
+                if segments:
+                    await session.execute(
+                        delete(LessonTeacherSegment).where(
+                            LessonTeacherSegment.lesson_id == item.id
+                        )
+                    )
+                    segments = []
+                action = "lesson.reconciled_not_held"
+
+            item.updated_at = correction_time
+            for suffix in ("not_started", "not_finished", "no_active_students"):
+                await _resolve_admin_condition(session, f"lesson:{item.id}:{suffix}")
+            await session.execute(
+                NotificationJob.__table__.update()
+                .where(
+                    NotificationJob.lesson_id == item.id,
+                    NotificationJob.status.in_(["pending", "retry"]),
+                )
+                .values(status="cancelled")
+            )
+            session.add(
+                AuditEvent(
+                    actor_admin_id=admin_id,
+                    action=action,
+                    entity_type="lesson",
+                    entity_id=item.id,
+                    details={
+                        "before_status": previous_status,
+                        "outcome": payload.outcome,
+                        "reason": payload.reason.strip(),
+                        "attendance_requires_review": sum(
+                            participant.attendance_status == "expected"
+                            for participant in participants
+                        ),
+                    },
+                )
+            )
+            await session.commit()
+            return _lesson_view(
+                item,
+                participants,
+                await _teacher_segments(session, item.id),
+            )
 
     @router.post("/lessons/{lesson_id}/finish-early")
     async def finish_lesson_early(

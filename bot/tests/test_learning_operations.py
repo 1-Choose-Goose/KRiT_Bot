@@ -313,6 +313,113 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
             assert preserved_history["teacher_name_snapshot"] == "Иванов Иван Иванович"
 
             overdue_start = datetime.now(UTC) - timedelta(hours=2)
+            forgotten_start = overdue_start - timedelta(days=1)
+            forgotten_lesson = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **payload,
+                    "start_at": forgotten_start.isoformat(),
+                    "end_at": (forgotten_start + timedelta(hours=1)).isoformat(),
+                    "participant_ids": [absent],
+                },
+            )
+            assert forgotten_lesson.status_code == 201, forgotten_lesson.text
+            reconciled = await client.post(
+                f"/api/v1/learning/lessons/{forgotten_lesson.json()['id']}/reconcile",
+                headers=headers,
+                json={
+                    "outcome": "held",
+                    "reason": "Администратор внёс отметку после занятия",
+                },
+            )
+            assert reconciled.status_code == 200, reconciled.text
+            assert reconciled.json()["status"] == "completed"
+            assert datetime.fromisoformat(
+                reconciled.json()["actual_start_at"]
+            ) == forgotten_start
+            assert datetime.fromisoformat(reconciled.json()["actual_end_at"]) == (
+                forgotten_start + timedelta(hours=1)
+            )
+            assert reconciled.json()["participants"][0]["attendance_status"] == "expected"
+            assert len(reconciled.json()["teacher_segments"]) == 1
+            assert datetime.fromisoformat(
+                reconciled.json()["teacher_segments"][0]["ended_at"]
+            ).replace(tzinfo=UTC) == (forgotten_start + timedelta(hours=1))
+            repeated_reconciliation = await client.post(
+                f"/api/v1/learning/lessons/{forgotten_lesson.json()['id']}/reconcile",
+                headers=headers,
+                json={"outcome": "held", "reason": "Повторная отметка"},
+            )
+            assert repeated_reconciliation.status_code == 409
+
+            forgotten_cancelled = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **payload,
+                    "teacher_id": substitute,
+                    "room_id": room_two,
+                    "start_at": forgotten_start.isoformat(),
+                    "end_at": (forgotten_start + timedelta(hours=1)).isoformat(),
+                    "participant_ids": [],
+                },
+            )
+            assert forgotten_cancelled.status_code == 201, forgotten_cancelled.text
+            not_held = await client.post(
+                f"/api/v1/learning/lessons/{forgotten_cancelled.json()['id']}/reconcile",
+                headers=headers,
+                json={"outcome": "not_held", "reason": "Занятие не проводилось"},
+            )
+            assert not_held.status_code == 200, not_held.text
+            assert not_held.json()["status"] == "cancelled"
+            assert not_held.json()["cancelled_reason"] == "Занятие не проводилось"
+
+            forgotten_in_progress_start = forgotten_start - timedelta(hours=2)
+            forgotten_in_progress = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **payload,
+                    "start_at": forgotten_in_progress_start.isoformat(),
+                    "end_at": (
+                        forgotten_in_progress_start + timedelta(hours=1)
+                    ).isoformat(),
+                    "participant_ids": [],
+                },
+            )
+            assert forgotten_in_progress.status_code == 201, forgotten_in_progress.text
+            assert (
+                await client.post(
+                    f"/api/v1/learning/lessons/{forgotten_in_progress.json()['id']}/start",
+                    headers=headers,
+                )
+            ).status_code == 200
+            reconciled_in_progress = await client.post(
+                f"/api/v1/learning/lessons/{forgotten_in_progress.json()['id']}/reconcile",
+                headers=headers,
+                json={
+                    "outcome": "held",
+                    "reason": "Окончание внесено после занятия",
+                },
+            )
+            assert reconciled_in_progress.status_code == 200, reconciled_in_progress.text
+            assert reconciled_in_progress.json()["status"] == "completed"
+            reconciled_segment = reconciled_in_progress.json()["teacher_segments"][0]
+            assert datetime.fromisoformat(reconciled_segment["started_at"]).replace(
+                tzinfo=UTC
+            ) == forgotten_in_progress_start
+            assert datetime.fromisoformat(reconciled_segment["ended_at"]).replace(
+                tzinfo=UTC
+            ) == (forgotten_in_progress_start + timedelta(hours=1))
+
+            future_reconciliation = await client.post(
+                f"/api/v1/learning/lessons/{lesson_id}/reconcile",
+                headers=headers,
+                json={"outcome": "held", "reason": "Слишком ранняя отметка"},
+            )
+            assert future_reconciliation.status_code == 409
+
             overdue = await client.post(
                 "/api/v1/learning/lessons",
                 headers=headers,

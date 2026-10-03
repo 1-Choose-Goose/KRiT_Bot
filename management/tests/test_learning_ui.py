@@ -64,6 +64,11 @@ class FakeApi:
     ) -> dict[str, object]:
         return {"id": lesson_id, "action": action, "payload": payload or {}}
 
+    def reconcile_lesson(
+        self, lesson_id: int, payload: dict[str, object]
+    ) -> dict[str, object]:
+        return {"id": lesson_id, "payload": payload}
+
     def close(self) -> None:
         pass
 
@@ -303,8 +308,8 @@ def test_today_action_buttons_are_compact_and_share_available_width() -> None:
             "lessons": [
                 {
                     "id": 1,
-                    "start_at": "2026-09-30T10:30:00+05:00",
-                    "end_at": "2026-09-30T11:30:00+05:00",
+                    "start_at": "2099-09-30T10:30:00+05:00",
+                    "end_at": "2099-09-30T11:30:00+05:00",
                     "subject_name_snapshot": "Информатика",
                     "teacher_name_snapshot": "Быков Валерий Андреевич",
                     "room_name_snapshot": "Кабинет №1",
@@ -360,6 +365,56 @@ def test_calendar_can_remove_selected_planned_lesson(monkeypatch) -> None:
 
     assert calls == [(17, "cancel", {"reason": "Удалено администратором"})]
     page.shutdown()
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_overdue_calendar_lesson_requires_explicit_reconciliation(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.shutdown()
+    app.processEvents()
+    lesson = {
+        "id": 19,
+        "start_at": "2020-09-30T10:30:00+05:00",
+        "end_at": "2020-09-30T11:30:00+05:00",
+        "subject_name_snapshot": "Информатика",
+        "teacher_name_snapshot": "Быков Валерий Андреевич",
+        "room_name_snapshot": "Кабинет №1",
+        "participants": [],
+        "status": "planned",
+    }
+    page._calendar_loaded([lesson])
+    page.calendar_table.selectRow(0)
+    app.processEvents()
+
+    assert page.calendar_table.item(0, 5).text() == "Требует уточнения"
+    assert page.reconcile_calendar_button.isEnabled()
+    assert not page.delete_calendar_button.isEnabled()
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        page,
+        "_choose_reconciliation",
+        lambda _lesson: {
+            "outcome": "held",
+            "reason": "Администратор внёс отметку после занятия",
+        },
+    )
+    monkeypatch.setattr(
+        page,
+        "_run",
+        lambda _fn, *args, **_kwargs: calls.append(args[1]),
+    )
+    page._reconcile_calendar_selected()
+
+    assert calls == [
+        {
+            "outcome": "held",
+            "reason": "Администратор внёс отметку после занятия",
+        }
+    ]
     page.deleteLater()
     app.processEvents()
 
