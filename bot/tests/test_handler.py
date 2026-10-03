@@ -24,7 +24,7 @@ class FakeApi:
         self.sent: list[tuple[int, str]] = []
         self.contact_requests: list[int] = []
         self.members: set[int] = set()
-        self.callback_answers: list[tuple[str, str]] = []
+        self.callback_answers: list[tuple[str, str, dict | None]] = []
 
     async def send_text(self, *, user_id: int, text: str, attachments=None) -> dict:
         self.sent.append((user_id, text))
@@ -44,8 +44,10 @@ class FakeApi:
             ]
         }
 
-    async def answer_callback(self, *, callback_id: str, notification: str) -> dict:
-        self.callback_answers.append((callback_id, notification))
+    async def answer_callback(
+        self, *, callback_id: str, notification: str, message: dict | None = None
+    ) -> dict:
+        self.callback_answers.append((callback_id, notification, message))
         return {}
 
 
@@ -269,7 +271,11 @@ async def test_poll_button_with_root_user_saves_answer_and_acknowledges_callback
         assert response is not None and response.answer == "yes"
         assert message is not None and message.message_type == "interaction_callback"
         assert thread is not None and thread.admin_unread_count == 0
-    assert api.callback_answers[-1] == ("poll-yes", "Ответ сохранён")
+    assert api.callback_answers[-1] == (
+        "poll-yes",
+        "Ответ сохранён",
+        {"attachments": []},
+    )
     await engine.dispose()
 
 
@@ -373,7 +379,7 @@ async def test_registration_waits_for_required_channel_membership() -> None:
     assert "подпишитесь на канал" in api.sent[-1][1]
 
     await handler.handle(callback_update(42, "registration:check", "cb-missing"))
-    assert api.callback_answers[-1] == ("cb-missing", "Подписка пока не найдена")
+    assert api.callback_answers[-1] == ("cb-missing", "Подписка пока не найдена", None)
 
     api.members.add(42)
     await handler.handle(callback_update(42, "registration:check", "cb-member"))
@@ -384,7 +390,7 @@ async def test_registration_waits_for_required_channel_membership() -> None:
         assert identity.max_user_id == 42
         assert identity.channel_subscription_status == "member"
         assert pending is not None and pending.status == "completed"
-    assert api.callback_answers[-1] == ("cb-member", "Регистрация завершена")
+    assert api.callback_answers[-1] == ("cb-member", "Регистрация завершена", None)
     await engine.dispose()
 
 

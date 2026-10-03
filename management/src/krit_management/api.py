@@ -544,6 +544,30 @@ class ManagementApi:
         )
         return data if isinstance(data, list) else []
 
+    def lesson_confirmations(self, lesson_id: int) -> dict[str, Any]:
+        data = self._request("GET", f"/communications/lessons/{lesson_id}/confirmations")
+        return data if isinstance(data, dict) else {}
+
+    def resend_lesson_confirmation(
+        self, lesson_id: int, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            f"/communications/lessons/{lesson_id}/confirmations/resend",
+            json=payload,
+        )
+        return data if isinstance(data, dict) else {}
+
+    def confirm_lesson_by_admin(
+        self, lesson_id: int, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            f"/communications/lessons/{lesson_id}/confirmations/confirm-by-admin",
+            json=payload,
+        )
+        return data if isinstance(data, dict) else {}
+
     def communication_global_settings(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/communications/settings/global")
         return data if isinstance(data, list) else []

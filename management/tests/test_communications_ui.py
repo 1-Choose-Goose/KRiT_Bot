@@ -38,7 +38,7 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     assert [page.tabs.tabText(index) for index in range(page.tabs.count())] == [
         "Отправить",
         "Диалоги",
-        "Подтверждения",
+        "Опросы",
         "Настройки",
     ]
     assert page.open_schedule_button.text() == "Публикация расписания…"
@@ -238,47 +238,27 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     assert page.campaigns.cellWidget(0, 5) is None
     page.confirmation_rows = [
         {
-            "student_name": "Алексеева Анна",
-            "lesson": "01.10 · 10:00 · Математика",
-            "request_sent": True,
-            "student_answer": "yes",
-            "guardian_answer": "no",
-            "status": "conflict",
-            "reason": "—",
-            "max_available": True,
-            "needs_attention": True,
+            "id": 3,
+            "created_at": "2026-10-01T10:00:00+05:00",
+            "title": "Ты придёшь?",
+            "status": "completed",
+            "poll": {"yes": 4, "no": 1, "no_response": 2},
         }
     ]
     page._render_confirmations()
-    assert page.confirmations.item(0, 3).text() == "Да"
-    assert page.confirmations.item(0, 4).text() == "Нет"
-    assert page.confirmations.item(0, 2).text() == "Отправлен"
-    assert page.confirmations.item(0, 5).text() == "Ответы расходятся"
-    assert page.confirmations.item(0, 5).toolTip() == "Ответы расходятся"
+    assert page.confirmations.item(0, 1).text() == "Ты придёшь?"
+    assert page.confirmations.item(0, 2).text() == "Завершена"
+    assert page.confirmations.item(0, 3).text() == "4"
+    assert page.confirmations.item(0, 4).text() == "1"
+    assert page.confirmations.item(0, 5).text() == "2"
+    assert page.confirmations.item(0, 0).data(Qt.ItemDataRole.UserRole) == 3
     confirmations_header = page.confirmations.horizontalHeader()
-    assert confirmations_header.sectionResizeMode(0) == QHeaderView.ResizeMode.Stretch
+    assert confirmations_header.sectionResizeMode(0) == QHeaderView.ResizeMode.Fixed
     assert confirmations_header.sectionResizeMode(1) == QHeaderView.ResizeMode.Stretch
-    assert confirmations_header.sectionResizeMode(5) == QHeaderView.ResizeMode.Stretch
-    assert page.confirmations.columnWidth(2) == 105
-    assert page.confirmations.columnWidth(3) == 125
+    assert confirmations_header.sectionResizeMode(5) == QHeaderView.ResizeMode.Fixed
+    assert page.confirmations.columnWidth(2) == 150
+    assert page.confirmations.columnWidth(3) == 90
     assert page.confirmations.rowHeight(0) >= 42
-    page.confirmation_rows = [
-        {
-            "student_name": "Волкова Алиса Дмитриевна",
-            "lesson": "02.10 · 10:30 · Информатика",
-            "request_sent": False,
-            "student_answer": None,
-            "guardian_answer": None,
-            "status": "pending",
-            "reason": None,
-            "max_available": False,
-            "needs_attention": True,
-        }
-    ]
-    page._render_confirmations()
-    assert page.confirmations.item(0, 2).text() == "Не отправлен"
-    assert page.confirmations.item(0, 5).text() == "Запрос недоступен"
-    assert page.confirmations.item(0, 6).text() == "Пользователь не подключён к MAX"
     page._settings_people_loaded(
         [
             {

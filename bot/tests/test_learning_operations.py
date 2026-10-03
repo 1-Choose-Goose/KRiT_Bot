@@ -577,7 +577,7 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
             "AND event_type = 'lesson_reminder'",
             (future.json()["id"], teacher),
         ).fetchone()[0]
-        assert teacher_reminders == 3
+        assert teacher_reminders == 2
         absent_notifications = connection.execute(
             "SELECT COUNT(*) FROM learning_notification_jobs "
             "WHERE lesson_id = ? AND recipient_person_id = ? "

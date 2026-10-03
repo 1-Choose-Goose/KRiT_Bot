@@ -365,6 +365,7 @@ class EchoHandler:
         async with self._sessions() as session:
             if not await claim_message(session, f"callback:{callback.callback_id}"):
                 return
+            callback_message: dict[str, Any] = {"attachments": []}
             person_id = await session.scalar(
                 select(PersonMaxIdentity.person_id).where(
                     PersonMaxIdentity.max_user_id == callback.user_id
@@ -402,6 +403,47 @@ class EchoHandler:
                     answer="partial" if lesson_answer else answer,
                     lesson_answers=lesson_answers,
                 )
+                if lesson_answer and lesson_answers is not None:
+                    remaining = (
+                        await session.execute(
+                            select(InteractionRequestLesson.lesson_id, Lesson)
+                            .join(Lesson, Lesson.id == InteractionRequestLesson.lesson_id)
+                            .where(InteractionRequestLesson.request_id == request.id)
+                            .order_by(Lesson.start_at)
+                        )
+                    ).all()
+                    remaining_buttons = [
+                        [
+                            {
+                                "type": "callback",
+                                "text": f"Да · {lesson.start_at:%H:%M}",
+                                "payload": (
+                                    f"interaction:{request.id}:lesson:{lesson_id}:yes"
+                                ),
+                            },
+                            {
+                                "type": "callback",
+                                "text": f"Нет · {lesson.start_at:%H:%M}",
+                                "payload": (
+                                    f"interaction:{request.id}:lesson:{lesson_id}:no"
+                                ),
+                            },
+                        ]
+                        for lesson_id, lesson in remaining
+                        if str(lesson_id) not in lesson_answers
+                    ]
+                    callback_message = {
+                        "attachments": (
+                            [
+                                {
+                                    "type": "inline_keyboard",
+                                    "payload": {"buttons": remaining_buttons},
+                                }
+                            ]
+                            if remaining_buttons
+                            else []
+                        )
+                    }
                 await record_message(
                     session,
                     person_id=person_id,
@@ -451,6 +493,7 @@ class EchoHandler:
         await self._api.answer_callback(
             callback_id=callback.callback_id,
             notification="Ответ сохранён",
+            message=callback_message,
         )
 
     async def _handle_partial_choice(self, callback: IncomingCallback, request_id: int) -> None:
@@ -511,7 +554,9 @@ class EchoHandler:
             attachments=[{"type": "inline_keyboard", "payload": {"buttons": buttons}}],
         )
         await self._api.answer_callback(
-            callback_id=callback.callback_id, notification="Выберите ответ по каждому занятию"
+            callback_id=callback.callback_id,
+            notification="Выберите ответ по каждому занятию",
+            message={"attachments": []},
         )
 
     async def _handle_reason_callback(
@@ -555,6 +600,7 @@ class EchoHandler:
                 if action == "write"
                 else "Ответ сохранён без причины"
             ),
+            message={"attachments": []},
         )
 
     async def _handle_registration_callback(self, callback: IncomingCallback) -> None:

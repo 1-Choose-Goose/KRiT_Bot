@@ -20,16 +20,20 @@ from krit_bot.learning_models import PersonMaxIdentity
 async def test_max_button_callback_reaches_database_through_webhook(
     tmp_path, monkeypatch
 ) -> None:
-    callback_answers: list[tuple[str, str | None]] = []
+    callback_answers: list[tuple[str, str | None, dict | None]] = []
 
     class FakeMaxApi:
         def __init__(self, **_kwargs) -> None:
             pass
 
         async def answer_callback(
-            self, *, callback_id: str, notification: str | None = None
+            self,
+            *,
+            callback_id: str,
+            notification: str | None = None,
+            message: dict | None = None,
         ) -> dict:
-            callback_answers.append((callback_id, notification))
+            callback_answers.append((callback_id, notification, message))
             return {"success": True}
 
         async def send_text(self, **_kwargs) -> dict:
@@ -104,4 +108,6 @@ async def test_max_button_callback_reaches_database_through_webhook(
         assert saved is not None
         assert saved.answer == "yes"
     await check_engine.dispose()
-    assert callback_answers == [("real-button-click", "Ответ сохранён")]
+    assert callback_answers == [
+        ("real-button-click", "Ответ сохранён", {"attachments": []})
+    ]

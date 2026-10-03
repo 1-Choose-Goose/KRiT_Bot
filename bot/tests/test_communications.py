@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
+import pytest
 from pydantic import SecretStr
 from sqlalchemy import select
 
@@ -14,6 +15,7 @@ from krit_bot.communication_models import (
     GuardianNotificationOverride,
     InteractionRequest,
     InteractionRequestLesson,
+    InteractionResponse,
     LessonAttendanceIntent,
     PersonNotificationOverride,
 )
@@ -27,6 +29,7 @@ from krit_bot.communications import (
     cleanup_communication_history,
     daily_bundles,
     ensure_default_rules,
+    lesson_confirmation_details,
     reconcile_confirmation_requests,
     reconcile_daily_reminders,
     record_message,
@@ -186,12 +189,12 @@ async def test_daily_lessons_are_bundled_once_per_person_and_day(tmp_path) -> No
         await reconcile_daily_reminders(session, now=utcnow(), timezone=timezone)
         await reconcile_confirmation_requests(session, now=utcnow(), timezone=timezone)
         jobs = list((await session.scalars(select(NotificationJob))).all())
-        assert len([job for job in jobs if job.event_type == "lesson_reminder"]) == 9
+        assert len([job for job in jobs if job.event_type == "lesson_reminder"]) == 6
         confirmation_jobs = [
             job for job in jobs if job.event_type == "lesson_confirmation_request"
         ]
-        assert len(confirmation_jobs) == 4
-        assert len([job for job in confirmation_jobs if job.payload.get("follow_up")]) == 2
+        assert len(confirmation_jobs) == 3
+        assert not [job for job in confirmation_jobs if job.payload.get("follow_up")]
         confirmation = next(
             job for job in confirmation_jobs if not job.payload.get("follow_up")
         )
@@ -209,12 +212,7 @@ async def test_daily_lessons_are_bundled_once_per_person_and_day(tmp_path) -> No
             respondent_context=request.recipient_context,
             answer="yes",
         )
-        linked_follow_up = next(
-            job
-            for job in confirmation_jobs
-            if job.interaction_request_id == request.id and job.payload.get("follow_up")
-        )
-        assert linked_follow_up.status == "cancelled"
+        assert request.status == "answered"
     await engine.dispose()
 
 
@@ -279,6 +277,137 @@ async def test_partial_confirmation_is_saved_for_each_lesson(tmp_path) -> None:
             ).all()
         )
         assert [item.status for item in intents] == ["confirmed", "declined"]
+    await engine.dispose()
+
+
+async def test_past_lesson_answer_is_rejected_without_persisting_response(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    async with sessions() as session:
+        student = Person(full_name="Ученик", phone="+79000000901")
+        teacher = Person(full_name="Учитель", phone="+79000000902")
+        subject = Subject(name="Физика", color="#2563eb")
+        room = Room(name="Кабинет", capacity=10)
+        session.add_all([student, teacher, subject, room])
+        await session.flush()
+        lesson = Lesson(
+            subject_id=subject.id,
+            teacher_id=teacher.id,
+            room_id=room.id,
+            start_at=utcnow() - timedelta(hours=2),
+            end_at=utcnow() - timedelta(hours=1),
+            teacher_name_snapshot=teacher.full_name,
+            room_name_snapshot=room.name,
+            subject_name_snapshot=subject.name,
+        )
+        session.add(lesson)
+        await session.flush()
+        request = InteractionRequest(
+            request_type="lesson_confirmation",
+            question="Будете?",
+            recipient_person_id=student.id,
+            recipient_context="student",
+            subject_person_id=student.id,
+        )
+        session.add(request)
+        await session.flush()
+        session.add(
+            InteractionRequestLesson(
+                request_id=request.id,
+                lesson_id=lesson.id,
+                lesson_revision=lesson.notification_revision,
+            )
+        )
+        await session.flush()
+
+        with pytest.raises(ValueError, match="уже началось"):
+            await save_interaction_response(
+                session,
+                request=request,
+                respondent_person_id=student.id,
+                respondent_context="student",
+                answer="yes",
+            )
+        assert await session.scalar(select(InteractionResponse)) is None
+    await engine.dispose()
+
+
+async def test_one_parent_is_sufficient_and_parent_is_optional_when_not_linked(
+    tmp_path,
+) -> None:
+    engine, sessions = await _database(tmp_path)
+    async with sessions() as session:
+        student = Person(full_name="Ученик", phone="+79000000911")
+        teacher = Person(full_name="Учитель", phone="+79000000912")
+        parent_one = Person(full_name="Родитель 1", phone="+79000000913")
+        parent_two = Person(full_name="Родитель 2", phone="+79000000914")
+        subject = Subject(name="Физика", color="#2563eb")
+        room = Room(name="Кабинет", capacity=10)
+        session.add_all([student, teacher, parent_one, parent_two, subject, room])
+        await session.flush()
+        lesson = Lesson(
+            subject_id=subject.id,
+            teacher_id=teacher.id,
+            room_id=room.id,
+            start_at=utcnow() + timedelta(days=2),
+            end_at=utcnow() + timedelta(days=2, hours=1),
+            teacher_name_snapshot=teacher.full_name,
+            room_name_snapshot=room.name,
+            subject_name_snapshot=subject.name,
+        )
+        session.add(lesson)
+        await session.flush()
+        participant = LessonParticipant(
+            lesson_id=lesson.id,
+            person_id=student.id,
+            person_name_snapshot=student.full_name,
+        )
+        session.add(participant)
+        await session.flush()
+
+        async def answer(person: Person, context: str, subject_person_id: int) -> None:
+            request = InteractionRequest(
+                request_type="lesson_confirmation",
+                question="Будете?",
+                recipient_person_id=person.id,
+                recipient_context=context,
+                subject_person_id=subject_person_id,
+            )
+            session.add(request)
+            await session.flush()
+            session.add(
+                InteractionRequestLesson(
+                    request_id=request.id,
+                    lesson_id=lesson.id,
+                    lesson_revision=lesson.notification_revision,
+                )
+            )
+            await session.flush()
+            await save_interaction_response(
+                session,
+                request=request,
+                respondent_person_id=person.id,
+                respondent_context=context,
+                answer="yes",
+            )
+
+        await answer(student, "student", student.id)
+        await answer(teacher, "teacher", teacher.id)
+        without_parent = await lesson_confirmation_details(session, lesson, [participant])
+        assert without_parent["state"] == "green"
+
+        session.add_all(
+            [
+                StudentGuardian(student_id=student.id, guardian_id=parent_one.id),
+                StudentGuardian(student_id=student.id, guardian_id=parent_two.id),
+            ]
+        )
+        await session.flush()
+        waiting_parent = await lesson_confirmation_details(session, lesson, [participant])
+        assert waiting_parent["state"] == "yellow"
+
+        await answer(parent_one, "guardian", student.id)
+        one_parent_answered = await lesson_confirmation_details(session, lesson, [participant])
+        assert one_parent_answered["state"] == "green"
     await engine.dispose()
 
 
@@ -394,10 +523,10 @@ async def test_anchor_moves_to_next_lesson_without_recreating_sent_offsets(tmp_p
                 )
             ).all()
         )
-        assert len(student_jobs) == 3
+        assert len(student_jobs) == 2
         assert all(job.lesson_id == lessons[0].id for job in student_jobs)
         assert all(len(job.payload["lesson_ids"]) == 3 for job in student_jobs)
-        sent = next(job for job in student_jobs if ":reminder:1440:" in job.dedupe_key)
+        sent = next(job for job in student_jobs if ":reminder:180:" in job.dedupe_key)
         sent.status = "sent"
         sent_key = sent.dedupe_key
 

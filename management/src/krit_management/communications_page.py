@@ -330,7 +330,7 @@ class CommunicationsPage(QWidget):
         self.tabs.setObjectName("clientTabs")
         self.tabs.addTab(self._send_tab(), "Отправить")
         self.tabs.addTab(self._dialogs_tab(), "Диалоги")
-        self.tabs.addTab(self._confirmations_tab(), "Подтверждения")
+        self.tabs.addTab(self._confirmations_tab(), "Опросы")
         self.tabs.addTab(self._settings_tab(), "Настройки")
         self.tabs.currentChanged.connect(lambda _index: self.refresh())
         layout.addWidget(self.tabs)
@@ -363,7 +363,7 @@ class CommunicationsPage(QWidget):
         self.recipients.setColumnWidth(3, 165)
         self.recipients.setColumnWidth(4, 145)
         self.recipients.itemChanged.connect(self._recipient_item_changed)
-        self.recipients.cellDoubleClicked.connect(self._recipient_cell_clicked)
+        self.recipients.cellClicked.connect(self._recipient_cell_clicked)
         layout.addWidget(self.recipients, 2)
         self.message_text = QTextEdit()
         self.message_text.setPlaceholderText("Введите сообщение (до 4000 символов)")
@@ -493,46 +493,24 @@ class CommunicationsPage(QWidget):
     def _confirmations_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        filters = QHBoxLayout()
-        filters.addWidget(QLabel("Период"))
-        self.confirm_from = QDateEdit(QDate.currentDate())
-        self.confirm_from.setCalendarPopup(True)
-        self.confirm_from.setDisplayFormat("dd.MM.yyyy")
-        self.confirm_from.setMinimumWidth(140)
-        self.confirm_to = QDateEdit(QDate.currentDate().addDays(7))
-        self.confirm_to.setCalendarPopup(True)
-        self.confirm_to.setDisplayFormat("dd.MM.yyyy")
-        self.confirm_to.setMinimumWidth(140)
-        filters.addWidget(self.confirm_from)
-        filters.addWidget(self.confirm_to)
-        filters.addWidget(_button("Показать", self.load_confirmations))
-        self.attention_only = QCheckBox("Требуют уточнения")
-        self.attention_only.toggled.connect(self._render_confirmations)
-        filters.addWidget(self.attention_only)
-        filters.addStretch(1)
-        layout.addLayout(filters)
-        self.confirmations = _table(
-            [
-                "Ученик",
-                "Занятие",
-                "Отправлено",
-                "Ответ ученика",
-                "Ответ родителя",
-                "Итог",
-                "Причина",
-            ]
+        hint = QLabel(
+            "В этом разделе хранятся только опросы «Да / Нет». "
+            "Дважды щёлкните опрос, чтобы открыть все ответы."
         )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.confirmations = _table(
+            ["Дата", "Вопрос", "Статус", "Да", "Нет", "Без ответа"]
+        )
+        self.confirmations.cellDoubleClicked.connect(self._poll_double_clicked)
         self.confirmations.setAlternatingRowColors(True)
         self.confirmations.setWordWrap(True)
         self.confirmations.verticalHeader().setDefaultSectionSize(42)
         confirmations_header = self.confirmations.horizontalHeader()
         confirmations_header.setStretchLastSection(False)
         confirmations_header.setMinimumSectionSize(90)
-        for column in (0, 1, 5, 6):
-            confirmations_header.setSectionResizeMode(
-                column, QHeaderView.ResizeMode.Stretch
-            )
-        for column, width in ((2, 105), (3, 125), (4, 135)):
+        confirmations_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column, width in ((0, 155), (2, 150), (3, 90), (4, 90), (5, 120)):
             confirmations_header.setSectionResizeMode(
                 column, QHeaderView.ResizeMode.Fixed
             )
@@ -1446,59 +1424,37 @@ class CommunicationsPage(QWidget):
             self._render_chat_messages()
 
     def load_confirmations(self) -> None:
-        date_from = self.confirm_from.date().toString("yyyy-MM-dd")
-        date_to = self.confirm_to.date().toString("yyyy-MM-dd")
-        self._run(
-            lambda: self.api.communication_confirmations(date_from, date_to),
-            self._confirmations_loaded,
-        )
+        self._run(self.api.communication_campaigns, self._confirmations_loaded)
 
     def _confirmations_loaded(self, value: object) -> None:
-        self.confirmation_rows = list(value) if isinstance(value, list) else []
+        self.confirmation_rows = [
+            item
+            for item in (list(value) if isinstance(value, list) else [])
+            if item.get("type") == "custom_poll"
+        ]
         self._render_confirmations()
 
     def _render_confirmations(self) -> None:
-        rows = [
-            item
-            for item in self.confirmation_rows
-            if not self.attention_only.isChecked() or item.get("needs_attention")
-        ]
+        rows = self.confirmation_rows
         self.confirmations.setRowCount(len(rows))
         for row, item in enumerate(rows):
-            max_available = bool(item.get("max_available", True))
-            request_sent = bool(item.get("request_sent"))
-            if not max_available:
-                status = "Запрос недоступен"
-            elif not request_sent:
-                status = "Запрос не отправлен"
-            else:
-                status = STATUS_LABELS.get(
-                    item.get("status"), item.get("status", "")
-                )
-            reason = str(item.get("reason") or "—")
-            if not max_available and reason == "—":
-                reason = "Пользователь не подключён к MAX"
-            student_answer = str(item.get("student_answer") or "—")
-            guardian_answer = str(item.get("guardian_answer") or "—")
+            poll = item.get("poll") or {}
+            created_at = item.get("created_at")
             values = [
-                item.get("student_name", ""),
-                item.get("lesson", ""),
-                "Отправлен" if request_sent else "Не отправлен",
-                ANSWER_LABELS.get(
-                    student_answer,
-                    student_answer,
+                parse_center(created_at).strftime("%d.%m.%Y %H:%M") if created_at else "—",
+                item.get("title", ""),
+                CAMPAIGN_STATUS_LABELS.get(
+                    str(item.get("status")), str(item.get("status", ""))
                 ),
-                ", ".join(
-                    ANSWER_LABELS.get(answer.strip(), answer.strip())
-                    for answer in guardian_answer.split(",")
-                ),
-                status,
-                reason,
+                poll.get("yes", 0),
+                poll.get("no", 0),
+                poll.get("no_response", 0),
             ]
             for column, text in enumerate(values):
                 cell = QTableWidgetItem(str(text))
+                cell.setData(Qt.ItemDataRole.UserRole, int(item["id"]))
                 cell.setToolTip(str(text))
-                if column in {2, 3, 4}:
+                if column in {2, 3, 4, 5}:
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.confirmations.setItem(row, column, cell)
         self.confirmations.resizeRowsToContents()
@@ -1506,6 +1462,11 @@ class CommunicationsPage(QWidget):
             self.confirmations.setRowHeight(
                 row, max(42, self.confirmations.rowHeight(row))
             )
+
+    def _poll_double_clicked(self, row: int, _column: int) -> None:
+        item = self.confirmations.item(row, 0)
+        if item is not None:
+            self.open_poll(int(item.data(Qt.ItemDataRole.UserRole)))
 
     def _settings_loaded(self, value: object) -> None:
         self.rules = list(value) if isinstance(value, list) else []

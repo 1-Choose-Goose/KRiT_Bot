@@ -581,6 +581,7 @@ class LessonDialog(QDialog):
             self.students.setCellWidget(row, 0, holder)
             self.students.setItem(row, 1, QTableWidgetItem(person.get("full_name", "")))
             self.students.setItem(row, 2, QTableWidgetItem("Вручную" if check.isChecked() else "—"))
+        self.students.cellClicked.connect(self._toggle_student_row)
         self.student_search = QLineEdit()
         self.student_search.setPlaceholderText("Введите фамилию или имя…")
         self.student_search.setClearButtonEnabled(True)
@@ -660,6 +661,14 @@ class LessonDialog(QDialog):
         duration = int(group.get("default_duration_minutes") or 60)
         self.duration.setValue(duration)
         self._refresh_group_participants()
+
+    def _toggle_student_row(self, row: int, column: int) -> None:
+        if column == 0:
+            return
+        holder = self.students.cellWidget(row, 0)
+        check = holder.findChild(QCheckBox) if holder is not None else None
+        if check is not None and check.isEnabled():
+            check.setChecked(not check.isChecked())
 
     def _active_group_member_ids(self) -> set[int]:
         group_id = self.group.currentData()
@@ -884,7 +893,7 @@ class LessonCardDialog(QDialog):
         self.lesson = lesson
         self.operation: str | None = None
         self.setWindowTitle("Карточка занятия")
-        self.setMinimumSize(720, 500)
+        self.setMinimumSize(900, 620)
         layout = QVBoxLayout(self)
         title = QLabel(str(lesson.get("subject_name_snapshot", "Занятие")))
         title.setObjectName("dialogTitle")
@@ -918,6 +927,49 @@ class LessonCardDialog(QDialog):
             actual_teachers = QLabel("Фактически:\n" + "\n".join(actual_lines))
             actual_teachers.setWordWrap(True)
             layout.addWidget(actual_teachers)
+        self.confirmation_table: QTableWidget | None = None
+        confirmation = lesson.get("confirmation")
+        if lesson.get("status") in {"planned", "scheduled"} and isinstance(
+            confirmation, dict
+        ):
+            state_label = QLabel(
+                f"Подтверждения: {confirmation.get('label', 'Ожидаются')}"
+            )
+            state = str(confirmation.get("state", "yellow"))
+            state_label.setProperty("confirmationState", state)
+            background, foreground = {
+                "red": ("#fee2e2", "#991b1b"),
+                "green": ("#dcfce7", "#166534"),
+                "yellow": ("#fef3c7", "#92400e"),
+            }.get(state, ("#fef3c7", "#92400e"))
+            state_label.setStyleSheet(
+                f"background: {background}; color: {foreground}; "
+                "border-radius: 7px; padding: 8px 10px; font-weight: 700;"
+            )
+            layout.addWidget(state_label)
+            self.confirmation_table = _table(
+                ["Ученик", "Отвечает", "Роль", "MAX", "Ответ", "Причина"],
+                stretch=(0, 1, 5),
+                compact=(2, 3, 4),
+            )
+            confirmation_rows = list(confirmation.get("rows", []))
+            self.confirmation_table.setRowCount(len(confirmation_rows))
+            role_labels = {"student": "Ученик", "guardian": "Родитель", "teacher": "Преподаватель"}
+            answer_labels = {"yes": "Да", "no": "Нет", None: "—"}
+            for row, response in enumerate(confirmation_rows):
+                values = [
+                    response.get("subject_name", ""),
+                    response.get("recipient_name", ""),
+                    role_labels.get(response.get("recipient_context"), ""),
+                    "Доступен" if response.get("max_available") else "Недоступен",
+                    answer_labels.get(response.get("answer"), "—"),
+                    response.get("reason") or "—",
+                ]
+                for column, value in enumerate(values):
+                    cell = QTableWidgetItem(str(value))
+                    cell.setData(Qt.ItemDataRole.UserRole, response)
+                    self.confirmation_table.setItem(row, column, cell)
+            layout.addWidget(self.confirmation_table)
         self.actual_start: QDateTimeEdit | None = None
         self.actual_end: QDateTimeEdit | None = None
         self._actual_original: tuple[str | None, str | None] = (
@@ -1034,8 +1086,34 @@ class LessonCardDialog(QDialog):
             )
             layout.addLayout(operations)
         elif lesson.get("status") in {"planned", "scheduled"}:
+            confirmation_actions = QHBoxLayout()
+            confirmation_actions.addWidget(
+                _button(
+                    "Повторить запрос",
+                    lambda: self._select_operation("resend_confirmation"),
+                )
+            )
+            confirmation_actions.addWidget(
+                _button(
+                    "Подтвердить администратором",
+                    lambda: self._select_operation("confirm_by_admin"),
+                    "primary",
+                )
+            )
+            confirmation_actions.addWidget(
+                _button(
+                    "Исключить ученика",
+                    lambda: self._select_operation("cancel_from_confirmation"),
+                    "warning",
+                )
+            )
+            confirmation_actions.addStretch(1)
+            layout.addLayout(confirmation_actions)
             operations = QHBoxLayout()
             operations.addStretch(1)
+            operations.addWidget(
+                _button("Перенести", lambda: self._select_operation("reschedule"))
+            )
             operations.addWidget(
                 _button(
                     "Изменить занятие",
@@ -1054,6 +1132,22 @@ class LessonCardDialog(QDialog):
         layout.addWidget(buttons)
 
     def _select_operation(self, operation: str) -> None:
+        if operation in {
+            "resend_confirmation",
+            "confirm_by_admin",
+            "cancel_from_confirmation",
+        } and self.selected_confirmation() is None:
+            QMessageBox.information(
+                self, "Подтверждения", "Сначала выберите строку в таблице подтверждений."
+            )
+            return
+        if operation == "cancel_from_confirmation":
+            selected = self.selected_confirmation() or {}
+            if selected.get("recipient_context") == "teacher":
+                QMessageBox.information(
+                    self, "Исключение", "Из занятия можно исключить только ученика."
+                )
+                return
         if operation in {"leave_early", "cancel_participant"} and self.table.currentRow() < 0:
             QMessageBox.information(self, "Участник", "Сначала выберите ученика в таблице.")
             return
@@ -1075,6 +1169,14 @@ class LessonCardDialog(QDialog):
                 return
         self.operation = operation
         self.accept()
+
+    def selected_confirmation(self) -> dict[str, Any] | None:
+        if self.confirmation_table is None:
+            return None
+        row = self.confirmation_table.currentRow()
+        item = self.confirmation_table.item(row, 0) if row >= 0 else None
+        value = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        return dict(value) if isinstance(value, dict) else None
 
     def selected_person_id(self) -> int | None:
         row = self.table.currentRow()
@@ -1255,6 +1357,7 @@ class FreeSlotDialog(QDialog):
             check.toggled.connect(self._student_selection_changed)
             self.students.setCellWidget(row, 0, check)
             self.students.setItem(row, 1, QTableWidgetItem(person.get("full_name", "")))
+        self.students.cellClicked.connect(self._toggle_student_row)
         self.students.setMinimumHeight(150)
         self.students.setMaximumHeight(220)
         layout.addWidget(self.students)
@@ -1293,6 +1396,13 @@ class FreeSlotDialog(QDialog):
                 selected_only and isinstance(check, QCheckBox) and not check.isChecked()
             )
             self.students.setRowHidden(row, not matches or hide_selected)
+
+    def _toggle_student_row(self, row: int, column: int) -> None:
+        if column == 0:
+            return
+        check = self.students.cellWidget(row, 0)
+        if isinstance(check, QCheckBox) and check.isEnabled():
+            check.setChecked(not check.isChecked())
 
     def _student_selection_changed(self, _checked: bool = False) -> None:
         selected = sum(
@@ -1853,6 +1963,8 @@ class LearningPage(QWidget):
                 cell = QTableWidgetItem(str(value))
                 if column == 1:
                     self._apply_subject_color(cell, lesson)
+                if column == 5:
+                    self._apply_confirmation_color(cell, lesson)
                 self.today_lessons.setItem(row, column, cell)
             actions = QWidget()
             bar = QHBoxLayout(actions)
@@ -1981,6 +2093,8 @@ class LearningPage(QWidget):
                 cell = QTableWidgetItem(str(value))
                 if column == 1:
                     self._apply_subject_color(cell, lesson)
+                if column == 5:
+                    self._apply_confirmation_color(cell, lesson)
                 self.calendar_table.setItem(row, column, cell)
         self._calendar_selection_changed()
 
@@ -2007,6 +2121,24 @@ class LearningPage(QWidget):
         item.setToolTip(
             f"Цвет предмета «{lesson.get('subject_name_snapshot', '')}»"
         )
+
+    @staticmethod
+    def _apply_confirmation_color(item: QTableWidgetItem, lesson: dict[str, Any]) -> None:
+        confirmation = lesson.get("confirmation")
+        if not isinstance(confirmation, dict):
+            return
+        state = str(confirmation.get("state", "yellow"))
+        colors = {
+            "red": ("#fee2e2", "#991b1b", "Есть отказ"),
+            "yellow": ("#fef3c7", "#92400e", "Ожидаются подтверждения"),
+            "green": ("#dcfce7", "#166534", "Все подтвердили"),
+        }
+        background, foreground, label = colors.get(state, colors["yellow"])
+        item.setBackground(QColor(background))
+        item.setForeground(QColor(foreground))
+        base = item.text()
+        item.setText(f"{base} · {label}")
+        item.setToolTip(label)
 
     def _calendar_selection_changed(self) -> None:
         row = self.calendar_table.currentRow()
@@ -2192,6 +2324,65 @@ class LearningPage(QWidget):
                 check.setChecked(int(check.property("person_id")) in selected_students)
         self._submit_new_lesson(lesson)
 
+    def reschedule_lesson(self, lesson: dict[str, Any]) -> None:
+        dialog = FreeSlotDialog(self.references, self)
+        dialog.setWindowTitle("Перенос занятия")
+        dialog.create_button.setText("Перенести занятие")
+        start = parse_center(lesson["start_at"])
+        end = parse_center(lesson["end_at"])
+        dialog.day.setDate(QDate(start.year, start.month, start.day))
+        dialog.duration.setValue(max(5, int((end - start).total_seconds() // 60)))
+        LessonDialog._select(dialog.teacher, lesson.get("teacher_id"))
+        LessonDialog._select(dialog.room, lesson.get("room_id"))
+        participant_ids = {
+            int(item["person_id"])
+            for item in lesson.get("participants", [])
+            if item.get("attendance_status") != "excused"
+        }
+        for row in range(dialog.students.rowCount()):
+            check = dialog.students.cellWidget(row, 0)
+            if isinstance(check, QCheckBox):
+                check.setChecked(int(check.property("person_id")) in participant_ids)
+                check.setEnabled(False)
+        dialog.student_search.setEnabled(False)
+        dialog.selected_only.setChecked(True)
+        dialog.selected_only.setEnabled(False)
+        dialog.student_count.setText(
+            f"Состав занятия сохраняется: {len(participant_ids)}"
+        )
+
+        def search(criteria: dict[str, Any]) -> None:
+            self._run(
+                lambda: self.api.free_slots(**criteria),
+                done=lambda result: dialog.set_slots(result if isinstance(result, list) else []),
+                on_error=dialog.search_failed,
+            )
+
+        dialog.search_requested.connect(search)
+        dialog.day.dateChanged.connect(lambda _date: dialog._request())
+        QTimer.singleShot(0, dialog._request)
+        if not dialog.exec():
+            return
+        slot = dialog.selected_slot()
+        if slot is None:
+            return
+        payload = {
+            "subject_id": int(lesson["subject_id"]),
+            "teacher_id": int(dialog.teacher.currentData()),
+            "room_id": int(slot["room_id"]),
+            "group_id": lesson.get("group_id"),
+            "start_at": slot["start_at"],
+            "end_at": slot["end_at"],
+            "participant_ids": sorted(participant_ids),
+            "notes": lesson.get("notes"),
+        }
+        self._run(
+            self.api.update_lesson,
+            int(lesson["id"]),
+            payload,
+            done=self._action_done,
+        )
+
     def edit_lesson(self, lesson: dict[str, Any]) -> None:
         if lesson.get("status") not in {"planned", "scheduled"}:
             QMessageBox.information(
@@ -2370,6 +2561,46 @@ class LearningPage(QWidget):
         lesson_id = int(lesson["id"])
         if dialog.operation == "edit":
             self.edit_lesson(lesson)
+            return
+        if dialog.operation == "reschedule":
+            self.reschedule_lesson(lesson)
+            return
+        if dialog.operation in {"resend_confirmation", "confirm_by_admin"}:
+            target = dialog.selected_confirmation()
+            if target is None:
+                return
+            payload = {
+                "recipient_context": target["recipient_context"],
+                "recipient_person_id": int(target["recipient_person_id"]),
+                "subject_person_id": int(target["subject_person_id"]),
+            }
+            if dialog.operation == "resend_confirmation":
+                self._run(
+                    self.api.resend_lesson_confirmation,
+                    lesson_id,
+                    payload,
+                    done=self._action_done,
+                )
+                return
+            comment, accepted = QInputDialog.getText(
+                self,
+                "Подтверждение администратором",
+                "Комментарий (например, подтверждено по телефону):",
+            )
+            if not accepted:
+                return
+            payload["comment"] = comment.strip() or None
+            self._run(
+                self.api.confirm_lesson_by_admin,
+                lesson_id,
+                payload,
+                done=self._action_done,
+            )
+            return
+        if dialog.operation == "cancel_from_confirmation":
+            target = dialog.selected_confirmation()
+            if target is not None:
+                self._cancel_participant(lesson, int(target["subject_person_id"]))
             return
         if dialog.operation == "leave_early":
             person_id = dialog.selected_person_id()

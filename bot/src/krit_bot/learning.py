@@ -550,6 +550,7 @@ def _lesson_view(
     item: Lesson,
     participants: list[LessonParticipant],
     teacher_segments: list[LessonTeacherSegment] | None = None,
+    confirmation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = utcnow()
     ready = bool(participants) and all(p.attendance_status != "expected" for p in participants)
@@ -586,6 +587,7 @@ def _lesson_view(
             "updated_at",
         ),
         "computed_status": computed,
+        "confirmation": confirmation,
         "ready": ready,
         "active_participant_count": sum(
             participant.attendance_status != "excused" for participant in participants
@@ -1449,7 +1451,18 @@ def create_learning_router(
             by_lesson: dict[int, list[LessonParticipant]] = {}
             for participant in participants:
                 by_lesson.setdefault(participant.lesson_id, []).append(participant)
-            return [_lesson_view(item, by_lesson.get(item.id, [])) for item in items]
+            from .communications import lesson_confirmation_details
+
+            result = []
+            for item in items:
+                lesson_participants = by_lesson.get(item.id, [])
+                confirmation = (
+                    await lesson_confirmation_details(session, item, lesson_participants)
+                    if item.status in {"planned", "scheduled"}
+                    else None
+                )
+                result.append(_lesson_view(item, lesson_participants, confirmation=confirmation))
+            return result
 
     @router.get("/today")
     async def today(
@@ -1531,13 +1544,26 @@ def create_learning_router(
                 ).all()
             )
             alerts = _unique_admin_notifications(alerts)
+            by_lesson: dict[int, list[LessonParticipant]] = {}
+            for participant in participants:
+                by_lesson.setdefault(participant.lesson_id, []).append(participant)
+            from .communications import lesson_confirmation_details
+
+            lesson_views = []
+            for lesson in lessons:
+                lesson_participants = by_lesson.get(lesson.id, [])
+                confirmation = (
+                    await lesson_confirmation_details(session, lesson, lesson_participants)
+                    if lesson.status in {"planned", "scheduled"}
+                    else None
+                )
+                lesson_views.append(
+                    _lesson_view(lesson, lesson_participants, confirmation=confirmation)
+                )
             await session.commit()
-        by_lesson: dict[int, list[LessonParticipant]] = {}
-        for participant in participants:
-            by_lesson.setdefault(participant.lesson_id, []).append(participant)
         return {
             "date": selected.isoformat(),
-            "lessons": [_lesson_view(x, by_lesson.get(x.id, [])) for x in lessons],
+            "lessons": lesson_views,
             "present": [
                 {
                     **_model(presence, "id", "person_id", "arrived_at"),
@@ -1571,7 +1597,19 @@ def create_learning_router(
                     )
                 ).all()
             )
-            return _lesson_view(item, participants, await _teacher_segments(session, lesson_id))
+            from .communications import lesson_confirmation_details
+
+            confirmation = (
+                await lesson_confirmation_details(session, item, participants)
+                if item.status in {"planned", "scheduled"}
+                else None
+            )
+            return _lesson_view(
+                item,
+                participants,
+                await _teacher_segments(session, lesson_id),
+                confirmation,
+            )
 
     async def save_lesson(
         session: AsyncSession,

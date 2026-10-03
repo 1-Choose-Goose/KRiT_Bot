@@ -97,9 +97,17 @@ class MaxApiClient:
         )
 
     async def answer_callback(
-        self, *, callback_id: str, notification: str | None = None
+        self,
+        *,
+        callback_id: str,
+        notification: str | None = None,
+        message: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        body = {"notification": notification} if notification else {}
+        body: dict[str, Any] = {}
+        if notification:
+            body["notification"] = notification
+        if message is not None:
+            body["message"] = message
         return await self._request(
             "POST", "/answers", params={"callback_id": callback_id}, json=body
         )

@@ -67,8 +67,8 @@ class NotificationEvent(StrEnum):
 RECIPIENT_CONTEXTS = {"student", "guardian", "teacher"}
 PRIORITY_VALUE = {"low": 0, "normal": 1, "high": 2}
 DEFAULT_RULES = {
-    NotificationEvent.LESSON_REMINDER: (1440, 180, 60),
-    NotificationEvent.LESSON_CONFIRMATION_REQUEST: (1440, 180, 60),
+    NotificationEvent.LESSON_REMINDER: (180, 60),
+    NotificationEvent.LESSON_CONFIRMATION_REQUEST: (1440,),
 }
 
 
@@ -95,31 +95,29 @@ async def ensure_default_rules(session: AsyncSession) -> None:
                         event_code=key[0],
                         recipient_context=context,
                         offset_minutes=offset,
-                        configuration={"after_confirmation": "one_hour_only"},
+                        configuration={"after_confirmation": "all"},
                     )
                 )
-        if context != "teacher":
-            for offset in DEFAULT_RULES[NotificationEvent.LESSON_CONFIRMATION_REQUEST]:
-                confirmation_key = (
-                    NotificationEvent.LESSON_CONFIRMATION_REQUEST.value,
-                    context,
-                    offset,
-                )
-                if confirmation_key not in existing:
-                    rows.append(
-                        NotificationGlobalRule(
-                            event_code=confirmation_key[0],
-                            recipient_context=context,
-                            offset_minutes=offset,
-                            enabled=offset == 1440,
-                            requires_confirmation=True,
-                            configuration={
-                                "deadline_minutes": 60,
-                                "follow_up": "once",
-                                "follow_up_offset_minutes": 180,
-                            },
-                        )
+        for offset in DEFAULT_RULES[NotificationEvent.LESSON_CONFIRMATION_REQUEST]:
+            confirmation_key = (
+                NotificationEvent.LESSON_CONFIRMATION_REQUEST.value,
+                context,
+                offset,
+            )
+            if confirmation_key not in existing:
+                rows.append(
+                    NotificationGlobalRule(
+                        event_code=confirmation_key[0],
+                        recipient_context=context,
+                        offset_minutes=offset,
+                        enabled=offset == 1440,
+                        requires_confirmation=True,
+                        configuration={
+                            "deadline_minutes": 60,
+                            "follow_up": "none",
+                        },
                     )
+                )
     for event in NotificationEvent:
         if event in {
             NotificationEvent.LESSON_REMINDER,
@@ -178,10 +176,49 @@ async def ensure_default_rules(session: AsyncSession) -> None:
     for rule in confirmation_rules:
         configuration = dict(rule.configuration or {})
         configuration.setdefault("deadline_minutes", 60)
-        configuration.setdefault("follow_up", "once")
-        configuration.setdefault("follow_up_offset_minutes", 180)
+        if configuration.get("follow_up") == "once":
+            configuration["follow_up"] = "none"
+        else:
+            configuration.setdefault("follow_up", "none")
+        if rule.offset_minutes != 1440:
+            rule.enabled = False
         if configuration != (rule.configuration or {}):
             rule.configuration = configuration
+    reminder_rules = list(
+        (
+            await session.scalars(
+                select(NotificationGlobalRule).where(
+                    NotificationGlobalRule.event_code == NotificationEvent.LESSON_REMINDER
+                )
+            )
+        ).all()
+    )
+    for rule in reminder_rules:
+        configuration = dict(rule.configuration or {})
+        if configuration.get("after_confirmation") == "one_hour_only":
+            configuration["after_confirmation"] = "all"
+            rule.configuration = configuration
+        if rule.offset_minutes == 1440:
+            rule.enabled = False
+    await session.execute(
+        update(NotificationJob)
+        .where(
+            NotificationJob.event_type == NotificationEvent.LESSON_REMINDER,
+            NotificationJob.status.in_(["pending", "retry"]),
+            NotificationJob.dedupe_key.like("%:reminder:1440:%"),
+        )
+        .values(status="cancelled", updated_at=utcnow())
+    )
+    await session.execute(
+        update(NotificationJob)
+        .where(
+            NotificationJob.event_type
+            == NotificationEvent.LESSON_CONFIRMATION_REQUEST,
+            NotificationJob.status.in_(["pending", "retry"]),
+            NotificationJob.dedupe_key.like("%:followup"),
+        )
+        .values(status="cancelled", updated_at=utcnow())
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -503,6 +540,8 @@ async def reconcile_daily_reminders(
     resolver = NotificationPolicyResolver(session)
     for bundle in bundles:
         first_lesson = bundle.lessons[0]
+        if bundle.anchor_start_at.astimezone(UTC) <= now.astimezone(UTC):
+            continue
         has_response = (
             await session.scalar(
                 select(func.count(InteractionResponse.id))
@@ -536,9 +575,7 @@ async def reconcile_daily_reminders(
             existing = await session.scalar(
                 select(NotificationJob).where(NotificationJob.dedupe_key.like(prefix + "%"))
             )
-            after_confirmation = policy.configuration.get(
-                "after_confirmation", "one_hour_only"
-            )
+            after_confirmation = policy.configuration.get("after_confirmation", "all")
             suppressed = has_response and (
                 after_confirmation == "none"
                 or (after_confirmation == "one_hour_only" and offset != 60)
@@ -617,9 +654,7 @@ async def reconcile_confirmation_requests(
     resolver = NotificationPolicyResolver(session)
     created = 0
     for bundle in bundles:
-        # Attendance is confirmed by the student and their guardian. Teachers
-        # receive the schedule/reminders, but do not answer for a pupil.
-        if bundle.recipient_context == "teacher":
+        if bundle.anchor_start_at.astimezone(UTC) <= now.astimezone(UTC):
             continue
         selected: tuple[int, EffectivePolicy] | None = None
         for offset in DEFAULT_RULES[NotificationEvent.LESSON_CONFIRMATION_REQUEST]:
@@ -705,25 +740,26 @@ async def reconcile_confirmation_requests(
                     lesson_revision=lesson.revision,
                 )
             )
-            intent = await session.scalar(
-                select(LessonAttendanceIntent).where(
-                    LessonAttendanceIntent.lesson_id == lesson.id,
-                    LessonAttendanceIntent.student_person_id == bundle.subject_person_id,
-                    LessonAttendanceIntent.lesson_revision == lesson.revision,
-                )
-            )
-            if intent is None:
-                session.add(
-                    LessonAttendanceIntent(
-                        lesson_id=lesson.id,
-                        student_person_id=bundle.subject_person_id,
-                        lesson_revision=lesson.revision,
-                        status="pending",
-                        last_request_id=request.id,
+            if bundle.recipient_context != "teacher":
+                intent = await session.scalar(
+                    select(LessonAttendanceIntent).where(
+                        LessonAttendanceIntent.lesson_id == lesson.id,
+                        LessonAttendanceIntent.student_person_id == bundle.subject_person_id,
+                        LessonAttendanceIntent.lesson_revision == lesson.revision,
                     )
                 )
-            else:
-                intent.last_request_id = request.id
+                if intent is None:
+                    session.add(
+                        LessonAttendanceIntent(
+                            lesson_id=lesson.id,
+                            student_person_id=bundle.subject_person_id,
+                            lesson_revision=lesson.revision,
+                            status="pending",
+                            last_request_id=request.id,
+                        )
+                    )
+                else:
+                    intent.last_request_id = request.id
         keyboard = [
             [
                 {
@@ -1068,6 +1104,206 @@ def _intent_status(answers: list[str]) -> str:
     return "confirmed" if "yes" in values else "declined"
 
 
+async def lesson_confirmation_details(
+    session: AsyncSession,
+    lesson: Lesson,
+    participants: list[LessonParticipant] | None = None,
+) -> dict[str, Any]:
+    """Build the role-aware confirmation state shown in a lesson card."""
+    if participants is None:
+        participants = list(
+            (
+                await session.scalars(
+                    select(LessonParticipant).where(
+                        LessonParticipant.lesson_id == lesson.id,
+                        LessonParticipant.attendance_status != "excused",
+                    )
+                )
+            ).all()
+        )
+    else:
+        participants = [
+            item for item in participants if item.attendance_status != "excused"
+        ]
+    student_ids = {int(item.person_id) for item in participants}
+    guardian_rows = (
+        (
+            await session.execute(
+                select(StudentGuardian.student_id, Person)
+                .join(Person, Person.id == StudentGuardian.guardian_id)
+                .where(StudentGuardian.student_id.in_(student_ids))
+                .order_by(StudentGuardian.student_id, Person.full_name)
+            )
+        ).all()
+        if student_ids
+        else []
+    )
+    guardians: dict[int, list[Person]] = defaultdict(list)
+    for student_id, guardian in guardian_rows:
+        guardians[int(student_id)].append(guardian)
+    person_ids = student_ids | {int(lesson.teacher_id)} | {
+        int(guardian.id) for _student_id, guardian in guardian_rows
+    }
+    people = {
+        int(person.id): person
+        for person in (
+            await session.scalars(select(Person).where(Person.id.in_(person_ids)))
+        ).all()
+    }
+    max_people = set(
+        (
+            await session.scalars(
+                select(PersonMaxIdentity.person_id).where(
+                    PersonMaxIdentity.person_id.in_(person_ids),
+                    PersonMaxIdentity.max_user_id.is_not(None),
+                )
+            )
+        ).all()
+    )
+    response_rows = (
+        await session.execute(
+            select(InteractionRequest, InteractionResponse)
+            .join(
+                InteractionRequestLesson,
+                InteractionRequestLesson.request_id == InteractionRequest.id,
+            )
+            .outerjoin(
+                InteractionResponse,
+                InteractionResponse.request_id == InteractionRequest.id,
+            )
+            .where(
+                InteractionRequest.request_type == "lesson_confirmation",
+                InteractionRequestLesson.lesson_id == lesson.id,
+                InteractionRequestLesson.lesson_revision == lesson.notification_revision,
+            )
+            .order_by(InteractionRequest.created_at.desc(), InteractionRequest.id.desc())
+        )
+    ).all()
+    latest: dict[tuple[str, int, int], tuple[InteractionRequest, InteractionResponse | None]] = {}
+    request_ids: list[int] = []
+    for request, response in response_rows:
+        key = (
+            str(request.recipient_context),
+            int(request.recipient_person_id),
+            int(request.subject_person_id or request.recipient_person_id),
+        )
+        latest.setdefault(key, (request, response))
+        request_ids.append(int(request.id))
+    jobs = (
+        list(
+            (
+                await session.scalars(
+                    select(NotificationJob)
+                    .where(NotificationJob.interaction_request_id.in_(request_ids))
+                    .order_by(NotificationJob.updated_at.desc(), NotificationJob.id.desc())
+                )
+            ).all()
+        )
+        if request_ids
+        else []
+    )
+    jobs_by_request: dict[int, NotificationJob] = {}
+    for job in jobs:
+        jobs_by_request.setdefault(int(job.interaction_request_id), job)
+
+    def response_row(
+        *,
+        context: str,
+        person_id: int,
+        person_name: str,
+        subject_person_id: int,
+        subject_name: str,
+    ) -> dict[str, Any]:
+        request, response = latest.get(
+            (context, person_id, subject_person_id), (None, None)
+        )
+        answer = None
+        if response is not None:
+            answer = (response.lesson_answers or {}).get(str(lesson.id), response.answer)
+        job = jobs_by_request.get(int(request.id)) if request is not None else None
+        person = people.get(person_id)
+        available = bool(
+            person_id in max_people
+            and person is not None
+            and person.active
+            and person.bot_access_enabled
+            and person.archived_at is None
+        )
+        return {
+            "recipient_context": context,
+            "recipient_person_id": person_id,
+            "recipient_name": person_name,
+            "subject_person_id": subject_person_id,
+            "subject_name": subject_name,
+            "request_id": int(request.id) if request is not None else None,
+            "request_status": request.status if request is not None else "not_created",
+            "delivery_status": job.status if job is not None else "not_sent",
+            "answer": answer,
+            "reason": response.reason if response is not None else None,
+            "answered_at": response.updated_at if response is not None else None,
+            "max_available": available,
+        }
+
+    rows: list[dict[str, Any]] = []
+    teacher = people.get(int(lesson.teacher_id))
+    rows.append(
+        response_row(
+            context="teacher",
+            person_id=int(lesson.teacher_id),
+            person_name=(
+                teacher.full_name if teacher is not None else lesson.teacher_name_snapshot
+            ),
+            subject_person_id=int(lesson.teacher_id),
+            subject_name=lesson.teacher_name_snapshot,
+        )
+    )
+    student_requirements: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    for participant in sorted(participants, key=lambda item: item.person_name_snapshot):
+        student = people.get(int(participant.person_id))
+        student_row = response_row(
+            context="student",
+            person_id=int(participant.person_id),
+            person_name=(
+                student.full_name if student is not None else participant.person_name_snapshot
+            ),
+            subject_person_id=int(participant.person_id),
+            subject_name=participant.person_name_snapshot,
+        )
+        rows.append(student_row)
+        parent_rows = [
+            response_row(
+                context="guardian",
+                person_id=int(guardian.id),
+                person_name=guardian.full_name,
+                subject_person_id=int(participant.person_id),
+                subject_name=participant.person_name_snapshot,
+            )
+            for guardian in guardians.get(int(participant.person_id), [])
+        ]
+        rows.extend(parent_rows)
+        student_requirements.append((student_row, parent_rows))
+    explicit_answers = {row.get("answer") for row in rows}
+    all_students_confirmed = all(
+        student_row.get("answer") == "yes"
+        and (not parent_rows or any(row.get("answer") == "yes" for row in parent_rows))
+        for student_row, parent_rows in student_requirements
+    )
+    teacher_confirmed = rows[0].get("answer") == "yes"
+    if "no" in explicit_answers:
+        state, label = "red", "Есть отказ"
+    elif teacher_confirmed and all_students_confirmed:
+        state, label = "green", "Все подтвердили"
+    else:
+        state, label = "yellow", "Ожидаются подтверждения"
+    return {
+        "lesson_id": int(lesson.id),
+        "lesson_revision": int(lesson.notification_revision),
+        "state": state,
+        "label": label,
+        "rows": rows,
+    }
+
+
 async def save_interaction_response(
     session: AsyncSession,
     *,
@@ -1088,6 +1324,36 @@ async def save_interaction_response(
         raise ValueError("Срок ответа истёк")
     if respondent_person_id != request.recipient_person_id:
         raise PermissionError("Этот запрос предназначен другому получателю")
+    lesson_map = lesson_answers or {}
+    links = list(
+        (
+            await session.scalars(
+                select(InteractionRequestLesson).where(
+                    InteractionRequestLesson.request_id == request.id
+                )
+            )
+        ).all()
+    )
+    answered_lesson_ids = {
+        int(link.lesson_id)
+        for link in links
+        if not lesson_map or str(link.lesson_id) in lesson_map
+    }
+    if answered_lesson_ids:
+        lesson_starts = list(
+            (
+                await session.scalars(
+                    select(Lesson.start_at).where(Lesson.id.in_(answered_lesson_ids))
+                )
+            ).all()
+        )
+        now = utcnow()
+        if any(
+            (value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC))
+            <= now
+            for value in lesson_starts
+        ):
+            raise ValueError("Занятие уже началось, ответ больше не принимается")
     current = await session.scalar(
         select(InteractionResponse).where(
             InteractionResponse.request_id == request.id,
@@ -1095,7 +1361,6 @@ async def save_interaction_response(
             InteractionResponse.respondent_context == respondent_context,
         )
     )
-    lesson_map = lesson_answers or {}
     if current is None:
         current = InteractionResponse(
             request_id=request.id,
@@ -1122,17 +1387,10 @@ async def save_interaction_response(
         current.reason = reason or current.reason
         current.revision += 1
         current.updated_at = utcnow()
-    links = list(
-        (
-            await session.scalars(
-                select(InteractionRequestLesson).where(
-                    InteractionRequestLesson.request_id == request.id
-                )
-            )
-        ).all()
-    )
     for link in links:
         per_lesson = lesson_map.get(str(link.lesson_id), answer)
+        if request.recipient_context == "teacher":
+            continue
         intent = await session.scalar(
             select(LessonAttendanceIntent).where(
                 LessonAttendanceIntent.lesson_id == link.lesson_id,
@@ -1259,6 +1517,16 @@ class ResponsePayload(BaseModel):
     answer: Literal["yes", "no", "partial"]
     lesson_answers: dict[str, Literal["yes", "no"]] = Field(default_factory=dict)
     reason: str | None = None
+
+
+class ConfirmationResendPayload(BaseModel):
+    recipient_context: Literal["student", "guardian", "teacher"]
+    recipient_person_id: int
+    subject_person_id: int
+
+
+class ConfirmationOverridePayload(ConfirmationResendPayload):
+    comment: str | None = Field(default=None, max_length=500)
 
 
 class SchedulePublicationPayload(BaseModel):
@@ -2228,6 +2496,256 @@ def create_communications_router(
                     }
                 )
             return result
+
+    @router.get("/lessons/{lesson_id}/confirmations")
+    async def lesson_confirmations(lesson_id: int) -> dict[str, Any]:
+        async with sessions() as session:
+            lesson = await session.get(Lesson, lesson_id)
+            if lesson is None:
+                raise HTTPException(404, "Занятие не найдено")
+            return await lesson_confirmation_details(session, lesson)
+
+    @router.post("/lessons/{lesson_id}/confirmations/resend")
+    async def resend_lesson_confirmation(
+        lesson_id: int,
+        payload: ConfirmationResendPayload,
+        admin_id: int = Depends(require_management_token),
+    ) -> dict[str, Any]:
+        async with sessions() as session:
+            lesson = await session.get(Lesson, lesson_id)
+            if lesson is None:
+                raise HTTPException(404, "Занятие не найдено")
+            start_at = lesson.start_at
+            if start_at.tzinfo is None:
+                start_at = start_at.replace(tzinfo=UTC)
+            if lesson.status not in {"planned", "scheduled"} or start_at <= utcnow():
+                raise HTTPException(409, "Подтверждение доступно только для будущего занятия")
+            details = await lesson_confirmation_details(session, lesson)
+            target = next(
+                (
+                    row
+                    for row in details["rows"]
+                    if row["recipient_context"] == payload.recipient_context
+                    and row["recipient_person_id"] == payload.recipient_person_id
+                    and row["subject_person_id"] == payload.subject_person_id
+                ),
+                None,
+            )
+            if target is None:
+                raise HTTPException(404, "Получатель не относится к этому занятию")
+            if not target["max_available"]:
+                raise HTTPException(409, "Получатель недоступен в MAX")
+            old_requests = list(
+                (
+                    await session.scalars(
+                        select(InteractionRequest)
+                        .join(
+                            InteractionRequestLesson,
+                            InteractionRequestLesson.request_id == InteractionRequest.id,
+                        )
+                        .where(
+                            InteractionRequest.request_type == "lesson_confirmation",
+                            InteractionRequest.recipient_context == payload.recipient_context,
+                            InteractionRequest.recipient_person_id == payload.recipient_person_id,
+                            InteractionRequest.subject_person_id == payload.subject_person_id,
+                            InteractionRequestLesson.lesson_id == lesson_id,
+                            InteractionRequestLesson.lesson_revision
+                            == lesson.notification_revision,
+                            InteractionRequest.status.in_(["active", "draft"]),
+                        )
+                    )
+                ).all()
+            )
+            old_ids = [request.id for request in old_requests]
+            for old_request in old_requests:
+                old_request.status = "cancelled"
+                old_request.updated_at = utcnow()
+            if old_ids:
+                await session.execute(
+                    update(NotificationJob)
+                    .where(
+                        NotificationJob.interaction_request_id.in_(old_ids),
+                        NotificationJob.status.in_(["pending", "retry"]),
+                    )
+                    .values(status="cancelled", updated_at=utcnow())
+                )
+            local_start = start_at.astimezone(timezone)
+            question = (
+                "Повторный запрос подтверждения занятия\n"
+                f"{local_start:%d.%m.%Y %H:%M} · {lesson.subject_name_snapshot}\n"
+                f"Преподаватель: {lesson.teacher_name_snapshot}\n"
+                f"Кабинет: {lesson.room_name_snapshot}"
+            )
+            if payload.recipient_context == "guardian":
+                question += f"\nУченик: {target['subject_name']}"
+            elif payload.recipient_context == "teacher":
+                student_names = [
+                    item["recipient_name"]
+                    for item in details["rows"]
+                    if item["recipient_context"] == "student"
+                ]
+                question += "\nУченики: " + (
+                    ", ".join(student_names) if student_names else "нет"
+                )
+            request = InteractionRequest(
+                request_type="lesson_confirmation",
+                question=question,
+                recipient_person_id=payload.recipient_person_id,
+                recipient_context=payload.recipient_context,
+                subject_person_id=payload.subject_person_id,
+                related_lesson_id=lesson_id,
+                created_by_admin_id=admin_id,
+                expires_at=max(utcnow() + timedelta(minutes=1), start_at - timedelta(minutes=5)),
+            )
+            session.add(request)
+            await session.flush()
+            session.add(
+                InteractionRequestLesson(
+                    request_id=request.id,
+                    lesson_id=lesson_id,
+                    lesson_revision=lesson.notification_revision,
+                )
+            )
+            keyboard = [
+                [
+                    {
+                        "type": "callback",
+                        "text": "Буду",
+                        "payload": f"interaction:{request.id}:yes",
+                    },
+                    {
+                        "type": "callback",
+                        "text": "Не буду",
+                        "payload": f"interaction:{request.id}:no",
+                    },
+                ]
+            ]
+            job = await enqueue_job(
+                session,
+                dedupe_key=(
+                    f"manual-confirmation:{lesson_id}:{lesson.notification_revision}:"
+                    f"{payload.recipient_context}:{payload.recipient_person_id}:"
+                    f"{payload.subject_person_id}:{utcnow().isoformat()}"
+                ),
+                event_type=NotificationEvent.LESSON_CONFIRMATION_REQUEST,
+                lesson_id=lesson_id,
+                recipient_person_id=payload.recipient_person_id,
+                subject_person_id=payload.subject_person_id,
+                recipient_context=payload.recipient_context,
+                priority=1,
+                scheduled_at=utcnow(),
+                interaction_request_id=request.id,
+                payload={"text": question, "keyboard": keyboard, "lesson_ids": [lesson_id]},
+            )
+            session.add(
+                AuditEvent(
+                    actor_admin_id=admin_id,
+                    action="communications.lesson_confirmation_resent",
+                    entity_type="lesson",
+                    entity_id=lesson_id,
+                    details={
+                        "recipient_context": payload.recipient_context,
+                        "recipient_person_id": payload.recipient_person_id,
+                        "subject_person_id": payload.subject_person_id,
+                    },
+                )
+            )
+            await session.commit()
+            return {"request_id": request.id, "queued": job is not None}
+
+    @router.post("/lessons/{lesson_id}/confirmations/confirm-by-admin")
+    async def confirm_lesson_by_admin(
+        lesson_id: int,
+        payload: ConfirmationOverridePayload,
+        admin_id: int = Depends(require_management_token),
+    ) -> dict[str, Any]:
+        async with sessions() as session:
+            lesson = await session.get(Lesson, lesson_id)
+            if lesson is None:
+                raise HTTPException(404, "Занятие не найдено")
+            start_at = lesson.start_at
+            if start_at.tzinfo is None:
+                start_at = start_at.replace(tzinfo=UTC)
+            if lesson.status not in {"planned", "scheduled"} or start_at <= utcnow():
+                raise HTTPException(409, "Можно подтвердить только будущее занятие")
+            details = await lesson_confirmation_details(session, lesson)
+            target = next(
+                (
+                    row
+                    for row in details["rows"]
+                    if row["recipient_context"] == payload.recipient_context
+                    and row["recipient_person_id"] == payload.recipient_person_id
+                    and row["subject_person_id"] == payload.subject_person_id
+                ),
+                None,
+            )
+            if target is None:
+                raise HTTPException(404, "Получатель не относится к этому занятию")
+            request = await session.scalar(
+                select(InteractionRequest)
+                .join(
+                    InteractionRequestLesson,
+                    InteractionRequestLesson.request_id == InteractionRequest.id,
+                )
+                .where(
+                    InteractionRequest.request_type == "lesson_confirmation",
+                    InteractionRequest.recipient_context == payload.recipient_context,
+                    InteractionRequest.recipient_person_id == payload.recipient_person_id,
+                    InteractionRequest.subject_person_id == payload.subject_person_id,
+                    InteractionRequestLesson.lesson_id == lesson_id,
+                    InteractionRequestLesson.lesson_revision == lesson.notification_revision,
+                    InteractionRequest.status.in_(["active", "answered"]),
+                )
+                .order_by(InteractionRequest.created_at.desc(), InteractionRequest.id.desc())
+            )
+            if request is None:
+                request = InteractionRequest(
+                    request_type="lesson_confirmation",
+                    question="Подтверждение занятия администратором",
+                    recipient_person_id=payload.recipient_person_id,
+                    recipient_context=payload.recipient_context,
+                    subject_person_id=payload.subject_person_id,
+                    related_lesson_id=lesson_id,
+                    created_by_admin_id=admin_id,
+                    expires_at=start_at,
+                )
+                session.add(request)
+                await session.flush()
+                session.add(
+                    InteractionRequestLesson(
+                        request_id=request.id,
+                        lesson_id=lesson_id,
+                        lesson_revision=lesson.notification_revision,
+                    )
+                )
+            reason = "Подтверждено администратором"
+            if payload.comment:
+                reason += f": {payload.comment.strip()}"
+            response = await save_interaction_response(
+                session,
+                request=request,
+                respondent_person_id=payload.recipient_person_id,
+                respondent_context=payload.recipient_context,
+                answer="yes",
+                lesson_answers={str(lesson_id): "yes"},
+                reason=reason,
+            )
+            session.add(
+                AuditEvent(
+                    actor_admin_id=admin_id,
+                    action="communications.lesson_confirmation_confirmed_by_admin",
+                    entity_type="lesson",
+                    entity_id=lesson_id,
+                    details={
+                        "recipient_context": payload.recipient_context,
+                        "recipient_person_id": payload.recipient_person_id,
+                        "subject_person_id": payload.subject_person_id,
+                        "comment": payload.comment,
+                    },
+                )
+            )
+            await session.commit()
+            return {"request_id": request.id, "response_id": response.id, "answer": "yes"}
 
     @router.get("/campaigns/{campaign_id}/poll")
     async def campaign_poll(campaign_id: int) -> dict[str, Any]:

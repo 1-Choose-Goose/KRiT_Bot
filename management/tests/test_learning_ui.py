@@ -217,7 +217,7 @@ def test_person_action_buttons_fit_actions_column_without_duplicate_learning_act
     )
 
     assert occupied_width <= 330
-    assert [button.text() for button in buttons] == ["Карточка", "В архив"]
+    assert [button.text() for button in buttons] == ["В архив"]
     assert all(button.text() != "Обучение" for button in buttons)
     window.close()
     app.processEvents()
@@ -390,6 +390,50 @@ def test_planned_lesson_card_contains_edit_action() -> None:
 
     assert dialog.operation == "edit"
     assert dialog.result() == QDialog.DialogCode.Accepted
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_planned_lesson_card_shows_confirmations_and_admin_override_action() -> None:
+    app = QApplication.instance() or QApplication([])
+    response = {
+        "recipient_context": "student",
+        "recipient_person_id": 7,
+        "recipient_name": "Куц Олег Олегович",
+        "subject_person_id": 7,
+        "subject_name": "Куц Олег Олегович",
+        "max_available": False,
+        "answer": None,
+        "reason": None,
+    }
+    dialog = LessonCardDialog(
+        {
+            "id": 1,
+            "start_at": "2099-09-30T10:30:00+05:00",
+            "end_at": "2099-09-30T11:30:00+05:00",
+            "subject_name_snapshot": "Информатика",
+            "teacher_name_snapshot": "Быков Валерий Андреевич",
+            "room_name_snapshot": "Кабинет №1",
+            "participants": [],
+            "status": "planned",
+            "confirmation": {
+                "state": "yellow",
+                "label": "Ожидаются подтверждения",
+                "rows": [response],
+            },
+        }
+    )
+    assert dialog.confirmation_table is not None
+    assert dialog.confirmation_table.item(0, 3).text() == "Недоступен"
+    dialog.confirmation_table.selectRow(0)
+    confirm_button = next(
+        button
+        for button in dialog.findChildren(QPushButton)
+        if button.text() == "Подтвердить администратором"
+    )
+    confirm_button.click()
+    assert dialog.operation == "confirm_by_admin"
+    assert dialog.selected_confirmation() == response
     dialog.deleteLater()
     app.processEvents()
 

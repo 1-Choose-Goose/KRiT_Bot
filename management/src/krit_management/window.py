@@ -601,11 +601,6 @@ class MainWindow(QMainWindow):
                     self._actions(
                         [
                             (
-                                "Карточка",
-                                "secondary",
-                                lambda item=person: self.edit_person(item),
-                            ),
-                            (
                                 "В архив",
                                 "warning",
                                 lambda item=person: self.archive_person(item),
