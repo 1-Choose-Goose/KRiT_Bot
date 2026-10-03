@@ -73,6 +73,13 @@ DEFAULT_RULES = {
 }
 
 
+def _db_utc(value: datetime) -> datetime:
+    """Treat timezone-less database values as UTC before local conversion."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 async def ensure_default_rules(session: AsyncSession) -> None:
     """Seed defaults for create_all based test databases as well as migrated databases."""
     existing = set(
@@ -501,8 +508,8 @@ async def daily_bundles(
     grouped: dict[tuple[date, int, int, str], list[BundleLesson]] = defaultdict(list)
     names: dict[tuple[date, int, int, str], str] = {}
     for lesson, _participant, student in rows:
-        local_start = lesson.start_at.astimezone(timezone)
-        local_end = lesson.end_at.astimezone(timezone)
+        local_start = _db_utc(lesson.start_at).astimezone(timezone)
+        local_end = _db_utc(lesson.end_at).astimezone(timezone)
         item = BundleLesson(
             id=lesson.id,
             revision=lesson.notification_revision,
@@ -523,12 +530,12 @@ async def daily_bundles(
                 grouped[key].append(item)
                 names[key] = student.full_name
     for lesson in lessons:
-        local_start = lesson.start_at.astimezone(timezone)
+        local_start = _db_utc(lesson.start_at).astimezone(timezone)
         teacher_item = BundleLesson(
             id=lesson.id,
             revision=lesson.notification_revision,
             start_at=local_start,
-            end_at=lesson.end_at.astimezone(timezone),
+            end_at=_db_utc(lesson.end_at).astimezone(timezone),
             subject=lesson.subject_name_snapshot,
             teacher=lesson.teacher_name_snapshot,
             room=lesson.room_name_snapshot,
@@ -3020,7 +3027,7 @@ def create_communications_router(
                     )
                     .values(status="cancelled", updated_at=utcnow())
                 )
-            local_start = start_at.astimezone(timezone)
+            local_start = _db_utc(start_at).astimezone(timezone)
             question = (
                 "Повторный запрос подтверждения занятия\n"
                 f"{local_start:%d.%m.%Y %H:%M} · {lesson.subject_name_snapshot}\n"
@@ -3400,7 +3407,7 @@ def create_communications_router(
                     "student_name": person.full_name,
                     "lesson_id": lesson.id,
                     "lesson": (
-                        f"{lesson.start_at.astimezone(timezone):%d.%m · %H:%M} · "
+                        f"{_db_utc(lesson.start_at).astimezone(timezone):%d.%m · %H:%M} · "
                         f"{lesson.subject_name_snapshot}"
                     ),
                     "lesson_revision": intent.lesson_revision,

@@ -2727,6 +2727,11 @@ def create_learning_router(
                     409,
                     "После завершения занятия используйте специальную корректировку",
                 )
+            if lesson.status in {"planned", "scheduled"} and payload.status in {
+                "present",
+                "late",
+            }:
+                raise HTTPException(409, "Сначала начните занятие")
             if item.attendance_status == "excused":
                 raise HTTPException(409, "Сначала явно восстановите отменённое участие")
             if item.attendance_status == "left_early":
@@ -3120,7 +3125,7 @@ def create_learning_router(
                         LessonParticipant.attendance_status != "excused",
                     )
                 )
-                if room is None or int(active_count or 0) >= room.capacity:
+                if room is None or int(active_count or 0) > room.capacity:
                     raise HTTPException(409, "Вместимость кабинета недостаточна")
                 conflicts = await _conflicts(
                     session,

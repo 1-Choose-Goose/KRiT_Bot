@@ -187,6 +187,22 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
             )
             assert adjacent.status_code == 201, adjacent.text
 
+            for premature_status in ("present", "late"):
+                premature = await client.put(
+                    f"/api/v1/learning/lessons/{lesson_id}/participants/{student_one}/attendance",
+                    headers=headers,
+                    json={"status": premature_status},
+                )
+                assert premature.status_code == 409
+            before_start = await client.get(
+                f"/api/v1/learning/lesson/{lesson_id}", headers=headers
+            )
+            assert next(
+                item
+                for item in before_start.json()["participants"]
+                if item["person_id"] == student_one
+            )["attendance_status"] == "expected"
+
             started = await client.post(
                 f"/api/v1/learning/lessons/{lesson_id}/start", headers=headers
             )

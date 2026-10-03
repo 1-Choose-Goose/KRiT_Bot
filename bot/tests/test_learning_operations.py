@@ -85,7 +85,7 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
                 await client.post(
                     "/api/v1/learning/rooms",
                     headers=headers,
-                    json={"name": "Кабинет 2", "capacity": 10},
+                    json={"name": "Кабинет 2", "capacity": 2},
                 )
             ).json()["id"]
             start = datetime.now(UTC) + timedelta(hours=2)
@@ -122,6 +122,47 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
             assert saved_student["attendance_status"] == "excused"
             assert saved_student["cancelled_by_person_id"] == guardian
             assert saved_student["cancellation_reason"] == "Семейные обстоятельства"
+
+            exact_capacity_restore = await client.post(
+                f"/api/v1/learning/lessons/{lesson_id}/participants/{student}/restore",
+                headers=headers,
+            )
+            assert exact_capacity_restore.status_code == 200, exact_capacity_restore.text
+            cancelled_again = await client.post(
+                f"/api/v1/learning/lessons/{lesson_id}/participants/{student}/cancel",
+                headers=headers,
+                json={
+                    "cancelled_by": "administrator",
+                    "reason": "Проверка переполнения",
+                },
+            )
+            assert cancelled_again.status_code == 200, cancelled_again.text
+            reduced_room = await client.put(
+                f"/api/v1/learning/rooms/{room_two}",
+                headers=headers,
+                json={"name": "Кабинет 2", "capacity": 1, "active": True},
+            )
+            assert reduced_room.status_code == 200, reduced_room.text
+            over_capacity_restore = await client.post(
+                f"/api/v1/learning/lessons/{lesson_id}/participants/{student}/restore",
+                headers=headers,
+            )
+            assert over_capacity_restore.status_code == 409
+            after_failed_restore = (
+                await client.get(f"/api/v1/learning/lesson/{lesson_id}", headers=headers)
+            ).json()
+            failed_student = next(
+                item
+                for item in after_failed_restore["participants"]
+                if item["person_id"] == student
+            )
+            assert failed_student["attendance_status"] == "excused"
+            restored_room = await client.put(
+                f"/api/v1/learning/rooms/{room_two}",
+                headers=headers,
+                json={"name": "Кабинет 2", "capacity": 2, "active": True},
+            )
+            assert restored_room.status_code == 200, restored_room.text
 
             await client.post(f"/api/v1/learning/lessons/{lesson_id}/start", headers=headers)
             await client.post(f"/api/v1/learning/presence/{student}/arrival", headers=headers)
