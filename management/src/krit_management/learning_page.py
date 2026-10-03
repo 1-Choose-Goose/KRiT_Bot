@@ -1519,14 +1519,6 @@ class LearningPage(QWidget):
         self.delete_calendar_button.setEnabled(False)
         self.delete_calendar_button.setToolTip("Сначала выберите занятие в таблице")
         actions.addWidget(self.delete_calendar_button)
-        self.reconcile_calendar_button = _button(
-            "Уточнить статус", self._reconcile_calendar_selected
-        )
-        self.reconcile_calendar_button.setEnabled(False)
-        self.reconcile_calendar_button.setToolTip(
-            "Доступно для занятия, плановое время которого уже прошло"
-        )
-        actions.addWidget(self.reconcile_calendar_button)
         actions.addStretch(1)
         actions.addWidget(_button("Предпросмотр", self.preview_calendar))
         actions.addWidget(_button("Сохранить PDF", self.save_calendar_pdf))
@@ -1988,17 +1980,6 @@ class LearningPage(QWidget):
             if planned
             else "Выберите запланированное занятие в таблице"
         )
-        self.reconcile_calendar_button.setEnabled(requires_reconciliation)
-        self.reconcile_calendar_button.setToolTip(
-            "Уточнить, состоялось ли выбранное занятие"
-            if requires_reconciliation
-            else "Выберите занятие с истёкшим плановым временем"
-        )
-
-    def _reconcile_calendar_selected(self) -> None:
-        row = self.calendar_table.currentRow()
-        if 0 <= row < len(self.calendar_lessons):
-            self.reconcile_lesson(self.calendar_lessons[row])
 
     def reconcile_lesson(self, lesson: dict[str, Any]) -> None:
         if not _lesson_requires_reconciliation(lesson):

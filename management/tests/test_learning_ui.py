@@ -369,7 +369,7 @@ def test_calendar_can_remove_selected_planned_lesson(monkeypatch) -> None:
     app.processEvents()
 
 
-def test_overdue_calendar_lesson_requires_explicit_reconciliation(monkeypatch) -> None:
+def test_overdue_calendar_lesson_reconciles_only_by_double_click(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     page = LearningPage(FakeApi())  # type: ignore[arg-type]
     assert page.pool.waitForDone(3_000)
@@ -390,7 +390,9 @@ def test_overdue_calendar_lesson_requires_explicit_reconciliation(monkeypatch) -
     app.processEvents()
 
     assert page.calendar_table.item(0, 5).text() == "Требует уточнения"
-    assert page.reconcile_calendar_button.isEnabled()
+    assert all(
+        button.text() != "Уточнить статус" for button in page.findChildren(QPushButton)
+    )
     assert not page.delete_calendar_button.isEnabled()
 
     calls: list[dict[str, object]] = []
@@ -407,7 +409,7 @@ def test_overdue_calendar_lesson_requires_explicit_reconciliation(monkeypatch) -
         "_run",
         lambda _fn, *args, **_kwargs: calls.append(args[1]),
     )
-    page._reconcile_calendar_selected()
+    page._edit_calendar_selected()
 
     assert calls == [
         {
