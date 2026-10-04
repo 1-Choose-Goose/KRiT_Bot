@@ -478,6 +478,33 @@ def test_confirmation_colors_are_visible_in_today_and_calendar_tables() -> None:
     app.processEvents()
 
 
+def test_planned_lesson_without_confirmation_payload_is_shown_as_waiting() -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.shutdown()
+    lesson = {
+        "id": 17,
+        "start_at": "2099-10-04T10:30:00+05:00",
+        "end_at": "2099-10-04T11:30:00+05:00",
+        "subject_name_snapshot": "Информатика",
+        "teacher_name_snapshot": "Учитель",
+        "room_name_snapshot": "Кабинет №1",
+        "participants": [],
+        "status": "planned",
+    }
+
+    page._today_loaded({"lessons": [lesson], "present": [], "alerts": []})
+    page._calendar_loaded([lesson])
+
+    for table in (page.today_lessons, page.calendar_table):
+        item = table.item(0, 5)
+        assert item.background().color().name() == "#fef3c7"
+        assert item.text() == "Запланировано · Ожидаются подтверждения"
+    page.deleteLater()
+    app.processEvents()
+
+
 def test_lesson_editor_shows_participant_confirmation_and_resend_feedback() -> None:
     app = QApplication.instance() or QApplication([])
     target = {

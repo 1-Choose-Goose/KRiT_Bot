@@ -1017,10 +1017,12 @@ class CommunicationsPage(QWidget):
     def refresh(self) -> None:
         if self.tabs.currentIndex() == 0:
             self._run(self.api.people, self._people_loaded)
-            today = now_center().date()
+            now = now_center()
+            period_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            period_end = period_start + timedelta(days=90)
             self._run(
                 lambda: self.api.learning_lessons(
-                    today.isoformat(), (today + timedelta(days=90)).isoformat()
+                    period_start.isoformat(), period_end.isoformat()
                 ),
                 self._poll_lessons_loaded,
             )

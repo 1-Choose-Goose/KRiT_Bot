@@ -2232,7 +2232,17 @@ class LearningPage(QWidget):
     def _apply_confirmation_color(item: QTableWidgetItem, lesson: dict[str, Any]) -> None:
         confirmation = lesson.get("confirmation")
         if not isinstance(confirmation, dict):
-            return
+            if lesson.get("status") not in {"planned", "scheduled"} or (
+                _lesson_requires_reconciliation(lesson)
+            ):
+                return
+            # A planned lesson still requires attention when the server has not
+            # created or returned its confirmation request yet.  Showing the
+            # normal lesson status here made the confirmation workflow invisible.
+            confirmation = {
+                "state": "yellow",
+                "label": "Ожидаются подтверждения",
+            }
         state = str(confirmation.get("state", "yellow"))
         colors = {
             "red": ("#fee2e2", "#991b1b", "Есть отказ"),

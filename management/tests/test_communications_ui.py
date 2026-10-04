@@ -27,6 +27,38 @@ class FakeApi:
         return payload
 
 
+def test_send_tab_requests_poll_lessons_with_timezone_aware_period() -> None:
+    app = QApplication.instance() or QApplication([])
+
+    class RecordingApi(FakeApi):
+        def __init__(self) -> None:
+            super().__init__()
+            self.period: tuple[str, str] | None = None
+
+        def people(self) -> list[dict]:
+            return []
+
+        def learning_lessons(self, date_from: str, date_to: str) -> list[dict]:
+            self.period = (date_from, date_to)
+            return []
+
+    api = RecordingApi()
+    page = CommunicationsPage(api)  # type: ignore[arg-type]
+    page.refresh()
+    assert page.pool.waitForDone(3_000)
+    app.processEvents()
+
+    assert api.period is not None
+    date_from, date_to = api.period
+    assert "+05:00" in date_from
+    assert "+05:00" in date_to
+    assert "T00:00:00" in date_from
+    assert "T00:00:00" in date_to
+    page.shutdown()
+    page.deleteLater()
+    app.processEvents()
+
+
 def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> None:
     app = QApplication.instance() or QApplication([])
     api = FakeApi()
