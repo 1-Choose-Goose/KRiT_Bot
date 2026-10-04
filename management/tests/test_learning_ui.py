@@ -159,6 +159,14 @@ def test_spinbox_arrows_use_the_shared_vertical_control_style() -> None:
     app.processEvents()
 
 
+def test_global_context_menu_uses_readable_light_palette() -> None:
+    stylesheet = build_stylesheet()
+
+    assert "\nQMenu {\n    background: white; color: #172033;" in stylesheet
+    assert "QMenu::item:selected" in stylesheet
+    assert "QMenu::item:disabled" in stylesheet
+
+
 def test_early_leave_reason_dialog_is_large_and_validates_text() -> None:
     app = QApplication.instance() or QApplication([])
     dialog = ReasonDialog("Ученик покинул занятие", "Укажите причину:")

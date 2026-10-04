@@ -159,6 +159,19 @@ QAbstractItemView#searchCompleterPopup::item:hover,
 QAbstractItemView#searchCompleterPopup::item:selected {
     background: #e6efff; color: #172033;
 }
+QMenu {
+    background: white; color: #172033; border: 1px solid #ccd5e2;
+    border-radius: 7px; padding: 5px;
+}
+QMenu::item {
+    background: transparent; color: #172033; border-radius: 5px;
+    padding: 6px 28px 6px 26px;
+}
+QMenu::item:selected { background: #e6efff; color: #172033; }
+QMenu::item:disabled { color: #7b8798; }
+QMenu::separator {
+    height: 1px; background: #e1e6ee; margin: 4px 8px;
+}
 QCalendarWidget { background: white; border: 1px solid #ccd5e2; }
 QCalendarWidget QWidget#qt_calendar_navigationbar {
     background: #f2f5f9; border-bottom: 1px solid #dfe5ee;
