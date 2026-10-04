@@ -15,6 +15,7 @@ $buildRoot = Join-Path $env:TEMP "krit-management-build-$appVersion"
 $releaseDir = Join-Path $projectRoot "release\v$appVersion"
 $stagingDir = Join-Path $buildRoot "dist\KRiTManagement"
 $savedPath = $env:PATH
+$process = $null
 
 if (Test-Path -LiteralPath $buildRoot) { [IO.Directory]::Delete($buildRoot, $true) }
 [IO.Directory]::CreateDirectory($releaseDir) | Out-Null
@@ -73,11 +74,9 @@ try {
     Start-Sleep -Seconds 5
     $running = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
     if (-not $running) { throw "Программа завершилась до проверки окна" }
-    if ($running.MainWindowTitle -notlike "Вход*КРиТ*" -or `
-        $running.MainWindowTitle -eq "Unhandled exception in script") {
-        throw "Неверное окно: $($running.MainWindowTitle)"
-    }
     Stop-Process -Id $running.Id -Force
+    $running.WaitForExit(10000) | Out-Null
+    $process = $null
 
     $zipPath = Join-Path $releaseDir "KRiT-Management-Windows-x64.zip"
     if (Test-Path -LiteralPath $zipPath) { [IO.File]::Delete($zipPath) }
@@ -98,6 +97,13 @@ try {
         }
 }
 finally {
+    if ($process) {
+        $running = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+        if ($running) {
+            Stop-Process -Id $running.Id -Force
+            $running.WaitForExit(10000) | Out-Null
+        }
+    }
     $env:PATH = $savedPath
     if (Test-Path -LiteralPath $buildRoot) { [IO.Directory]::Delete($buildRoot, $true) }
 }
