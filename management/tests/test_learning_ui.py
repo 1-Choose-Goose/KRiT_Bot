@@ -353,6 +353,7 @@ def test_today_row_double_click_opens_one_card_for_planned_and_completed(monkeyp
         "room_name_snapshot": "Кабинет №1",
         "participants": [],
         "status": "planned",
+        "confirmation": {"state": "yellow", "rows": []},
     }
     completed = {**planned, "id": 2, "status": "completed"}
     page._today_loaded(
@@ -366,6 +367,35 @@ def test_today_row_double_click_opens_one_card_for_planned_and_completed(monkeyp
 
     assert opened == [1, 2]
     assert page.today_lessons.cellWidget(1, 6) is None
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_opening_planned_lesson_without_confirmations_loads_full_card(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.shutdown()
+    lesson = {
+        "id": 41,
+        "start_at": "2099-09-30T10:30:00+05:00",
+        "end_at": "2099-09-30T11:30:00+05:00",
+        "status": "planned",
+    }
+    page._today_loaded({"alerts": [], "present": [], "lessons": [lesson]})
+    calls: list[tuple[object, tuple[object, ...], object]] = []
+    monkeypatch.setattr(
+        page,
+        "_run",
+        lambda fn, *args, done=None, **_kwargs: calls.append((fn, args, done)),
+    )
+
+    page._open_today_lesson(0)
+
+    assert len(calls) == 1
+    assert calls[0][0] == page.api.learning_lesson
+    assert calls[0][1] == (41,)
+    assert callable(calls[0][2])
     page.deleteLater()
     app.processEvents()
 
@@ -459,12 +489,23 @@ def test_planned_lesson_card_shows_confirmations_and_admin_override_action() -> 
         "Изменить занятие",
         "Перенести",
     }
-    dialog.confirmation_table.selectRow(0)
+    resend_button = next(
+        button
+        for button in dialog.findChildren(QPushButton)
+        if button.text() == "Повторить запрос"
+    )
     confirm_button = next(
         button
         for button in dialog.findChildren(QPushButton)
         if button.text() == "Подтвердить администратором"
     )
+    assert not resend_button.isEnabled()
+    assert not confirm_button.isEnabled()
+    dialog.confirmation_table.selectRow(0)
+    app.processEvents()
+    assert not resend_button.isEnabled()
+    assert "MAX" in resend_button.toolTip()
+    assert confirm_button.isEnabled()
     confirm_button.click()
     assert dialog.operation == "confirm_by_admin"
     assert dialog.selected_confirmation() == response
@@ -493,12 +534,21 @@ def test_planned_lesson_card_builds_selectable_waiting_rows_without_confirmation
 
     assert dialog.confirmation_table is not None
     assert dialog.confirmation_table.rowCount() == 3
+    assert dialog.confirmation_table.item(1, 3).text() == "Проверяется"
     for row in range(dialog.confirmation_table.rowCount()):
         answer = dialog.confirmation_table.item(row, 4)
         assert answer.text() == ""
         assert answer.icon().pixmap(12, 12).toImage().pixelColor(6, 6).name() == "#f59e0b"
 
     dialog.confirmation_table.selectRow(1)
+    app.processEvents()
+    resend_button = next(
+        button
+        for button in dialog.findChildren(QPushButton)
+        if button.text() == "Повторить запрос"
+    )
+    assert not resend_button.isEnabled()
+    assert "MAX" in resend_button.toolTip()
     confirm_button = next(
         button
         for button in dialog.findChildren(QPushButton)
@@ -507,6 +557,50 @@ def test_planned_lesson_card_builds_selectable_waiting_rows_without_confirmation
     confirm_button.click()
     assert dialog.operation == "confirm_by_admin"
     assert dialog.selected_confirmation()["subject_person_id"] == 7
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_resend_confirmation_is_enabled_for_selected_max_recipient() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = LessonCardDialog(
+        {
+            "id": 3,
+            "start_at": "2099-09-30T10:30:00+05:00",
+            "end_at": "2099-09-30T11:30:00+05:00",
+            "subject_name_snapshot": "Информатика",
+            "teacher_name_snapshot": "Учитель",
+            "room_name_snapshot": "Кабинет №1",
+            "participants": [],
+            "status": "planned",
+            "confirmation": {
+                "state": "yellow",
+                "rows": [
+                    {
+                        "recipient_context": "student",
+                        "recipient_person_id": 7,
+                        "recipient_name": "Куц Олег Олегович",
+                        "subject_person_id": 7,
+                        "subject_name": "Куц Олег Олегович",
+                        "max_available": True,
+                        "answer": None,
+                        "reason": None,
+                    }
+                ],
+            },
+        }
+    )
+    resend_button = next(
+        button
+        for button in dialog.findChildren(QPushButton)
+        if button.text() == "Повторить запрос"
+    )
+    assert not resend_button.isEnabled()
+    dialog.confirmation_table.selectRow(0)
+    app.processEvents()
+    assert resend_button.isEnabled()
+    resend_button.click()
+    assert dialog.operation == "resend_confirmation"
     dialog.deleteLater()
     app.processEvents()
 
@@ -1281,6 +1375,48 @@ def test_departure_uses_selected_present_row_instead_of_arrival_field(monkeypatc
     page.presence("departure")
 
     assert calls == [(77, "departure")]
+    window.close()
+    app.processEvents()
+
+
+def test_stale_presence_is_visible_and_uses_time_correction_flow(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeApi())  # type: ignore[arg-type]
+    assert window.learning_page.pool.waitForDone(3_000)
+    assert window.pool.waitForDone(3_000)
+    app.processEvents()
+    page = window.learning_page
+    arrived_at = "2026-10-03T15:27:00+00:00"
+    page._today_loaded(
+        {
+            "lessons": [],
+            "alerts": [],
+            "present": [],
+            "stale_presence": [
+                {
+                    "person_id": 77,
+                    "person_name": "Пупкин Иван Пупкович",
+                    "arrived_at": arrived_at,
+                }
+            ],
+        }
+    )
+
+    assert page.present_table.rowCount() == 1
+    assert page.present_table.item(0, 0).data(Qt.ItemDataRole.UserRole + 1) is True
+    assert "03.10" in page.present_table.item(0, 1).text()
+    assert "не закрыто" in page.present_table.item(0, 1).text()
+    corrections: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        page,
+        "_correct_stale_departure",
+        lambda person_id, arrived: corrections.append((person_id, arrived)),
+    )
+    page.present_table.selectRow(0)
+
+    page.presence("departure")
+
+    assert corrections == [(77, arrived_at)]
     window.close()
     app.processEvents()
 

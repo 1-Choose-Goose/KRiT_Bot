@@ -323,6 +323,69 @@ class ReasonDialog(QDialog):
         self.accept()
 
 
+class PresenceDepartureDialog(QDialog):
+    def __init__(self, arrived_at: str, parent=None) -> None:
+        super().__init__(parent)
+        self.arrived_at = parse_center(arrived_at)
+        current = now_center()
+        proposed = min(current, self.arrived_at + timedelta(hours=1))
+        self.setWindowTitle("Закрыть старое посещение")
+        self.setMinimumWidth(520)
+        layout = QVBoxLayout(self)
+        explanation = QLabel(
+            "Администратор не отметил уход вовремя. Укажите фактические дату и время ухода."
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        form = QFormLayout()
+        configure_form_layout(form)
+        form.addRow("Приход", QLabel(f"{self.arrived_at:%d.%m.%Y %H:%M}"))
+        self.left_at = QDateTimeEdit(QDateTime(proposed))
+        self.left_at.setDisplayFormat("dd.MM.yyyy HH:mm")
+        self.left_at.setCalendarPopup(True)
+        self.left_at.setMinimumDateTime(QDateTime(self.arrived_at))
+        self.left_at.setMaximumDateTime(QDateTime(current))
+        configure_calendar(self.left_at)
+        form.addRow("Фактический уход", self.left_at)
+        self.reason_editor = QLineEdit("Администратор не отметил уход вовремя")
+        self.reason_editor.setMaxLength(500)
+        form.addRow("Причина", self.reason_editor)
+        layout.addLayout(form)
+        self.error = QLabel()
+        self.error.setObjectName("formError")
+        self.error.hide()
+        layout.addWidget(self.error)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Закрыть посещение")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def payload(self) -> dict[str, str]:
+        left_at = center_wall_time(self.left_at.dateTime().toPython())
+        return {
+            "left_at": left_at.isoformat(),
+            "reason": self.reason_editor.text().strip(),
+        }
+
+    def _validate_and_accept(self) -> None:
+        left_at = center_wall_time(self.left_at.dateTime().toPython())
+        reason = self.reason_editor.text().strip()
+        if left_at <= self.arrived_at:
+            self.error.setText("Время ухода должно быть позже времени прихода.")
+            self.error.show()
+            return
+        if len(reason) < 3:
+            self.error.setText("Укажите причину корректировки.")
+            self.error.show()
+            return
+        self.accept()
+
+
 class ReferenceDialog(QDialog):
     def __init__(
         self,
@@ -1007,6 +1070,9 @@ class LessonCardDialog(QDialog):
         super().__init__(parent)
         self.lesson = lesson
         self.operation: str | None = None
+        self.resend_confirmation_button: QPushButton | None = None
+        self.confirm_by_admin_button: QPushButton | None = None
+        self.exclude_from_lesson_button: QPushButton | None = None
         self.setWindowTitle("Карточка занятия")
         self.setMinimumSize(900, 620)
         layout = QVBoxLayout(self)
@@ -1057,7 +1123,7 @@ class LessonCardDialog(QDialog):
                         "recipient_name": lesson.get("teacher_name_snapshot", ""),
                         "subject_person_id": int(teacher_id),
                         "subject_name": lesson.get("teacher_name_snapshot", ""),
-                        "max_available": False,
+                        "max_available": None,
                         "answer": None,
                         "reason": None,
                     }
@@ -1074,7 +1140,7 @@ class LessonCardDialog(QDialog):
                         "recipient_name": name,
                         "subject_person_id": int(person_id),
                         "subject_name": name,
-                        "max_available": False,
+                        "max_available": None,
                         "answer": None,
                         "reason": None,
                     }
@@ -1112,11 +1178,18 @@ class LessonCardDialog(QDialog):
             role_labels = {"student": "Ученик", "guardian": "Родитель", "teacher": "Преподаватель"}
             for row, response in enumerate(confirmation_rows):
                 answer = response.get("answer")
+                max_available = response.get("max_available")
                 values = [
                     response.get("subject_name", ""),
                     response.get("recipient_name", ""),
                     role_labels.get(response.get("recipient_context"), ""),
-                    "Доступен" if response.get("max_available") else "Недоступен",
+                    (
+                        "Доступен"
+                        if max_available is True
+                        else "Недоступен"
+                        if max_available is False
+                        else "Проверяется"
+                    ),
                     "",
                     response.get("reason") or "—",
                 ]
@@ -1270,26 +1343,23 @@ class LessonCardDialog(QDialog):
             confirmation_group.addWidget(confirmation_title)
             confirmation_actions = QHBoxLayout()
             confirmation_actions.setSpacing(6)
-            confirmation_actions.addWidget(
-                _button(
-                    "Подтвердить администратором",
-                    lambda: self._select_operation("confirm_by_admin"),
-                    "primary",
-                )
+            self.confirm_by_admin_button = _button(
+                "Подтвердить администратором",
+                lambda: self._select_operation("confirm_by_admin"),
+                "primary",
             )
-            confirmation_actions.addWidget(
-                _button(
-                    "Повторить запрос",
-                    lambda: self._select_operation("resend_confirmation"),
-                )
+            confirmation_actions.addWidget(self.confirm_by_admin_button)
+            self.resend_confirmation_button = _button(
+                "Повторить запрос",
+                lambda: self._select_operation("resend_confirmation"),
             )
-            confirmation_actions.addWidget(
-                _button(
-                    "Исключить ученика",
-                    lambda: self._select_operation("cancel_from_confirmation"),
-                    "warning",
-                )
+            confirmation_actions.addWidget(self.resend_confirmation_button)
+            self.exclude_from_lesson_button = _button(
+                "Исключить ученика",
+                lambda: self._select_operation("cancel_from_confirmation"),
+                "warning",
             )
+            confirmation_actions.addWidget(self.exclude_from_lesson_button)
             confirmation_group.addLayout(confirmation_actions)
             action_groups.addWidget(confirmation_panel, 3)
 
@@ -1321,6 +1391,11 @@ class LessonCardDialog(QDialog):
             lesson_group.addLayout(lesson_actions)
             action_groups.addWidget(lesson_panel, 2)
             layout.addLayout(action_groups)
+            if self.confirmation_table is not None:
+                self.confirmation_table.itemSelectionChanged.connect(
+                    self._sync_confirmation_actions
+                )
+            self._sync_confirmation_actions()
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -1329,6 +1404,45 @@ class LessonCardDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _sync_confirmation_actions(self) -> None:
+        target = self.selected_confirmation()
+        selected = target is not None
+        max_available = bool(target and target.get("max_available"))
+        if self.resend_confirmation_button is not None:
+            self.resend_confirmation_button.setEnabled(max_available)
+            self.resend_confirmation_button.setToolTip(
+                "Направить выбранному получателю повторный запрос"
+                if max_available
+                else (
+                    "Получатель не подключён к MAX"
+                    if target and target.get("max_available") is False
+                    else "Данные подключения к MAX ещё загружаются"
+                    if selected
+                    else "Сначала выберите получателя в таблице"
+                )
+            )
+        if self.confirm_by_admin_button is not None:
+            self.confirm_by_admin_button.setEnabled(selected)
+            self.confirm_by_admin_button.setToolTip(
+                "Отметить подтверждение после личного звонка"
+                if selected
+                else "Сначала выберите получателя в таблице"
+            )
+        if self.exclude_from_lesson_button is not None:
+            can_exclude = bool(
+                target and target.get("recipient_context") != "teacher"
+            )
+            self.exclude_from_lesson_button.setEnabled(can_exclude)
+            self.exclude_from_lesson_button.setToolTip(
+                "Исключить ученика из этого занятия"
+                if can_exclude
+                else (
+                    "Преподавателя нельзя исключить из списка учеников"
+                    if selected
+                    else "Сначала выберите ученика или родителя"
+                )
+            )
 
     def _select_operation(self, operation: str) -> None:
         if operation in {
@@ -2193,14 +2307,24 @@ class LearningPage(QWidget):
                 has_action = True
             if has_action:
                 self.today_lessons.setCellWidget(row, 6, actions)
-        present = self.today_data.get("present", [])
-        self.present_table.setRowCount(len(present))
-        for row, person in enumerate(present):
+        presence_rows = [
+            *((person, True) for person in self.today_data.get("stale_presence", [])),
+            *((person, False) for person in self.today_data.get("present", [])),
+        ]
+        self.present_table.setRowCount(len(presence_rows))
+        for row, (person, stale) in enumerate(presence_rows):
             arrived = parse_center(person["arrived_at"])
             name_item = QTableWidgetItem(person.get("person_name", ""))
             name_item.setData(Qt.ItemDataRole.UserRole, person.get("person_id"))
+            name_item.setData(Qt.ItemDataRole.UserRole + 1, stale)
+            name_item.setData(Qt.ItemDataRole.UserRole + 2, person.get("arrived_at"))
+            if stale:
+                name_item.setToolTip("Не закрыто посещение за предыдущий день")
             self.present_table.setItem(row, 0, name_item)
-            self.present_table.setItem(row, 1, QTableWidgetItem(f"{arrived:%H:%M}"))
+            arrived_text = (
+                f"{arrived:%d.%m %H:%M} · не закрыто" if stale else f"{arrived:%H:%M}"
+            )
+            self.present_table.setItem(row, 1, QTableWidgetItem(arrived_text))
         alerts = self.today_data.get("alerts", [])
         self.alert_label.setVisible(bool(alerts))
         self.dismiss_alerts_button.setVisible(bool(alerts))
@@ -2375,6 +2499,14 @@ class LearningPage(QWidget):
         lesson = lessons[row]
         if _lesson_requires_reconciliation(lesson):
             self.reconcile_lesson(lesson)
+        elif lesson.get("status") in {"planned", "scheduled"} and not isinstance(
+            lesson.get("confirmation"), dict
+        ):
+            self._run(
+                self.api.learning_lesson,
+                int(lesson["id"]),
+                done=self.open_lesson,
+            )
         else:
             self.open_lesson(lesson)
 
@@ -3024,8 +3156,36 @@ class LearningPage(QWidget):
             selected_id = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
             if selected_id is not None:
                 person_id = selected_id
+                if bool(item.data(Qt.ItemDataRole.UserRole + 1)):
+                    self._correct_stale_departure(
+                        int(person_id), str(item.data(Qt.ItemDataRole.UserRole + 2))
+                    )
+                    return
+            stale = next(
+                (
+                    entry
+                    for entry in self.today_data.get("stale_presence", [])
+                    if entry.get("person_id") == person_id
+                ),
+                None,
+            )
+            if stale is not None:
+                self._correct_stale_departure(int(person_id), str(stale["arrived_at"]))
+                return
         if person_id is not None:
             self._run(self.api.presence_action, int(person_id), action, done=self._action_done)
+
+    def _correct_stale_departure(self, person_id: int, arrived_at: str) -> None:
+        dialog = PresenceDepartureDialog(arrived_at, self)
+        if not dialog.exec():
+            return
+        self._run(
+            self.api.presence_action,
+            person_id,
+            "departure",
+            dialog.payload(),
+            done=self._action_done,
+        )
 
     def _select_present_person(self, row: int) -> None:
         item = self.present_table.item(row, 0)
@@ -3038,6 +3198,11 @@ class LearningPage(QWidget):
         self.presence_person.setCurrentIndex(index)
         self.presence_person.setFocus()
         self.departure_button.setFocus()
+        if bool(item.data(Qt.ItemDataRole.UserRole + 1)):
+            self._correct_stale_departure(
+                int(person_id), str(item.data(Qt.ItemDataRole.UserRole + 2))
+            )
+            return
         self._run(
             self.api.presence_action,
             int(person_id),

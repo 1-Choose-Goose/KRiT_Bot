@@ -171,6 +171,17 @@ class LessonReconciliationPayload(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
 
 
+class PresenceDeparturePayload(BaseModel):
+    left_at: datetime | None = None
+    reason: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_correction(self) -> PresenceDeparturePayload:
+        if self.left_at is not None and len((self.reason or "").strip()) < 3:
+            raise ValueError("Для исправления времени ухода укажите причину")
+        return self
+
+
 def _aware(value: datetime) -> datetime:
     if value.tzinfo is None:
         raise HTTPException(422, "Дата и время должны содержать часовой пояс")
@@ -3538,6 +3549,7 @@ def create_learning_router(
     @router.post("/presence/{person_id}/departure")
     async def departure(
         person_id: int,
+        payload: PresenceDeparturePayload | None = None,
         admin_id: int = Depends(require_management_token),
     ) -> dict[str, Any]:
         async with sessions() as session:
@@ -3563,17 +3575,31 @@ def create_learning_router(
                     "warnings": [],
                     "already_departed": True,
                 }
-            now = utcnow()
-            presence.left_at = now
+            recorded_at = utcnow()
+            departure_at = (
+                _aware(payload.left_at)
+                if payload is not None and payload.left_at is not None
+                else recorded_at
+            )
+            if departure_at <= _db_utc(presence.arrived_at):
+                raise HTTPException(422, "Время ухода должно быть позже времени прихода")
+            if departure_at > recorded_at:
+                raise HTTPException(422, "Время ухода не может находиться в будущем")
+            presence.left_at = departure_at
             presence.left_by_admin_id = admin_id
             person = await session.get(Person, person_id)
-            active = (
-                await session.execute(
-                    select(LessonParticipant, Lesson)
-                    .join(Lesson)
-                    .where(LessonParticipant.person_id == person_id, Lesson.status == "in_progress")
-                )
-            ).all()
+            active = []
+            if payload is None or payload.left_at is None:
+                active = (
+                    await session.execute(
+                        select(LessonParticipant, Lesson)
+                        .join(Lesson)
+                        .where(
+                            LessonParticipant.person_id == person_id,
+                            Lesson.status == "in_progress",
+                        )
+                    )
+                ).all()
             warnings = []
             for participant, lesson in active:
                 if participant.attendance_status not in {"present", "late"}:
@@ -3582,7 +3608,7 @@ def create_learning_router(
                     participant,
                     "left_early",
                     arrived_at=participant.arrived_at,
-                    left_at=now,
+                    left_at=departure_at,
                     late_minutes=participant.late_minutes,
                     early_leave_reason=(
                         participant.early_leave_reason
@@ -3621,6 +3647,11 @@ def create_learning_router(
                     action="presence.departure",
                     entity_type="person",
                     entity_id=person_id,
+                    details={
+                        "corrected": bool(payload and payload.left_at),
+                        "reason": payload.reason.strip() if payload and payload.reason else None,
+                        "left_at": departure_at.isoformat(),
+                    },
                 )
             )
             if person is not None:
@@ -3628,7 +3659,7 @@ def create_learning_router(
                     session,
                     person=person,
                     event_type="departure",
-                    occurred_at=now,
+                    occurred_at=departure_at,
                     center_timezone=center_timezone,
                 )
             await _resolve_admin_condition(session, f"presence:{presence.id}:stale")

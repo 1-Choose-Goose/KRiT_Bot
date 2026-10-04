@@ -353,8 +353,16 @@ class ManagementApi:
             "POST", f"/learning/lessons/{lesson_id}/reconcile", json=payload
         )
 
-    def presence_action(self, person_id: int, action: str) -> dict[str, Any]:
-        return self._request("POST", f"/learning/presence/{person_id}/{action}")
+    def presence_action(
+        self,
+        person_id: int,
+        action: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        kwargs = {"json": payload} if payload is not None else {}
+        return self._request(
+            "POST", f"/learning/presence/{person_id}/{action}", **kwargs
+        )
 
     def student_history(self, person_id: int) -> dict[str, Any]:
         data = self._request("GET", f"/learning/history/person/{person_id}")

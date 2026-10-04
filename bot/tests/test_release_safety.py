@@ -426,10 +426,29 @@ async def test_stale_presence_is_not_current_and_must_be_closed(tmp_path) -> Non
             )
             assert arrival.status_code == 409
             assert arrival.json()["detail"]["code"] == "stale_presence"
+            invalid_departure = await client.post(
+                f"/api/v1/learning/presence/{person_id}/departure",
+                headers=headers,
+                json={
+                    "left_at": (datetime.now(UTC) - timedelta(days=2)).isoformat(),
+                    "reason": "Ошибочное время",
+                },
+            )
+            assert invalid_departure.status_code == 422
+            corrected_departure = datetime.now(UTC) - timedelta(hours=20)
             departure = await client.post(
-                f"/api/v1/learning/presence/{person_id}/departure", headers=headers
+                f"/api/v1/learning/presence/{person_id}/departure",
+                headers=headers,
+                json={
+                    "left_at": corrected_departure.isoformat(),
+                    "reason": "Администратор не отметил уход вовремя",
+                },
             )
             assert departure.status_code == 200, departure.text
+            saved_departure = datetime.fromisoformat(departure.json()["left_at"])
+            if saved_departure.tzinfo is None:
+                saved_departure = saved_departure.replace(tzinfo=UTC)
+            assert saved_departure == corrected_departure
             new_arrival = await client.post(
                 f"/api/v1/learning/presence/{person_id}/arrival", headers=headers
             )

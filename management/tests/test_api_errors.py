@@ -145,3 +145,31 @@ def test_early_leave_does_not_hide_non_404_errors(monkeypatch) -> None:
     with pytest.raises(ApiError, match="фактически не участвует"):
         api.leave_lesson_early(7, 12, "Плохое самочувствие")
     api.close()
+
+
+def test_presence_departure_sends_optional_correction_payload(monkeypatch) -> None:
+    api = ManagementApi("http://127.0.0.1:1")
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def request(method: str, path: str, **kwargs):
+        calls.append((method, path, kwargs))
+        return {"person_id": 7}
+
+    monkeypatch.setattr(api, "_request", request)
+    payload = {
+        "left_at": "2026-10-03T20:00:00+05:00",
+        "reason": "Уход внесён позже",
+    }
+
+    api.presence_action(7, "departure", payload)
+    api.presence_action(7, "arrival")
+
+    assert calls == [
+        (
+            "POST",
+            "/learning/presence/7/departure",
+            {"json": payload},
+        ),
+        ("POST", "/learning/presence/7/arrival", {}),
+    ]
+    api.close()
