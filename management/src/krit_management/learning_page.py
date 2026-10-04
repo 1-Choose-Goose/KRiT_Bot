@@ -740,10 +740,14 @@ class LessonDialog(QDialog):
         if cell is None:
             cell = QTableWidgetItem()
             self.students.setItem(row, 2, cell)
-        cell.setText("—")
+        cell.setText("")
+        cell.setIcon(QIcon())
+        cell.setToolTip("")
         confirmation = self.lesson.get("confirmation")
-        if not selected or not isinstance(confirmation, dict):
+        if not selected:
             return
+        if not isinstance(confirmation, dict):
+            confirmation = {"rows": []}
         targets = [
             target
             for target in confirmation.get("rows", [])
@@ -769,20 +773,25 @@ class LessonDialog(QDialog):
             state, label = "green", "Подтверждено"
         else:
             state, label = "yellow", "Ожидается"
-        background, foreground = {
-            "red": ("#fee2e2", "#991b1b"),
-            "yellow": ("#fef3c7", "#92400e"),
-            "green": ("#dcfce7", "#166534"),
+        marker_color = {
+            "red": "#dc2626",
+            "yellow": "#f59e0b",
+            "green": "#16a34a",
         }[state]
+        cell.setToolTip(label)
         holder = QWidget()
+        holder.setToolTip(label)
         bar = QHBoxLayout(holder)
         bar.setContentsMargins(4, 2, 4, 2)
-        badge = QLabel(label)
-        badge.setStyleSheet(
-            f"background: {background}; color: {foreground}; "
-            "border-radius: 5px; padding: 3px 6px; font-weight: 600;"
+        marker = QFrame()
+        marker.setObjectName("confirmationMarker")
+        marker.setFixedSize(12, 12)
+        marker.setToolTip(label)
+        marker.setStyleSheet(
+            f"background-color: {marker_color}; "
+            "border: 1px solid rgba(15, 35, 71, 0.20); border-radius: 1px;"
         )
-        bar.addWidget(badge)
+        bar.addWidget(marker)
         available_targets = [target for target in targets if target.get("max_available")]
         if available_targets:
             def request_again() -> None:
@@ -1035,24 +1044,64 @@ class LessonCardDialog(QDialog):
             layout.addWidget(actual_teachers)
         self.confirmation_table: QTableWidget | None = None
         confirmation = lesson.get("confirmation")
+        if lesson.get("status") in {"planned", "scheduled"} and not isinstance(
+            confirmation, dict
+        ):
+            fallback_rows: list[dict[str, Any]] = []
+            teacher_id = lesson.get("teacher_id")
+            if teacher_id is not None:
+                fallback_rows.append(
+                    {
+                        "recipient_context": "teacher",
+                        "recipient_person_id": int(teacher_id),
+                        "recipient_name": lesson.get("teacher_name_snapshot", ""),
+                        "subject_person_id": int(teacher_id),
+                        "subject_name": lesson.get("teacher_name_snapshot", ""),
+                        "max_available": False,
+                        "answer": None,
+                        "reason": None,
+                    }
+                )
+            for participant in lesson.get("participants", []):
+                person_id = participant.get("person_id")
+                if person_id is None:
+                    continue
+                name = participant.get("person_name_snapshot", "")
+                fallback_rows.append(
+                    {
+                        "recipient_context": "student",
+                        "recipient_person_id": int(person_id),
+                        "recipient_name": name,
+                        "subject_person_id": int(person_id),
+                        "subject_name": name,
+                        "max_available": False,
+                        "answer": None,
+                        "reason": None,
+                    }
+                )
+            confirmation = {
+                "state": "yellow",
+                "label": "Ожидаются подтверждения",
+                "rows": fallback_rows,
+            }
         if lesson.get("status") in {"planned", "scheduled"} and isinstance(
             confirmation, dict
         ):
-            state_label = QLabel(
-                f"Подтверждения: {confirmation.get('label', 'Ожидаются')}"
-            )
             state = str(confirmation.get("state", "yellow"))
-            state_label.setProperty("confirmationState", state)
-            background, foreground = {
-                "red": ("#fee2e2", "#991b1b"),
-                "green": ("#dcfce7", "#166534"),
-                "yellow": ("#fef3c7", "#92400e"),
-            }.get(state, ("#fef3c7", "#92400e"))
-            state_label.setStyleSheet(
-                f"background: {background}; color: {foreground}; "
-                "border-radius: 7px; padding: 8px 10px; font-weight: 700;"
+            marker_color, marker_tooltip = {
+                "red": ("#dc2626", "Есть отказ"),
+                "green": ("#16a34a", "Все подтвердили"),
+                "yellow": ("#f59e0b", "Ожидаются подтверждения"),
+            }.get(state, ("#f59e0b", "Ожидаются подтверждения"))
+            state_marker = QFrame()
+            state_marker.setObjectName("overallConfirmationMarker")
+            state_marker.setFixedSize(12, 12)
+            state_marker.setToolTip(marker_tooltip)
+            state_marker.setStyleSheet(
+                f"background-color: {marker_color}; "
+                "border: 1px solid rgba(15, 35, 71, 0.20); border-radius: 1px;"
             )
-            layout.addWidget(state_label)
+            layout.addWidget(state_marker, 0, Qt.AlignmentFlag.AlignLeft)
             self.confirmation_table = _table(
                 ["Ученик", "Отвечает", "Роль", "MAX", "Ответ", "Причина"],
                 stretch=(0, 1, 5),
@@ -1061,19 +1110,29 @@ class LessonCardDialog(QDialog):
             confirmation_rows = list(confirmation.get("rows", []))
             self.confirmation_table.setRowCount(len(confirmation_rows))
             role_labels = {"student": "Ученик", "guardian": "Родитель", "teacher": "Преподаватель"}
-            answer_labels = {"yes": "Да", "no": "Нет", None: "—"}
             for row, response in enumerate(confirmation_rows):
+                answer = response.get("answer")
                 values = [
                     response.get("subject_name", ""),
                     response.get("recipient_name", ""),
                     role_labels.get(response.get("recipient_context"), ""),
                     "Доступен" if response.get("max_available") else "Недоступен",
-                    answer_labels.get(response.get("answer"), "—"),
+                    "",
                     response.get("reason") or "—",
                 ]
                 for column, value in enumerate(values):
                     cell = QTableWidgetItem(str(value))
                     cell.setData(Qt.ItemDataRole.UserRole, response)
+                    if column == 4:
+                        answer_color, answer_tooltip = {
+                            "yes": ("#16a34a", "Подтверждено"),
+                            "no": ("#dc2626", "Есть отказ"),
+                            None: ("#f59e0b", "Ожидается подтверждение"),
+                        }.get(answer, ("#f59e0b", "Ожидается подтверждение"))
+                        answer_marker = QPixmap(12, 12)
+                        answer_marker.fill(QColor(answer_color))
+                        cell.setIcon(QIcon(answer_marker))
+                        cell.setToolTip(answer_tooltip)
                     self.confirmation_table.setItem(row, column, cell)
             layout.addWidget(self.confirmation_table)
         self.actual_start: QDateTimeEdit | None = None
@@ -1192,13 +1251,25 @@ class LessonCardDialog(QDialog):
             )
             layout.addLayout(operations)
         elif lesson.get("status") in {"planned", "scheduled"}:
-            confirmation_actions = QHBoxLayout()
-            confirmation_actions.addWidget(
-                _button(
-                    "Повторить запрос",
-                    lambda: self._select_operation("resend_confirmation"),
-                )
+            action_groups = QHBoxLayout()
+            action_groups.setContentsMargins(0, 4, 0, 4)
+            action_groups.setSpacing(10)
+
+            confirmation_panel = QFrame()
+            confirmation_panel.setObjectName("confirmationActionsPanel")
+            confirmation_panel.setStyleSheet(
+                "QFrame#confirmationActionsPanel {"
+                "background: #f8fafc; border: 1px solid #d7e0ec; "
+                "border-radius: 7px;}"
             )
+            confirmation_group = QVBoxLayout(confirmation_panel)
+            confirmation_group.setContentsMargins(10, 8, 10, 10)
+            confirmation_group.setSpacing(7)
+            confirmation_title = QLabel("Подтверждение участия")
+            confirmation_title.setObjectName("actionGroupTitle")
+            confirmation_group.addWidget(confirmation_title)
+            confirmation_actions = QHBoxLayout()
+            confirmation_actions.setSpacing(6)
             confirmation_actions.addWidget(
                 _button(
                     "Подтвердить администратором",
@@ -1208,26 +1279,48 @@ class LessonCardDialog(QDialog):
             )
             confirmation_actions.addWidget(
                 _button(
+                    "Повторить запрос",
+                    lambda: self._select_operation("resend_confirmation"),
+                )
+            )
+            confirmation_actions.addWidget(
+                _button(
                     "Исключить ученика",
                     lambda: self._select_operation("cancel_from_confirmation"),
                     "warning",
                 )
             )
-            confirmation_actions.addStretch(1)
-            layout.addLayout(confirmation_actions)
-            operations = QHBoxLayout()
-            operations.addStretch(1)
-            operations.addWidget(
-                _button("Перенести", lambda: self._select_operation("reschedule"))
+            confirmation_group.addLayout(confirmation_actions)
+            action_groups.addWidget(confirmation_panel, 3)
+
+            lesson_panel = QFrame()
+            lesson_panel.setObjectName("lessonActionsPanel")
+            lesson_panel.setStyleSheet(
+                "QFrame#lessonActionsPanel {"
+                "background: #f8fafc; border: 1px solid #d7e0ec; "
+                "border-radius: 7px;}"
             )
-            operations.addWidget(
+            lesson_group = QVBoxLayout(lesson_panel)
+            lesson_group.setContentsMargins(10, 8, 10, 10)
+            lesson_group.setSpacing(7)
+            lesson_title = QLabel("Управление занятием")
+            lesson_title.setObjectName("actionGroupTitle")
+            lesson_group.addWidget(lesson_title)
+            lesson_actions = QHBoxLayout()
+            lesson_actions.setSpacing(6)
+            lesson_actions.addWidget(
                 _button(
                     "Изменить занятие",
                     lambda: self._select_operation("edit"),
                     "primary",
                 )
             )
-            layout.addLayout(operations)
+            lesson_actions.addWidget(
+                _button("Перенести", lambda: self._select_operation("reschedule"))
+            )
+            lesson_group.addLayout(lesson_actions)
+            action_groups.addWidget(lesson_panel, 2)
+            layout.addLayout(action_groups)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -2245,15 +2338,14 @@ class LearningPage(QWidget):
             }
         state = str(confirmation.get("state", "yellow"))
         colors = {
-            "red": ("#fee2e2", "#991b1b", "Есть отказ"),
-            "yellow": ("#fef3c7", "#92400e", "Ожидаются подтверждения"),
-            "green": ("#dcfce7", "#166534", "Все подтвердили"),
+            "red": ("#dc2626", "Есть отказ"),
+            "yellow": ("#f59e0b", "Ожидаются подтверждения"),
+            "green": ("#16a34a", "Все подтвердили"),
         }
-        background, foreground, label = colors.get(state, colors["yellow"])
-        item.setBackground(QColor(background))
-        item.setForeground(QColor(foreground))
-        base = item.text()
-        item.setText(f"{base} · {label}")
+        marker_color, label = colors.get(state, colors["yellow"])
+        marker = QPixmap(12, 12)
+        marker.fill(QColor(marker_color))
+        item.setIcon(QIcon(marker))
         item.setToolTip(label)
 
     def _calendar_selection_changed(self) -> None:

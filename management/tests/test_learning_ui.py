@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QInputDialog,
     QLabel,
     QPushButton,
@@ -428,6 +429,36 @@ def test_planned_lesson_card_shows_confirmations_and_admin_override_action() -> 
     )
     assert dialog.confirmation_table is not None
     assert dialog.confirmation_table.item(0, 3).text() == "Недоступен"
+    overall_marker = dialog.findChild(QFrame, "overallConfirmationMarker")
+    assert overall_marker is not None
+    assert "#f59e0b" in overall_marker.styleSheet()
+    answer = dialog.confirmation_table.item(0, 4)
+    assert answer.text() == ""
+    assert answer.icon().pixmap(12, 12).toImage().pixelColor(6, 6).name() == "#f59e0b"
+    assert answer.toolTip() == "Ожидается подтверждение"
+    assert not any(
+        label.text().startswith("Подтверждения:")
+        for label in dialog.findChildren(QLabel)
+    )
+    assert any(
+        button.text() == "Повторить запрос"
+        for button in dialog.findChildren(QPushButton)
+    )
+    confirmation_panel = dialog.findChild(QFrame, "confirmationActionsPanel")
+    lesson_panel = dialog.findChild(QFrame, "lessonActionsPanel")
+    assert confirmation_panel is not None
+    assert lesson_panel is not None
+    assert {
+        button.text() for button in confirmation_panel.findChildren(QPushButton)
+    } == {
+        "Подтвердить администратором",
+        "Повторить запрос",
+        "Исключить ученика",
+    }
+    assert {button.text() for button in lesson_panel.findChildren(QPushButton)} == {
+        "Изменить занятие",
+        "Перенести",
+    }
     dialog.confirmation_table.selectRow(0)
     confirm_button = next(
         button
@@ -441,6 +472,45 @@ def test_planned_lesson_card_shows_confirmations_and_admin_override_action() -> 
     app.processEvents()
 
 
+def test_planned_lesson_card_builds_selectable_waiting_rows_without_confirmation_payload() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = LessonCardDialog(
+        {
+            "id": 2,
+            "start_at": "2099-09-30T10:30:00+05:00",
+            "end_at": "2099-09-30T11:30:00+05:00",
+            "subject_name_snapshot": "Русский язык",
+            "teacher_id": 5,
+            "teacher_name_snapshot": "Рябова Галина Викторовна",
+            "room_name_snapshot": "Кабинет №1",
+            "participants": [
+                {"person_id": 7, "person_name_snapshot": "Куц Олег Олегович"},
+                {"person_id": 8, "person_name_snapshot": "Пупкин Иван Пупкович"},
+            ],
+            "status": "planned",
+        }
+    )
+
+    assert dialog.confirmation_table is not None
+    assert dialog.confirmation_table.rowCount() == 3
+    for row in range(dialog.confirmation_table.rowCount()):
+        answer = dialog.confirmation_table.item(row, 4)
+        assert answer.text() == ""
+        assert answer.icon().pixmap(12, 12).toImage().pixelColor(6, 6).name() == "#f59e0b"
+
+    dialog.confirmation_table.selectRow(1)
+    confirm_button = next(
+        button
+        for button in dialog.findChildren(QPushButton)
+        if button.text() == "Подтвердить администратором"
+    )
+    confirm_button.click()
+    assert dialog.operation == "confirm_by_admin"
+    assert dialog.selected_confirmation()["subject_person_id"] == 7
+    dialog.deleteLater()
+    app.processEvents()
+
+
 def test_confirmation_colors_are_visible_in_today_and_calendar_tables() -> None:
     app = QApplication.instance() or QApplication([])
     page = LearningPage(FakeApi())  # type: ignore[arg-type]
@@ -448,9 +518,9 @@ def test_confirmation_colors_are_visible_in_today_and_calendar_tables() -> None:
     page.shutdown()
     lessons = []
     expected = {
-        "red": ("#fee2e2", "Есть отказ"),
-        "yellow": ("#fef3c7", "Ожидаются подтверждения"),
-        "green": ("#dcfce7", "Все подтвердили"),
+        "red": ("#dc2626", "Есть отказ"),
+        "yellow": ("#f59e0b", "Ожидаются подтверждения"),
+        "green": ("#16a34a", "Все подтвердили"),
     }
     for index, (state, (_color, label)) in enumerate(expected.items(), start=1):
         lessons.append(
@@ -472,8 +542,10 @@ def test_confirmation_colors_are_visible_in_today_and_calendar_tables() -> None:
     for row, (_state, (color, label)) in enumerate(expected.items()):
         for table in (page.today_lessons, page.calendar_table):
             item = table.item(row, 5)
-            assert item.background().color().name() == color
-            assert label in item.text()
+            marker = item.icon().pixmap(12, 12).toImage()
+            assert marker.pixelColor(6, 6).name() == color
+            assert item.text() == "Запланировано"
+            assert item.toolTip() == label
     page.deleteLater()
     app.processEvents()
 
@@ -499,8 +571,10 @@ def test_planned_lesson_without_confirmation_payload_is_shown_as_waiting() -> No
 
     for table in (page.today_lessons, page.calendar_table):
         item = table.item(0, 5)
-        assert item.background().color().name() == "#fef3c7"
-        assert item.text() == "Запланировано · Ожидаются подтверждения"
+        marker = item.icon().pixmap(12, 12).toImage()
+        assert marker.pixelColor(6, 6).name() == "#f59e0b"
+        assert item.text() == "Запланировано"
+        assert item.toolTip() == "Ожидаются подтверждения"
     page.deleteLater()
     app.processEvents()
 
@@ -532,7 +606,13 @@ def test_lesson_editor_shows_participant_confirmation_and_resend_feedback() -> N
     dialog.resend_confirmation_requested.connect(lambda rows: emitted.append(list(rows)))
     holder = dialog.students.cellWidget(0, 2)
     assert holder is not None
-    assert any(label.text() == "Ожидается" for label in holder.findChildren(QLabel))
+    confirmation_cell = dialog.students.item(0, 2)
+    assert confirmation_cell.text() == ""
+    assert confirmation_cell.toolTip() == "Ожидается"
+    marker = holder.findChild(QFrame, "confirmationMarker")
+    assert marker is not None
+    assert "#f59e0b" in marker.styleSheet()
+    assert not any(label.text() == "Ожидается" for label in holder.findChildren(QLabel))
     resend = next(
         button for button in holder.findChildren(QPushButton) if button.text() == "Повторить"
     )
@@ -541,6 +621,29 @@ def test_lesson_editor_shows_participant_confirmation_and_resend_feedback() -> N
     assert emitted == [[target]]
     assert not resend.isEnabled()
     assert resend.text() == "Отправлено"
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_selected_participant_without_confirmation_data_gets_yellow_marker() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = LessonDialog(
+        {
+            "subjects": [],
+            "teachers": [],
+            "rooms": [],
+            "groups": [],
+            "students": [{"id": 7, "full_name": "Куц Олег Олегович"}],
+        },
+        {"participants": [{"person_id": 7}], "notes": None},
+    )
+
+    holder = dialog.students.cellWidget(0, 2)
+    assert holder is not None
+    marker = holder.findChild(QFrame, "confirmationMarker")
+    assert marker is not None
+    assert "#f59e0b" in marker.styleSheet()
+    assert dialog.students.item(0, 2).text() == ""
     dialog.deleteLater()
     app.processEvents()
 
@@ -1355,7 +1458,13 @@ def test_group_selection_loads_members_and_keeps_extra_student_available() -> No
     extra = dialog.students.cellWidget(2, 0).findChild(QCheckBox)
     assert all(check.isChecked() and check.isEnabled() for check in group_checks)
     assert dialog.students.horizontalHeaderItem(2).text() == "Подтверждение"
-    assert [dialog.students.item(row, 2).text() for row in range(2)] == ["—", "—"]
+    assert [dialog.students.item(row, 2).text() for row in range(2)] == ["", ""]
+    for row in range(2):
+        marker = dialog.students.cellWidget(row, 2).findChild(
+            QFrame, "confirmationMarker"
+        )
+        assert marker is not None
+        assert "#f59e0b" in marker.styleSheet()
     assert extra.isEnabled() and not extra.isChecked()
     extra.setChecked(True)
     assert dialog.payload()["participant_ids"] == [10, 11, 12]
