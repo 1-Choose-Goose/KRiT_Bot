@@ -18,6 +18,7 @@
 - Never persist or log plain-text passwords, MAX tokens, JWT secrets, PostgreSQL passwords, or restore credentials.
 - Automatic restore follows `%LOCALAPPDATA%\KRiT\Backups\KRiT-latest-trusted.json`; the user never selects an arbitrary file, and retention keeps 7 daily plus 4 weekly trusted sets.
 - Restore supports both a new empty server and an existing server after accidental deletion; every target gets a server-side safety dump, and an existing server requires password re-entry plus `ВОССТАНОВИТЬ`.
+- Exactly one server-side safety set remains pending after restore; only SuperAdmin can roll it back or confirm deletion, and another restore is blocked until that decision.
 - Production schema changes require Alembic; application startup never silently mutates PostgreSQL schema.
 - Release is blocked unless an end-to-end test proves every configured KRiT database can be backed up and restored; the current allowlist contains `krit_bot` and never enumerates unrelated PostgreSQL databases.
 - Preserve existing client, learning, communications, MAX, update, and SQLite behavior unless the spec explicitly changes it.
@@ -27,7 +28,7 @@
 - Mixed-case or whitespace-padded logins must not bypass case-insensitive uniqueness; Task 2 tests normalized create/update/login collisions.
 - A restored database can contain old JWTs and an unknown protected-account password; Task 5 tests token revocation and forced `Choose_Goose/123` change after restore.
 - A dropped connection/full disk must not destroy history, and legitimate audited deletion must remain trusted while unexplained loss is quarantined without pruning; Task 4 tests `.part`, atomic-pointer, audit-watermark, and rotation behavior.
-- A production server with existing data must require the stronger confirmation path and roll back to its safety dump on restore failure; Task 5 tests populated categories, missing confirmation, and the rolled-back checksum.
+- A production server with existing data must require stronger confirmation, roll back on failure, and retain exactly one safety set until a SuperAdmin decision; Task 5 tests confirmation, checksum, disk space, lockout, rollback, and audited deletion.
 - Service/backup/restore buttons can be double-clicked or the process can restart mid-operation; Tasks 3–5 test locks, `409` responses, persisted operation state, and retry behavior.
 
 ---
@@ -142,14 +143,14 @@
 - Test: `management/tests/test_backups.py`
 
 **Interfaces:**
-- Produces restore endpoints from the spec and `RestoreState(id, phase, transferred, total, error)` persisted under `/var/lib/krit/restore`.
+- Produces restore endpoints from the spec, safety-set rollback/delete endpoints, and `RestoreState(id, phase, transferred, total, error)` persisted under `/var/lib/krit/restore`.
 - Produces `ManagementApi.for_server(base_url)`, `.create_restore(metadata)`, `.upload_restore(...)`, `.apply_restore(...)`, `.restore_status(...)`.
 - Consumes: Task 2 SuperAdmin authentication, Task 4 verified `BackupInfo`, and fixed paths from deployment configuration.
 
-- [ ] **Step 1: Write failing API tests** for authentication, streamed size/hash verification, invalid archive/schema, upload expiry, backup/restore lock sharing, and no client-controlled filesystem or command values.
+- [ ] **Step 1: Write failing API tests** for authentication, streamed size/hash verification, invalid archive/schema, insufficient disk space, upload expiry, backup/restore lock sharing, pending-safety-set `409`, and no client-controlled filesystem or command values.
 - [ ] **Step 2: Write failing target-state tests** for the simple bootstrap-only path, existing clients/lessons/messages/admins requiring password re-entry plus exact `ВОССТАНОВИТЬ`, and rejection without either confirmation.
 - [ ] **Step 3: Implement `restores.py` upload/state/guard logic** and dispatch only a fixed operation ID to the privileged helper.
-- [ ] **Step 4: Write failing helper tests** proving every configured KRiT database is safety-dumped, dropped/recreated and fully replaced from its matching archive; also test fixed pg_restore commands, maintenance marker, whole-set rollback after any restore/migration failure, protected-account reset, auth-version invalidation, and restart ordering.
+- [ ] **Step 4: Write failing helper tests** proving every configured KRiT database is safety-dumped, dropped/recreated and fully replaced from its matching archive; also test fixed pg_restore commands, maintenance marker, whole-set rollback after any restore/migration failure, protected-account reset, auth-version invalidation, restart ordering, retained single safety set, explicit rollback, and SuperAdmin-confirmed audited deletion.
 - [ ] **Step 5: Implement `krit_restore_helper.py`** with allowlisted ownership/permissions and no request-derived shell evaluation.
 - [ ] **Step 6: Write and implement client streaming tests/methods** for progress, retryable polling, password lifetime, health recovery, and forced re-login.
 - [ ] **Step 7: Run** `pytest bot/tests/test_restores.py management/tests/test_backups.py -q` and expect all passing.
@@ -174,7 +175,7 @@
 - [ ] **Step 2: Implement profile-aware login and role-filtered navigation**, including the styled Reports placeholder.
 - [ ] **Step 3: Write failing administration UI tests** for all user actions, protected/self/last-SuperAdmin feedback, confirmation dialogs, and refresh after success.
 - [ ] **Step 4: Implement the user table/forms and service-control cards** using background workers and disabled busy buttons.
-- [ ] **Step 5: Write failing backup/restore UI tests** for startup daily schedule, 24-hour throttle, manual backup, 7-daily/4-weekly history, suspicious-copy explanation/trust/delete actions, automatically discovered latest trusted set, address/port/login/password form with no file chooser, new/existing target indication, strong existing-server confirmation, upload progress, and forced re-login.
+- [ ] **Step 5: Write failing backup/restore UI tests** for startup daily schedule, 24-hour throttle, manual backup, 7-daily/4-weekly history, suspicious-copy explanation/trust/delete actions, automatically discovered latest trusted set, address/port/login/password form with no file chooser, new/existing target indication, strong existing-server confirmation, upload progress, forced re-login, pending safety-set display, rollback, confirmed deletion, and restore lockout until a decision.
 - [ ] **Step 6: Implement backup scheduling and restore workflow**; clear the restore password immediately after request completion/failure and never place it in settings.
 - [ ] **Step 7: Run** `pytest management/tests/test_administration_ui.py management/tests/test_learning_ui.py management/tests/test_communications_ui.py -q` and expect all passing.
 - [ ] **Step 8: Commit** `feat: add administration and disaster recovery UI`.
