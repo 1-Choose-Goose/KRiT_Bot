@@ -63,6 +63,9 @@ class FakeApi:
         assert date_to
         return []
 
+    def learning_lesson(self, lesson_id: int) -> dict[str, object]:
+        return {"id": lesson_id, "participants": []}
+
     def lesson_action(
         self, lesson_id: int, action: str, payload: dict[str, object] | None = None
     ) -> dict[str, object]:
@@ -435,6 +438,116 @@ def test_planned_lesson_card_shows_confirmations_and_admin_override_action() -> 
     assert dialog.operation == "confirm_by_admin"
     assert dialog.selected_confirmation() == response
     dialog.deleteLater()
+    app.processEvents()
+
+
+def test_confirmation_colors_are_visible_in_today_and_calendar_tables() -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.shutdown()
+    lessons = []
+    expected = {
+        "red": ("#fee2e2", "Есть отказ"),
+        "yellow": ("#fef3c7", "Ожидаются подтверждения"),
+        "green": ("#dcfce7", "Все подтвердили"),
+    }
+    for index, (state, (_color, label)) in enumerate(expected.items(), start=1):
+        lessons.append(
+            {
+                "id": index,
+                "start_at": f"2026-10-04T{9 + index:02d}:00:00+05:00",
+                "end_at": f"2026-10-04T{10 + index:02d}:00:00+05:00",
+                "subject_name_snapshot": "Информатика",
+                "teacher_name_snapshot": "Учитель",
+                "room_name_snapshot": "Кабинет",
+                "participants": [],
+                "status": "planned",
+                "confirmation": {"state": state, "label": label, "rows": []},
+            }
+        )
+    page._today_loaded({"lessons": lessons, "present": [], "alerts": []})
+    page._calendar_loaded(lessons)
+
+    for row, (_state, (color, label)) in enumerate(expected.items()):
+        for table in (page.today_lessons, page.calendar_table):
+            item = table.item(row, 5)
+            assert item.background().color().name() == color
+            assert label in item.text()
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_lesson_editor_shows_participant_confirmation_and_resend_feedback() -> None:
+    app = QApplication.instance() or QApplication([])
+    target = {
+        "recipient_context": "student",
+        "recipient_person_id": 7,
+        "subject_person_id": 7,
+        "answer": None,
+        "max_available": True,
+    }
+    dialog = LessonDialog(
+        {
+            "subjects": [],
+            "teachers": [],
+            "rooms": [],
+            "groups": [],
+            "students": [{"id": 7, "full_name": "Куц Олег Олегович"}],
+        },
+        {
+            "participants": [{"person_id": 7}],
+            "confirmation": {"state": "yellow", "rows": [target]},
+            "notes": None,
+        },
+    )
+    emitted: list[list[dict[str, object]]] = []
+    dialog.resend_confirmation_requested.connect(lambda rows: emitted.append(list(rows)))
+    holder = dialog.students.cellWidget(0, 2)
+    assert holder is not None
+    assert any(label.text() == "Ожидается" for label in holder.findChildren(QLabel))
+    resend = next(
+        button for button in holder.findChildren(QPushButton) if button.text() == "Повторить"
+    )
+    resend.click()
+
+    assert emitted == [[target]]
+    assert not resend.isEnabled()
+    assert resend.text() == "Отправлено"
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_student_journal_loads_full_lesson_before_opening_card(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.shutdown()
+    page._student_history_loaded(
+        {
+            "lessons": [
+                {
+                    "id": 27,
+                    "start_at": "2026-09-29T16:00:00+05:00",
+                    "end_at": "2026-09-29T17:00:00+05:00",
+                    "subject_name_snapshot": "Русский язык",
+                    "teacher_name_snapshot": "Учитель",
+                    "attendance_status": "present",
+                }
+            ]
+        }
+    )
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        page,
+        "_run",
+        lambda fn, *args, **kwargs: calls.append((fn, *args)),
+    )
+    page.student_journal.selectRow(0)
+    page._open_student_journal_lesson()
+
+    assert calls == [(page.api.learning_lesson, 27)]
+    page.deleteLater()
     app.processEvents()
 
 
@@ -1133,7 +1246,7 @@ def test_group_defaults_fill_new_lesson_without_changing_override_support() -> N
     assert dialog.subject.currentData() == 1
     assert dialog.teacher.currentData() == 2
     assert dialog.duration.value() == 90
-    assert dialog.end_display.text() == dialog._end_datetime().toString("HH:mm")
+    assert dialog.end.dateTime() == dialog.start.dateTime().addSecs(90 * 60)
     dialog.deleteLater()
 
 
@@ -1167,6 +1280,7 @@ def test_lesson_dialog_keeps_selected_students_at_top() -> None:
         "Алексеев Александр",
         "Волкова Алиса",
     ]
+    assert dialog.students.item(0, 0).text() == ""
     dialog.deleteLater()
     app.processEvents()
 
@@ -1212,15 +1326,18 @@ def test_group_selection_loads_members_and_keeps_extra_student_available() -> No
         dialog.students.cellWidget(row, 0).findChild(QCheckBox) for row in range(2)
     ]
     extra = dialog.students.cellWidget(2, 0).findChild(QCheckBox)
-    assert all(check.isChecked() and not check.isEnabled() for check in group_checks)
-    assert [dialog.students.item(row, 2).text() for row in range(2)] == [
-        "Из группы",
-        "Из группы",
-    ]
+    assert all(check.isChecked() and check.isEnabled() for check in group_checks)
+    assert dialog.students.horizontalHeaderItem(2).text() == "Подтверждение"
+    assert [dialog.students.item(row, 2).text() for row in range(2)] == ["—", "—"]
     assert extra.isEnabled() and not extra.isChecked()
     extra.setChecked(True)
     assert dialog.payload()["participant_ids"] == [10, 11, 12]
-    assert dialog.participant_count.text() == "Из группы: 2 · доп.: 1"
+    assert dialog.participant_count.text() == "Из группы: 2 · исключено: 0 · доп.: 1"
+    group_checks[0].setChecked(False)
+    payload = dialog.payload()
+    assert payload["participant_ids"] == [11, 12]
+    assert payload["excluded_participant_ids"] == [10]
+    assert dialog.participant_count.text() == "Из группы: 1 · исключено: 1 · доп.: 1"
     dialog.deleteLater()
     app.processEvents()
 
@@ -1249,14 +1366,14 @@ def test_lesson_payload_contains_timezone_and_calculated_end() -> None:
         "students": [],
     }
     dialog = LessonDialog(references)
-    dialog.duration.setValue(60)
+    dialog.end.setDateTime(dialog.start.dateTime().addSecs(75 * 60))
     payload = dialog.payload()
     start = datetime.fromisoformat(payload["start_at"])
     end = datetime.fromisoformat(payload["end_at"])
 
     assert start.utcoffset() is not None
     assert end.utcoffset() is not None
-    assert end - start == timedelta(minutes=60)
+    assert end - start == timedelta(minutes=75)
     dialog.deleteLater()
     app.processEvents()
 

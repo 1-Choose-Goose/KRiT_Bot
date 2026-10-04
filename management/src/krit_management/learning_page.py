@@ -67,6 +67,13 @@ ATTENDANCE_LABELS = {
 }
 
 
+class _ParticipantSortItem(QTableWidgetItem):
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        return str(self.data(Qt.ItemDataRole.UserRole) or "") < str(
+            other.data(Qt.ItemDataRole.UserRole) or ""
+        )
+
+
 def _lesson_requires_reconciliation(
     lesson: dict[str, Any], *, current_time: datetime | None = None
 ) -> bool:
@@ -510,6 +517,8 @@ class ReferenceDialog(QDialog):
 
 
 class LessonDialog(QDialog):
+    resend_confirmation_requested = Signal(object)
+
     def __init__(
         self, references: dict[str, Any], lesson: dict[str, Any] | None = None, parent=None
     ) -> None:
@@ -517,6 +526,7 @@ class LessonDialog(QDialog):
         self.references = references
         self.lesson = lesson or {}
         self._group_member_ids: set[int] = set()
+        self._excluded_group_member_ids: set[int] = set()
         self.setWindowTitle("Занятие")
         self.setMinimumSize(800, 740)
         self.resize(880, 840)
@@ -538,26 +548,30 @@ class LessonDialog(QDialog):
         self.start.setCalendarPopup(True)
         configure_calendar(self.start)
         self.start.setDisplayFormat("dd.MM.yyyy HH:mm")
+        self.end = QDateTimeEdit(QDateTime(rounded + timedelta(hours=1)))
+        self.end.setCalendarPopup(True)
+        configure_calendar(self.end)
+        self.end.setDisplayFormat("dd.MM.yyyy HH:mm")
         self.duration = QSpinBox()
         self.duration.setRange(5, 1440)
         self.duration.setSingleStep(5)
         self.duration.setSuffix(" мин")
         self.duration.setValue(60)
-        self.end_display = QLineEdit()
-        self.end_display.setReadOnly(True)
-        self.end_display.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.end_display.setAccessibleName("Рассчитанное время окончания занятия")
+        self.duration.hide()
+        self.end_display = self.end
+        self.end.setAccessibleName("Время окончания занятия")
         self.start.dateTimeChanged.connect(self._update_end_display)
         self.duration.valueChanged.connect(self._update_end_display)
+        self.end.dateTimeChanged.connect(self._end_datetime_changed)
         self.students = QTableWidget(0, 3)
-        self.students.setHorizontalHeaderLabels(["Выбрать", "Ученик", "Источник"])
+        self.students.setHorizontalHeaderLabels(["Выбрать", "Ученик", "Подтверждение"])
         self.students.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.students.verticalHeader().setVisible(False)
         self.students.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.students.setColumnWidth(0, 90)
         self.students.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.students.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.students.setColumnWidth(2, 125)
+        self.students.setColumnWidth(2, 220)
         self.students.setMinimumHeight(290)
         selected = {p.get("person_id") for p in self.lesson.get("participants", [])}
         self._manual_participant_ids = {int(person_id) for person_id in selected if person_id}
@@ -575,12 +589,11 @@ class LessonDialog(QDialog):
             holder_layout.setContentsMargins(0, 0, 0, 0)
             holder_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             holder_layout.addWidget(check)
-            sort_item = QTableWidgetItem()
-            sort_item.setForeground(QColor("transparent"))
+            sort_item = _ParticipantSortItem()
             self.students.setItem(row, 0, sort_item)
             self.students.setCellWidget(row, 0, holder)
             self.students.setItem(row, 1, QTableWidgetItem(person.get("full_name", "")))
-            self.students.setItem(row, 2, QTableWidgetItem("Вручную" if check.isChecked() else "—"))
+            self.students.setItem(row, 2, QTableWidgetItem("—"))
         self.students.cellClicked.connect(self._toggle_student_row)
         self.student_search = QLineEdit()
         self.student_search.setPlaceholderText("Введите фамилию или имя…")
@@ -602,8 +615,7 @@ class LessonDialog(QDialog):
         form.addRow("Кабинет", self.room)
         form.addRow("Группа", self.group)
         form.addRow("Начало", self.start)
-        form.addRow("Продолжительность", self.duration)
-        form.addRow("Окончание", self.end_display)
+        form.addRow("Окончание", self.end)
         if not self.lesson:
             form.addRow("", self.repeat)
             form.addRow("Количество занятий", self.occurrences)
@@ -634,6 +646,10 @@ class LessonDialog(QDialog):
             self._update_end_display()
         initial_group_ids = self._active_group_member_ids()
         self._manual_participant_ids.difference_update(initial_group_ids)
+        if self.lesson:
+            self._excluded_group_member_ids = initial_group_ids - {
+                int(person_id) for person_id in selected if person_id
+            }
         self._refresh_group_participants()
         self.group.currentIndexChanged.connect(self._apply_group_defaults)
         self.start.dateTimeChanged.connect(self._refresh_group_participants)
@@ -701,25 +717,83 @@ class LessonDialog(QDialog):
             person_id = int(check.property("person_id"))
             from_group = person_id in self._group_member_ids
             check.blockSignals(True)
-            check.setChecked(from_group or person_id in self._manual_participant_ids)
-            check.setEnabled(not from_group)
+            check.setChecked(
+                (from_group and person_id not in self._excluded_group_member_ids)
+                or person_id in self._manual_participant_ids
+            )
+            check.setEnabled(True)
             check.setToolTip(
-                "Участник группы добавляется автоматически"
+                "Снимите отметку, чтобы исключить ученика только из этого занятия"
                 if from_group
                 else "Дополнительный участник занятия"
             )
             check.blockSignals(False)
-            source = self.students.item(row, 2)
-            if source is not None:
-                source.setText(
-                    "Из группы"
-                    if from_group
-                    else "Дополнительно"
-                    if check.isChecked()
-                    else "—"
-                )
+            self._render_participant_confirmation(row, person_id, check.isChecked())
         self._sort_students()
         self._student_selection_changed()
+
+    def _render_participant_confirmation(
+        self, row: int, person_id: int, selected: bool
+    ) -> None:
+        self.students.removeCellWidget(row, 2)
+        cell = self.students.item(row, 2)
+        if cell is None:
+            cell = QTableWidgetItem()
+            self.students.setItem(row, 2, cell)
+        cell.setText("—")
+        confirmation = self.lesson.get("confirmation")
+        if not selected or not isinstance(confirmation, dict):
+            return
+        targets = [
+            target
+            for target in confirmation.get("rows", [])
+            if int(target.get("subject_person_id") or -1) == person_id
+            and target.get("recipient_context") in {"student", "guardian"}
+        ]
+        student_answers = [
+            target.get("answer")
+            for target in targets
+            if target.get("recipient_context") == "student"
+        ]
+        guardian_answers = [
+            target.get("answer")
+            for target in targets
+            if target.get("recipient_context") == "guardian"
+        ]
+        answers = student_answers + guardian_answers
+        if "no" in answers:
+            state, label = "red", "Есть отказ"
+        elif "yes" in student_answers and (
+            not guardian_answers or "yes" in guardian_answers
+        ):
+            state, label = "green", "Подтверждено"
+        else:
+            state, label = "yellow", "Ожидается"
+        background, foreground = {
+            "red": ("#fee2e2", "#991b1b"),
+            "yellow": ("#fef3c7", "#92400e"),
+            "green": ("#dcfce7", "#166534"),
+        }[state]
+        holder = QWidget()
+        bar = QHBoxLayout(holder)
+        bar.setContentsMargins(4, 2, 4, 2)
+        badge = QLabel(label)
+        badge.setStyleSheet(
+            f"background: {background}; color: {foreground}; "
+            "border-radius: 5px; padding: 3px 6px; font-weight: 600;"
+        )
+        bar.addWidget(badge)
+        available_targets = [target for target in targets if target.get("max_available")]
+        if available_targets:
+            def request_again() -> None:
+                resend.setEnabled(False)
+                resend.setText("Отправлено")
+                self.resend_confirmation_requested.emit(available_targets)
+
+            resend = _button("Повторить", request_again, compact=True)
+            bar.addWidget(resend)
+        bar.addStretch(1)
+        self.students.setCellWidget(row, 2, holder)
 
     def _sort_students(self) -> None:
         for row in range(self.students.rowCount()):
@@ -730,16 +804,25 @@ class LessonDialog(QDialog):
             if check is None or name is None or sort_item is None:
                 continue
             selected_rank = "0" if check.isChecked() else "1"
-            sort_item.setText(f"{selected_rank}|{name.text().casefold()}")
+            sort_item.setData(
+                Qt.ItemDataRole.UserRole,
+                f"{selected_rank}|{name.text().casefold()}",
+            )
         self.students.sortItems(0, Qt.SortOrder.AscendingOrder)
         self._filter_students()
 
     def _student_checkbox_toggled(self, check: QCheckBox, checked: bool) -> None:
         person_id = int(check.property("person_id"))
-        if checked:
-            self._manual_participant_ids.add(person_id)
+        if person_id in self._group_member_ids:
+            if checked:
+                self._excluded_group_member_ids.discard(person_id)
+            else:
+                self._excluded_group_member_ids.add(person_id)
         else:
-            self._manual_participant_ids.discard(person_id)
+            if checked:
+                self._manual_participant_ids.add(person_id)
+            else:
+                self._manual_participant_ids.discard(person_id)
         self._refresh_group_participants()
 
     def _reload_lesson_teachers(
@@ -759,22 +842,35 @@ class LessonDialog(QDialog):
     def set_period(self, start_at: str, end_at: str) -> None:
         start = QDateTime.fromString(start_at, Qt.DateFormat.ISODate)
         end = QDateTime.fromString(end_at, Qt.DateFormat.ISODate)
+        self.start.blockSignals(True)
+        self.end.blockSignals(True)
         if start.isValid():
             self.start.setDateTime(start)
         if start.isValid() and end.isValid():
             self.duration.setValue(max(5, start.secsTo(end) // 60))
-        self._update_end_display()
+            self.end.setDateTime(end)
+        self.start.blockSignals(False)
+        self.end.blockSignals(False)
 
     def _end_datetime(self) -> QDateTime:
-        return self.start.dateTime().addSecs(self.duration.value() * 60)
+        return self.end.dateTime()
 
     def _update_end_display(self, _value: object = None) -> None:
-        end = self._end_datetime()
-        if end.date() == self.start.date():
-            text = end.toString("HH:mm")
-        else:
-            text = end.toString("dd.MM.yyyy HH:mm")
-        self.end_display.setText(text)
+        expected = self.start.dateTime().addSecs(self.duration.value() * 60)
+        self.end.blockSignals(True)
+        self.end.setDateTime(expected)
+        self.end.blockSignals(False)
+
+    def _end_datetime_changed(self, _value: object = None) -> None:
+        seconds = self.start.dateTime().secsTo(self.end.dateTime())
+        if seconds < 300:
+            self.end.blockSignals(True)
+            self.end.setDateTime(self.start.dateTime().addSecs(300))
+            self.end.blockSignals(False)
+            seconds = 300
+        self.duration.blockSignals(True)
+        self.duration.setValue(max(5, seconds // 60))
+        self.duration.blockSignals(False)
 
     def _filter_students(self, _value: object = None) -> None:
         query = self.student_search.text()
@@ -789,14 +885,19 @@ class LessonDialog(QDialog):
 
     def _student_selection_changed(self, _checked: bool = False) -> None:
         selected = 0
+        selected_from_group = 0
         for row in range(self.students.rowCount()):
             holder = self.students.cellWidget(row, 0)
             check = holder.findChild(QCheckBox) if holder else None
-            selected += int(bool(check and check.isChecked()))
-        extras = max(0, selected - len(self._group_member_ids))
+            is_selected = bool(check and check.isChecked())
+            selected += int(is_selected)
+            if check is not None and int(check.property("person_id")) in self._group_member_ids:
+                selected_from_group += int(is_selected)
+        extras = max(0, selected - selected_from_group)
         if self._group_member_ids:
+            excluded = len(self._group_member_ids) - selected_from_group
             self.participant_count.setText(
-                f"Из группы: {len(self._group_member_ids)} · доп.: {extras}"
+                f"Из группы: {selected_from_group} · исключено: {excluded} · доп.: {extras}"
             )
         else:
             self.participant_count.setText(f"Выбрано: {selected}")
@@ -814,6 +915,9 @@ class LessonDialog(QDialog):
                 missing.append(label)
         if missing:
             self.show_error("Выберите " + ", ".join(missing) + ".")
+            return
+        if self.end.dateTime() <= self.start.dateTime():
+            self.show_error("Окончание должно быть позже начала.")
             return
         self.error_label.hide()
         self.accept()
@@ -862,6 +966,7 @@ class LessonDialog(QDialog):
             "start_at": start.isoformat(),
             "end_at": end.isoformat(),
             "participant_ids": participant_ids,
+            "excluded_participant_ids": sorted(self._excluded_group_member_ids),
             "notes": self.notes.toPlainText().strip() or None,
         }
 
@@ -877,6 +982,7 @@ class LessonDialog(QDialog):
             "interval_weeks": 1,
             "occurrences": self.occurrences.value(),
             "participant_ids": payload["participant_ids"],
+            "excluded_participant_ids": payload["excluded_participant_ids"],
             "notes": payload["notes"],
         }
 
@@ -2393,7 +2499,31 @@ class LearningPage(QWidget):
             )
             return
         dialog = LessonDialog(self.references, lesson, self)
+        dialog.resend_confirmation_requested.connect(
+            lambda targets: self._resend_confirmation_targets(
+                int(lesson["id"]), list(targets)
+            )
+        )
         self._submit_existing_lesson(dialog, lesson)
+
+    def _resend_confirmation_targets(
+        self, lesson_id: int, targets: list[dict[str, Any]]
+    ) -> None:
+        def resend() -> int:
+            sent = 0
+            for target in targets:
+                self.api.resend_lesson_confirmation(
+                    lesson_id,
+                    {
+                        "recipient_context": target["recipient_context"],
+                        "recipient_person_id": int(target["recipient_person_id"]),
+                        "subject_person_id": int(target["subject_person_id"]),
+                    },
+                )
+                sent += 1
+            return sent
+
+        self._run(resend, done=lambda _sent: None)
 
     def _submit_existing_lesson(self, dialog: LessonDialog, lesson: dict[str, Any]) -> None:
         if not dialog.exec():
@@ -3116,7 +3246,7 @@ class LearningPage(QWidget):
         if row >= 0 and self.student_journal.item(row, 0) is not None:
             lesson = self.student_journal.item(row, 0).data(Qt.ItemDataRole.UserRole)
             if isinstance(lesson, dict):
-                self.open_lesson(lesson)
+                self._open_full_lesson(int(lesson["id"]))
 
     def load_teacher_history(self) -> None:
         person_id = self.journal_teacher.currentData()
@@ -3176,4 +3306,7 @@ class LearningPage(QWidget):
         if row >= 0 and self.teacher_journal.item(row, 0) is not None:
             lesson = self.teacher_journal.item(row, 0).data(Qt.ItemDataRole.UserRole)
             if isinstance(lesson, dict):
-                self.open_lesson(lesson)
+                self._open_full_lesson(int(lesson["id"]))
+
+    def _open_full_lesson(self, lesson_id: int) -> None:
+        self._run(self.api.learning_lesson, lesson_id, done=self.open_lesson)

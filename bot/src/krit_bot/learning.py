@@ -76,6 +76,7 @@ class LessonPayload(BaseModel):
     start_at: datetime
     end_at: datetime
     participant_ids: list[int] = Field(default_factory=list)
+    excluded_participant_ids: list[int] = Field(default_factory=list)
     notes: str | None = Field(default=None, max_length=4000)
 
     @model_validator(mode="after")
@@ -95,6 +96,7 @@ class SeriesPayload(BaseModel):
     interval_weeks: int = Field(default=1, ge=1, le=52)
     occurrences: int = Field(ge=1, le=104)
     participant_ids: list[int] = Field(default_factory=list)
+    excluded_participant_ids: list[int] = Field(default_factory=list)
     notes: str | None = Field(default=None, max_length=4000)
 
 
@@ -321,6 +323,7 @@ async def _participants_for(
                 )
             ).all()
         )
+    ids.difference_update(payload.excluded_participant_ids)
     if not ids:
         return []
     people = list(
@@ -1451,16 +1454,18 @@ def create_learning_router(
             by_lesson: dict[int, list[LessonParticipant]] = {}
             for participant in participants:
                 by_lesson.setdefault(participant.lesson_id, []).append(participant)
-            from .communications import lesson_confirmation_details
+            from .communications import lesson_confirmation_details_batch
 
+            confirmation_lessons = [
+                item for item in items if item.status in {"planned", "scheduled"}
+            ]
+            confirmations = await lesson_confirmation_details_batch(
+                session, confirmation_lessons, by_lesson
+            )
             result = []
             for item in items:
                 lesson_participants = by_lesson.get(item.id, [])
-                confirmation = (
-                    await lesson_confirmation_details(session, item, lesson_participants)
-                    if item.status in {"planned", "scheduled"}
-                    else None
-                )
+                confirmation = confirmations.get(int(item.id))
                 result.append(_lesson_view(item, lesson_participants, confirmation=confirmation))
             return result
 
@@ -1547,16 +1552,18 @@ def create_learning_router(
             by_lesson: dict[int, list[LessonParticipant]] = {}
             for participant in participants:
                 by_lesson.setdefault(participant.lesson_id, []).append(participant)
-            from .communications import lesson_confirmation_details
+            from .communications import lesson_confirmation_details_batch
 
+            confirmation_lessons = [
+                lesson for lesson in lessons if lesson.status in {"planned", "scheduled"}
+            ]
+            confirmations = await lesson_confirmation_details_batch(
+                session, confirmation_lessons, by_lesson
+            )
             lesson_views = []
             for lesson in lessons:
                 lesson_participants = by_lesson.get(lesson.id, [])
-                confirmation = (
-                    await lesson_confirmation_details(session, lesson, lesson_participants)
-                    if lesson.status in {"planned", "scheduled"}
-                    else None
-                )
+                confirmation = confirmations.get(int(lesson.id))
                 lesson_views.append(
                     _lesson_view(lesson, lesson_participants, confirmation=confirmation)
                 )

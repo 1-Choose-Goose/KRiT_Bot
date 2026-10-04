@@ -1203,83 +1203,16 @@ def _intent_status(answers: list[str]) -> str:
     return "confirmed" if "yes" in values else "declined"
 
 
-async def lesson_confirmation_details(
-    session: AsyncSession,
+def _build_lesson_confirmation_details(
     lesson: Lesson,
-    participants: list[LessonParticipant] | None = None,
+    participants: list[LessonParticipant],
+    guardians: dict[int, list[Person]],
+    people: dict[int, Person],
+    max_people: set[int],
+    response_rows: list[tuple[InteractionRequest, InteractionResponse | None]],
+    jobs_by_request: dict[int, NotificationJob],
 ) -> dict[str, Any]:
-    """Build the role-aware confirmation state shown in a lesson card."""
-    if participants is None:
-        participants = list(
-            (
-                await session.scalars(
-                    select(LessonParticipant).where(
-                        LessonParticipant.lesson_id == lesson.id,
-                        LessonParticipant.attendance_status != "excused",
-                    )
-                )
-            ).all()
-        )
-    else:
-        participants = [
-            item for item in participants if item.attendance_status != "excused"
-        ]
-    student_ids = {int(item.person_id) for item in participants}
-    guardian_rows = (
-        (
-            await session.execute(
-                select(StudentGuardian.student_id, Person)
-                .join(Person, Person.id == StudentGuardian.guardian_id)
-                .where(StudentGuardian.student_id.in_(student_ids))
-                .order_by(StudentGuardian.student_id, Person.full_name)
-            )
-        ).all()
-        if student_ids
-        else []
-    )
-    guardians: dict[int, list[Person]] = defaultdict(list)
-    for student_id, guardian in guardian_rows:
-        guardians[int(student_id)].append(guardian)
-    person_ids = student_ids | {int(lesson.teacher_id)} | {
-        int(guardian.id) for _student_id, guardian in guardian_rows
-    }
-    people = {
-        int(person.id): person
-        for person in (
-            await session.scalars(select(Person).where(Person.id.in_(person_ids)))
-        ).all()
-    }
-    max_people = set(
-        (
-            await session.scalars(
-                select(PersonMaxIdentity.person_id).where(
-                    PersonMaxIdentity.person_id.in_(person_ids),
-                    PersonMaxIdentity.max_user_id.is_not(None),
-                )
-            )
-        ).all()
-    )
-    response_rows = (
-        await session.execute(
-            select(InteractionRequest, InteractionResponse)
-            .join(
-                InteractionRequestLesson,
-                InteractionRequestLesson.request_id == InteractionRequest.id,
-            )
-            .outerjoin(
-                InteractionResponse,
-                InteractionResponse.request_id == InteractionRequest.id,
-            )
-            .where(
-                InteractionRequest.request_type == "lesson_confirmation",
-                InteractionRequestLesson.lesson_id == lesson.id,
-                InteractionRequestLesson.lesson_revision == lesson.notification_revision,
-            )
-            .order_by(InteractionRequest.created_at.desc(), InteractionRequest.id.desc())
-        )
-    ).all()
     latest: dict[tuple[str, int, int], tuple[InteractionRequest, InteractionResponse | None]] = {}
-    request_ids: list[int] = []
     for request, response in response_rows:
         key = (
             str(request.recipient_context),
@@ -1287,23 +1220,6 @@ async def lesson_confirmation_details(
             int(request.subject_person_id or request.recipient_person_id),
         )
         latest.setdefault(key, (request, response))
-        request_ids.append(int(request.id))
-    jobs = (
-        list(
-            (
-                await session.scalars(
-                    select(NotificationJob)
-                    .where(NotificationJob.interaction_request_id.in_(request_ids))
-                    .order_by(NotificationJob.updated_at.desc(), NotificationJob.id.desc())
-                )
-            ).all()
-        )
-        if request_ids
-        else []
-    )
-    jobs_by_request: dict[int, NotificationJob] = {}
-    for job in jobs:
-        jobs_by_request.setdefault(int(job.interaction_request_id), job)
 
     def response_row(
         *,
@@ -1401,6 +1317,151 @@ async def lesson_confirmation_details(
         "label": label,
         "rows": rows,
     }
+
+
+async def lesson_confirmation_details_batch(
+    session: AsyncSession,
+    lessons: list[Lesson],
+    participants_by_lesson: dict[int, list[LessonParticipant]] | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Build confirmation states with a fixed number of queries for any lesson count."""
+    if not lessons:
+        return {}
+    lesson_ids = [int(lesson.id) for lesson in lessons]
+    lesson_by_id = {int(lesson.id): lesson for lesson in lessons}
+    if participants_by_lesson is None:
+        participant_rows = list(
+            (
+                await session.scalars(
+                    select(LessonParticipant).where(
+                        LessonParticipant.lesson_id.in_(lesson_ids),
+                        LessonParticipant.attendance_status != "excused",
+                    )
+                )
+            ).all()
+        )
+        participants_by_lesson = defaultdict(list)
+        for participant in participant_rows:
+            participants_by_lesson[int(participant.lesson_id)].append(participant)
+    else:
+        participants_by_lesson = {
+            lesson_id: [
+                participant
+                for participant in participants
+                if participant.attendance_status != "excused"
+            ]
+            for lesson_id, participants in participants_by_lesson.items()
+        }
+    student_ids = {
+        int(participant.person_id)
+        for participants in participants_by_lesson.values()
+        for participant in participants
+    }
+    guardian_rows = (
+        (
+            await session.execute(
+                select(StudentGuardian.student_id, Person)
+                .join(Person, Person.id == StudentGuardian.guardian_id)
+                .where(StudentGuardian.student_id.in_(student_ids))
+                .order_by(StudentGuardian.student_id, Person.full_name)
+            )
+        ).all()
+        if student_ids
+        else []
+    )
+    guardians: dict[int, list[Person]] = defaultdict(list)
+    for student_id, guardian in guardian_rows:
+        guardians[int(student_id)].append(guardian)
+    person_ids = student_ids | {int(lesson.teacher_id) for lesson in lessons} | {
+        int(guardian.id) for _student_id, guardian in guardian_rows
+    }
+    people = {
+        int(person.id): person
+        for person in (
+            await session.scalars(select(Person).where(Person.id.in_(person_ids)))
+        ).all()
+    }
+    max_people = set(
+        (
+            await session.scalars(
+                select(PersonMaxIdentity.person_id).where(
+                    PersonMaxIdentity.person_id.in_(person_ids),
+                    PersonMaxIdentity.max_user_id.is_not(None),
+                )
+            )
+        ).all()
+    )
+    raw_response_rows = (
+        await session.execute(
+            select(
+                InteractionRequestLesson.lesson_id,
+                InteractionRequestLesson.lesson_revision,
+                InteractionRequest,
+                InteractionResponse,
+            )
+            .join(
+                InteractionRequest,
+                InteractionRequest.id == InteractionRequestLesson.request_id,
+            )
+            .outerjoin(
+                InteractionResponse,
+                InteractionResponse.request_id == InteractionRequest.id,
+            )
+            .where(
+                InteractionRequest.request_type == "lesson_confirmation",
+                InteractionRequestLesson.lesson_id.in_(lesson_ids),
+            )
+            .order_by(InteractionRequest.created_at.desc(), InteractionRequest.id.desc())
+        )
+    ).all()
+    responses_by_lesson: dict[
+        int, list[tuple[InteractionRequest, InteractionResponse | None]]
+    ] = defaultdict(list)
+    request_ids: set[int] = set()
+    for lesson_id, revision, request, response in raw_response_rows:
+        lesson = lesson_by_id[int(lesson_id)]
+        if int(revision) != int(lesson.notification_revision):
+            continue
+        responses_by_lesson[int(lesson_id)].append((request, response))
+        request_ids.add(int(request.id))
+    jobs = (
+        list(
+            (
+                await session.scalars(
+                    select(NotificationJob)
+                    .where(NotificationJob.interaction_request_id.in_(request_ids))
+                    .order_by(NotificationJob.updated_at.desc(), NotificationJob.id.desc())
+                )
+            ).all()
+        )
+        if request_ids
+        else []
+    )
+    jobs_by_request: dict[int, NotificationJob] = {}
+    for job in jobs:
+        jobs_by_request.setdefault(int(job.interaction_request_id), job)
+    return {
+        int(lesson.id): _build_lesson_confirmation_details(
+            lesson,
+            participants_by_lesson.get(int(lesson.id), []),
+            guardians,
+            people,
+            max_people,
+            responses_by_lesson.get(int(lesson.id), []),
+            jobs_by_request,
+        )
+        for lesson in lessons
+    }
+
+
+async def lesson_confirmation_details(
+    session: AsyncSession,
+    lesson: Lesson,
+    participants: list[LessonParticipant] | None = None,
+) -> dict[str, Any]:
+    """Build the role-aware confirmation state shown in a lesson card."""
+    by_lesson = {int(lesson.id): participants} if participants is not None else None
+    return (await lesson_confirmation_details_batch(session, [lesson], by_lesson))[int(lesson.id)]
 
 
 async def save_interaction_response(
@@ -1829,34 +1890,79 @@ def _rule_view(item: NotificationGlobalRule) -> dict[str, Any]:
     }
 
 
-async def _campaign_poll_counts(session: AsyncSession, campaign_id: int) -> dict[str, int]:
-    total = (
-        await session.scalar(
-            select(func.count(InteractionRequest.id)).where(
-                InteractionRequest.campaign_id == campaign_id
+async def _campaign_poll_counts_batch(
+    session: AsyncSession, campaign_ids: list[int]
+) -> dict[int, dict[str, int]]:
+    if not campaign_ids:
+        return {}
+    totals = dict(
+        (
+            await session.execute(
+                select(
+                    InteractionRequest.campaign_id,
+                    func.count(InteractionRequest.id),
+                )
+                .where(InteractionRequest.campaign_id.in_(campaign_ids))
+                .group_by(InteractionRequest.campaign_id)
             )
-        )
-        or 0
+        ).all()
     )
     answer_rows = (
         await session.execute(
-            select(InteractionResponse.answer, func.count(InteractionResponse.id))
+            select(
+                InteractionRequest.campaign_id,
+                InteractionResponse.answer,
+                func.count(InteractionResponse.id),
+            )
             .join(
                 InteractionRequest,
                 InteractionRequest.id == InteractionResponse.request_id,
             )
-            .where(InteractionRequest.campaign_id == campaign_id)
-            .group_by(InteractionResponse.answer)
+            .where(InteractionRequest.campaign_id.in_(campaign_ids))
+            .group_by(InteractionRequest.campaign_id, InteractionResponse.answer)
         )
     ).all()
-    counts = {answer: count for answer, count in answer_rows}
-    answered = sum(counts.values())
-    return {
-        "recipients": int(total),
-        "yes": int(counts.get("yes", 0)),
-        "no": int(counts.get("no", 0)),
-        "no_response": max(0, int(total) - int(answered)),
-    }
+    answers: dict[int, dict[str, int]] = defaultdict(dict)
+    for campaign_id, answer, count in answer_rows:
+        answers[int(campaign_id)][str(answer)] = int(count)
+    result: dict[int, dict[str, int]] = {}
+    for campaign_id in campaign_ids:
+        total = int(totals.get(campaign_id, 0))
+        counts = answers.get(campaign_id, {})
+        answered = sum(counts.values())
+        result[campaign_id] = {
+            "recipients": total,
+            "yes": int(counts.get("yes", 0)),
+            "no": int(counts.get("no", 0)),
+            "no_response": max(0, total - answered),
+        }
+    return result
+
+
+async def _campaign_poll_counts(session: AsyncSession, campaign_id: int) -> dict[str, int]:
+    return (await _campaign_poll_counts_batch(session, [campaign_id]))[campaign_id]
+
+
+async def _campaign_delivery_counts_batch(
+    session: AsyncSession, campaign_ids: list[int]
+) -> dict[int, dict[str, int]]:
+    if not campaign_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                NotificationJob.campaign_id,
+                NotificationJob.status,
+                func.count(NotificationJob.id),
+            )
+            .where(NotificationJob.campaign_id.in_(campaign_ids))
+            .group_by(NotificationJob.campaign_id, NotificationJob.status)
+        )
+    ).all()
+    result: dict[int, dict[str, int]] = defaultdict(dict)
+    for campaign_id, status, count in rows:
+        result[int(campaign_id)][str(status)] = int(count)
+    return dict(result)
 
 
 @dataclass(frozen=True)
@@ -2927,17 +3033,14 @@ def create_communications_router(
                     )
                 ).all()
             )
+            campaign_ids = [int(item.id) for item in items]
+            delivery_counts = await _campaign_delivery_counts_batch(session, campaign_ids)
+            poll_ids = [
+                int(item.id) for item in items if item.campaign_type == "custom_poll"
+            ]
+            poll_counts = await _campaign_poll_counts_batch(session, poll_ids)
             result = []
             for item in items:
-                counts = dict(
-                    (
-                        await session.execute(
-                            select(NotificationJob.status, func.count(NotificationJob.id))
-                            .where(NotificationJob.campaign_id == item.id)
-                            .group_by(NotificationJob.status)
-                        )
-                    ).all()
-                )
                 result.append(
                     {
                         "id": item.id,
@@ -2945,9 +3048,9 @@ def create_communications_router(
                         "title": item.title,
                         "status": item.status,
                         "created_at": item.created_at,
-                        "counts": counts,
+                        "counts": delivery_counts.get(int(item.id), {}),
                         "poll": (
-                            await _campaign_poll_counts(session, item.id)
+                            poll_counts.get(int(item.id))
                             if item.campaign_type == "custom_poll"
                             else None
                         ),

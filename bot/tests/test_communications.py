@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 from pydantic import SecretStr
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from krit_bot.communication_models import (
     CommunicationCampaign,
@@ -23,6 +23,8 @@ from krit_bot.communication_models import (
 from krit_bot.communications import (
     EffectivePolicy,
     NotificationPolicyResolver,
+    _campaign_delivery_counts_batch,
+    _campaign_poll_counts_batch,
     _campaign_poll_details,
     _lesson_snapshot,
     _normalize_schedule_snapshot,
@@ -33,6 +35,7 @@ from krit_bot.communications import (
     daily_bundles,
     ensure_default_rules,
     lesson_confirmation_details,
+    lesson_confirmation_details_batch,
     reconcile_confirmation_requests,
     reconcile_daily_reminders,
     record_message,
@@ -1522,4 +1525,104 @@ async def test_multirole_guardian_bundles_keep_each_child_separate(tmp_path) -> 
             item for item in sergey_bundles if item.recipient_context == "guardian"
         ]
         assert all(len(item.lessons) == 1 for item in guardian_bundles)
+    await engine.dispose()
+
+
+async def test_batch_summaries_use_constant_query_count(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    async with sessions() as session:
+        teacher = Person(full_name="Учитель", phone="+79000000101")
+        students = [
+            Person(full_name=f"Ученик {index}", phone=f"+7900000011{index}")
+            for index in range(3)
+        ]
+        subject = Subject(name="Математика", color="#2563eb")
+        room = Room(name="Кабинет", capacity=10)
+        campaigns = [
+            CommunicationCampaign(
+                campaign_type="custom_poll",
+                title=f"Опрос {index}",
+                payload={},
+            )
+            for index in range(3)
+        ]
+        session.add_all([teacher, *students, subject, room, *campaigns])
+        await session.flush()
+        lessons: list[Lesson] = []
+        participants_by_lesson: dict[int, list[LessonParticipant]] = {}
+        for index, student in enumerate(students):
+            start_at = utcnow() + timedelta(days=index + 1)
+            lesson = Lesson(
+                subject_id=subject.id,
+                teacher_id=teacher.id,
+                room_id=room.id,
+                start_at=start_at,
+                end_at=start_at + timedelta(hours=1),
+                teacher_name_snapshot=teacher.full_name,
+                room_name_snapshot=room.name,
+                subject_name_snapshot=subject.name,
+            )
+            session.add(lesson)
+            await session.flush()
+            participant = LessonParticipant(
+                lesson_id=lesson.id,
+                person_id=student.id,
+                person_name_snapshot=student.full_name,
+            )
+            session.add(participant)
+            lessons.append(lesson)
+            participants_by_lesson[int(lesson.id)] = [participant]
+            session.add(
+                InteractionRequest(
+                    request_type="yes_no",
+                    question="Будете?",
+                    recipient_person_id=student.id,
+                    recipient_context="student",
+                    subject_person_id=student.id,
+                    campaign_id=campaigns[index].id,
+                )
+            )
+        await session.commit()
+
+        statements = 0
+
+        def count_statement(*_args) -> None:
+            nonlocal statements
+            statements += 1
+
+        event.listen(engine.sync_engine, "before_cursor_execute", count_statement)
+        try:
+            statements = 0
+            one_confirmation = await lesson_confirmation_details_batch(
+                session,
+                lessons[:1],
+                {int(lessons[0].id): participants_by_lesson[int(lessons[0].id)]},
+            )
+            one_confirmation_queries = statements
+            statements = 0
+            all_confirmations = await lesson_confirmation_details_batch(
+                session, lessons, participants_by_lesson
+            )
+            all_confirmation_queries = statements
+            statements = 0
+            await _campaign_delivery_counts_batch(session, [int(campaigns[0].id)])
+            await _campaign_poll_counts_batch(session, [int(campaigns[0].id)])
+            one_campaign_queries = statements
+            statements = 0
+            delivery_counts = await _campaign_delivery_counts_batch(
+                session, [int(campaign.id) for campaign in campaigns]
+            )
+            poll_counts = await _campaign_poll_counts_batch(
+                session, [int(campaign.id) for campaign in campaigns]
+            )
+            all_campaign_queries = statements
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", count_statement)
+
+        assert set(one_confirmation) == {int(lessons[0].id)}
+        assert set(all_confirmations) == {int(lesson.id) for lesson in lessons}
+        assert all_confirmation_queries == one_confirmation_queries
+        assert all_campaign_queries == one_campaign_queries == 3
+        assert delivery_counts == {}
+        assert all(value["recipients"] == 1 for value in poll_counts.values())
     await engine.dispose()

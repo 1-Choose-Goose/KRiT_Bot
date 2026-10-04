@@ -154,6 +154,21 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
             )
             assert inactive_teacher_lesson.status_code == 201, inactive_teacher_lesson.text
 
+            excluded_group_member = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **base,
+                    "group_id": group_id,
+                    "start_at": (end + timedelta(hours=5)).isoformat(),
+                    "end_at": (end + timedelta(hours=6)).isoformat(),
+                    "participant_ids": [],
+                    "excluded_participant_ids": [student_without_bot_access],
+                },
+            )
+            assert excluded_group_member.status_code == 201, excluded_group_member.text
+            assert excluded_group_member.json()["participants"] == []
+
             too_many = await client.post(
                 "/api/v1/learning/lessons",
                 headers=headers,
