@@ -5,9 +5,61 @@ import pytest
 from pydantic import SecretStr
 
 from krit_bot.config import Settings
-from krit_bot.db import build_engine, build_session_factory
+from krit_bot.db import AdminUser, build_engine, build_session_factory
 from krit_bot.learning_models import PersonMaxIdentity
 from krit_bot.webhook import create_app
+
+
+def test_initial_admin_credentials_are_environment_specific() -> None:
+    sqlite = Settings(
+        database_url="sqlite+aiosqlite:///:memory:",
+        max_bot_token=SecretStr("test-token"),
+    )
+    assert sqlite.initial_admin_credentials() == ("admin", "admin", False)
+
+    postgres = Settings(
+        database_url="postgresql+asyncpg://krit@localhost/krit_bot",
+        max_bot_token=SecretStr("test-token"),
+    )
+    assert postgres.initial_admin_credentials() == ("Choose_Goose", "123", True)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_bootstrap_has_superadmin_profile_and_is_not_reset(tmp_path) -> None:
+    database_path = (tmp_path / "bootstrap.db").as_posix()
+    settings = Settings(
+        database_url=f"sqlite+aiosqlite:///{database_path}",
+        max_bot_token=SecretStr("test-token"),
+        jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
+        bot_mode="webhook",
+        vk_syndication_enabled=False,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        engine = build_engine(settings.database_url)
+        sessions = build_session_factory(engine)
+        async with sessions() as session:
+            admin = await session.get(AdminUser, 1)
+            assert admin is not None
+            assert admin.username == "admin"
+            assert admin.full_name == "Администратор"
+            assert admin.role == "superadmin"
+            assert admin.must_change_password is False
+            assert admin.auth_version == 1
+            assert admin.is_protected is False
+            admin.full_name = "Не сбрасывать"
+            await session.commit()
+        await engine.dispose()
+
+    second_app = create_app(settings)
+    async with second_app.router.lifespan_context(second_app):
+        engine = build_engine(settings.database_url)
+        sessions = build_session_factory(engine)
+        async with sessions() as session:
+            admin = await session.get(AdminUser, 1)
+            assert admin is not None
+            assert admin.full_name == "Не сбрасывать"
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

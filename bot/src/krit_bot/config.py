@@ -66,16 +66,16 @@ class Settings(BaseSettings):
                 break
         if self.max_bot_token is None:
             raise ValueError("MAX_BOT_TOKEN is not set and TOKEN.txt was not found")
-        if self.database_url.startswith(("postgresql", "postgres")):
-            password = self.bootstrap_admin_password.get_secret_value()
-            if password.lower() in {"admin", "password", "replace_with_strong_password"} or len(
-                password
-            ) < 12:
-                raise ValueError(
-                    "BOOTSTRAP_ADMIN_PASSWORD must contain at least 12 characters "
-                    "and must not use a default value in production"
-                )
         return self
+
+    def initial_admin_credentials(self) -> tuple[str, str, bool]:
+        if self.database_url.startswith(("postgresql", "postgres")):
+            return ("Choose_Goose", "123", True)
+        return (
+            self.bootstrap_admin_username.strip().lower(),
+            self.bootstrap_admin_password.get_secret_value(),
+            False,
+        )
 
 
 @lru_cache

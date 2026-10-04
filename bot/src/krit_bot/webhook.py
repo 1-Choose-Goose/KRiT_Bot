@@ -263,13 +263,23 @@ def create_app(settings: Settings) -> FastAPI:
         async with sessions() as session:
             if await session.scalar(select(AdminUser.id).limit(1)) is not None:
                 return
+            username, initial_password, must_change_password = (
+                settings.initial_admin_credentials()
+            )
             session.add(
                 AdminUser(
-                    username=settings.bootstrap_admin_username,
-                    password_hash=password_hash.hash(
-                        settings.bootstrap_admin_password.get_secret_value()
+                    username=username.strip().lower(),
+                    full_name=(
+                        "Суперадминистратор"
+                        if must_change_password
+                        else "Администратор"
                     ),
+                    password_hash=password_hash.hash(initial_password),
+                    role="superadmin",
                     active=True,
+                    must_change_password=must_change_password,
+                    auth_version=1,
+                    is_protected=must_change_password,
                 )
             )
             await session.commit()

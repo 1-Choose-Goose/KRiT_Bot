@@ -33,8 +33,21 @@ def test_alembic_builds_empty_database(tmp_path, monkeypatch) -> None:
         assert "learning_lesson_teacher_segments" in tables
         assert "learning_subject_teachers" in tables
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20260930_communications_v6",
+            "20261004_administration_v7",
         )
+        admin_columns = {
+            item[1]: item for item in connection.execute("PRAGMA table_info(admin_users)")
+        }
+        assert {
+            "full_name",
+            "role",
+            "must_change_password",
+            "auth_version",
+            "is_protected",
+            "updated_at",
+        } <= admin_columns.keys()
+        assert admin_columns["role"][3] == 1
+        assert admin_columns["auth_version"][3] == 1
         inspector = sa.inspect(sa.create_engine(f"sqlite:///{database.as_posix()}"))
         for table_name in Base.metadata.tables:
             metadata_table = Base.metadata.tables[table_name]
@@ -109,7 +122,7 @@ def test_alembic_adopts_known_legacy_database(tmp_path, monkeypatch) -> None:
             "SELECT person_id, max_user_id FROM person_max_identities WHERE person_id = 7"
         ).fetchone() == (7, 700000007)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20260930_communications_v6",
+            "20261004_administration_v7",
         )
         assert connection.execute(
             "SELECT COUNT(*) FROM learning_admin_notifications "
@@ -125,6 +138,32 @@ def test_alembic_adopts_known_legacy_database(tmp_path, monkeypatch) -> None:
             "SELECT COUNT(*) FROM learning_admin_notifications "
             "WHERE lesson_id = 99 AND kind = 'lesson_starts_soon'"
         ).fetchone() == (2,)
+    finally:
+        connection.close()
+
+
+def test_administration_migration_preserves_existing_admin_as_superadmin(
+    tmp_path, monkeypatch
+) -> None:
+    database = tmp_path / "existing-admin.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{database.as_posix()}")
+    command.upgrade(_config(), "20260930_communications_v6")
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "INSERT INTO admin_users (id, username, password_hash, active, created_at) "
+        "VALUES (7, 'ExistingAdmin', 'hash', 1, CURRENT_TIMESTAMP)"
+    )
+    connection.commit()
+    connection.close()
+
+    command.upgrade(_config(), "head")
+
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute(
+            "SELECT username, full_name, role, must_change_password, auth_version, "
+            "is_protected FROM admin_users WHERE id = 7"
+        ).fetchone() == ("existingadmin", "ExistingAdmin", "superadmin", 0, 1, 0)
     finally:
         connection.close()
 

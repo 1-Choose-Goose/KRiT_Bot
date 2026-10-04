@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr
 from sqlalchemy import select, text
 
 from krit_bot.config import Settings
@@ -154,14 +154,16 @@ async def test_max_contact_hmac_formats_are_compared_correctly() -> None:
         await client.close()
 
 
-def test_postgresql_rejects_default_bootstrap_password() -> None:
-    with pytest.raises(ValidationError, match="BOOTSTRAP_ADMIN_PASSWORD"):
-        Settings(
-            database_url="postgresql+asyncpg://user:pass@localhost/db",
-            max_bot_token=SecretStr("test-token"),
-            jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
-            bootstrap_admin_password=SecretStr("admin"),
-        )
+def test_postgresql_uses_fixed_one_time_bootstrap_instead_of_configured_default() -> None:
+    settings = Settings(
+        database_url="postgresql+asyncpg://user:pass@localhost/db",
+        max_bot_token=SecretStr("test-token"),
+        jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
+        bootstrap_admin_username="ignored",
+        bootstrap_admin_password=SecretStr("ignored"),
+    )
+
+    assert settings.initial_admin_credentials() == ("Choose_Goose", "123", True)
 
 
 @pytest.mark.asyncio

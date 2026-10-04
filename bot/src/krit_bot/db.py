@@ -47,7 +47,9 @@ class Base(DeclarativeBase):
     pass
 
 
-EXPECTED_ALEMBIC_REVISION = "20260930_communications_v6"
+EXPECTED_ALEMBIC_REVISION = "20261004_administration_v7"
+ADMIN_ROLES = frozenset({"superadmin", "director", "administrator"})
+PROTECTED_ADMIN_USERNAME = "choose_goose"
 
 
 class Person(Base):
@@ -153,12 +155,24 @@ class BotState(Base):
 
 class AdminUser(Base):
     __tablename__ = "admin_users"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('superadmin','director','administrator')",
+            name="ck_admin_users_role",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    full_name: Mapped[str] = mapped_column(String(250), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(500), nullable=False)
+    role: Mapped[str] = mapped_column(String(24), nullable=False, default="superadmin")
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    auth_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_protected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class SchemaMigration(Base):
