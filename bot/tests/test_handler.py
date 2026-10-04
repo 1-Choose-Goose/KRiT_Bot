@@ -81,9 +81,15 @@ def contact_update(user_id: int, phone: str, mid: str = "contact-1") -> dict:
     return item
 
 
-def callback_update(user_id: int, payload: str, callback_id: str = "cb-1") -> dict:
+def callback_update(
+    user_id: int,
+    payload: str,
+    callback_id: str = "cb-1",
+    message_text: str = "Исходный текст опроса",
+) -> dict:
     return {
         "update_type": "message_callback",
+        "message": {"body": {"text": message_text}},
         "callback": {
             "callback_id": callback_id,
             "payload": payload,
@@ -93,11 +99,15 @@ def callback_update(user_id: int, payload: str, callback_id: str = "cb-1") -> di
 
 
 def callback_update_with_root_user(
-    user_id: int, payload: str, callback_id: str = "cb-root"
+    user_id: int,
+    payload: str,
+    callback_id: str = "cb-root",
+    message_text: str = "Исходный текст опроса",
 ) -> dict:
     return {
         "update_type": "message_callback",
         "user": {"user_id": user_id},
+        "message": {"body": {"text": message_text}},
         "callback": {"callback_id": callback_id, "payload": payload},
     }
 
@@ -110,10 +120,14 @@ def test_parse_message_created() -> None:
 
 
 def test_parse_message_callback_accepts_documented_root_user() -> None:
-    parsed = parse_message_callback(callback_update_with_root_user(42, "interaction:1:yes"))
+    update = callback_update_with_root_user(
+        42, "interaction:1:yes", message_text="Подтвердите участие"
+    )
+    parsed = parse_message_callback(update)
     assert parsed is not None
     assert parsed.user_id == 42
     assert parsed.payload == "interaction:1:yes"
+    assert parsed.message_text == "Подтвердите участие"
 
 
 async def test_webhook_startup_subscribes_to_button_callbacks() -> None:
@@ -274,7 +288,7 @@ async def test_poll_button_with_root_user_saves_answer_and_acknowledges_callback
     assert api.callback_answers[-1] == (
         "poll-yes",
         "Ответ сохранён",
-        {"attachments": []},
+        {"text": "Исходный текст опроса", "attachments": []},
     )
     await engine.dispose()
 

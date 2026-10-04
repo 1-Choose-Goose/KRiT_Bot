@@ -5,6 +5,8 @@ import pytest
 from pydantic import SecretStr
 
 from krit_bot.config import Settings
+from krit_bot.db import build_engine, build_session_factory
+from krit_bot.learning_models import PersonMaxIdentity
 from krit_bot.webhook import create_app
 
 
@@ -58,6 +60,18 @@ async def test_login_protects_management_api_and_allows_person_creation(tmp_path
             assert len(snapshot["people"]) == 1
 
             person_id = created.json()["id"]
+            engine = build_engine(settings.database_url)
+            sessions = build_session_factory(engine)
+            async with sessions() as session:
+                session.add(
+                    PersonMaxIdentity(
+                        person_id=person_id,
+                        max_user_id=20_067_728,
+                        verified_phone="+79001234567",
+                    )
+                )
+                await session.commit()
+            await engine.dispose()
             parent = await client.post(
                 "/api/v1/people",
                 headers=headers,
@@ -75,6 +89,31 @@ async def test_login_protects_management_api_and_allows_person_creation(tmp_path
             )
             assert linked.status_code == 200
             assert linked.json()["guardians"][0]["id"] == parent_id
+
+            saved_with_unchanged_relation = await client.put(
+                f"/api/v1/people/{person_id}/aggregate",
+                headers=headers,
+                json={
+                    "person": {
+                        "full_name": "Иванов Иван Иванович",
+                        "phone": "+79001234567",
+                        "max_auth_phone": "+79001234567",
+                        "roles": ["student", "parent", "teacher"],
+                        "active": True,
+                    },
+                    "parent_ids": [parent_id],
+                    "student_ids": [],
+                },
+            )
+            assert saved_with_unchanged_relation.status_code == 200, (
+                saved_with_unchanged_relation.text
+            )
+            assert set(saved_with_unchanged_relation.json()["roles"]) == {
+                "student",
+                "parent",
+                "teacher",
+            }
+            assert saved_with_unchanged_relation.json()["max_user_id"] == 20_067_728
             people = (await client.get("/api/v1/people", headers=headers)).json()
             parent_view = next(item for item in people if item["id"] == parent_id)
             assert parent_view["students"][0]["id"] == person_id

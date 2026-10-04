@@ -93,6 +93,7 @@ async def test_max_button_callback_reaches_database_through_webhook(
                 json={
                     "update_type": "message_callback",
                     "user": {"user_id": 101},
+                    "message": {"body": {"text": "Вы придёте?"}},
                     "callback": {
                         "callback_id": "real-button-click",
                         "payload": f"interaction:{request_id}:yes",
@@ -109,5 +110,9 @@ async def test_max_button_callback_reaches_database_through_webhook(
         assert saved.answer == "yes"
     await check_engine.dispose()
     assert callback_answers == [
-        ("real-button-click", "Ответ сохранён", {"attachments": []})
+        (
+            "real-button-click",
+            "Ответ сохранён",
+            {"text": "Вы придёте?", "attachments": []},
+        )
     ]

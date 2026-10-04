@@ -662,7 +662,7 @@ def create_app(settings: Settings) -> FastAPI:
                 else payload.person.bot_access_enabled
             )
             current_roles = {link.role: link for link in person.role_links}
-            removed_roles = set(current_roles) - roles
+            removed_roles = set(current_roles) - set(roles)
             if removed_roles & {"student", "teacher"}:
                 dependencies = await learning_dependencies(session, person_id)
                 conflict = dependency_conflict(dependencies, removed_roles)

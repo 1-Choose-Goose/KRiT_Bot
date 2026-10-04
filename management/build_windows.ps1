@@ -69,7 +69,7 @@ try {
     }
 
     $process = Start-Process -FilePath (Join-Path $stagingDir "KRiTManagement.exe") `
-        -WorkingDirectory $stagingDir -PassThru
+        -WorkingDirectory $stagingDir -WindowStyle Hidden -PassThru
     Start-Sleep -Seconds 5
     $running = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
     if (-not $running) { throw "Программа завершилась до проверки окна" }

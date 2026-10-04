@@ -620,8 +620,8 @@ def test_confirmation_colors_are_visible_in_today_and_calendar_tables() -> None:
         lessons.append(
             {
                 "id": index,
-                "start_at": f"2026-10-04T{9 + index:02d}:00:00+05:00",
-                "end_at": f"2026-10-04T{10 + index:02d}:00:00+05:00",
+                "start_at": f"2099-10-04T{9 + index:02d}:00:00+05:00",
+                "end_at": f"2099-10-04T{10 + index:02d}:00:00+05:00",
                 "subject_name_snapshot": "Информатика",
                 "teacher_name_snapshot": "Учитель",
                 "room_name_snapshot": "Кабинет",

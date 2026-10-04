@@ -47,6 +47,7 @@ class IncomingCallback:
     callback_id: str
     user_id: int
     payload: str
+    message_text: str | None
 
 
 def parse_message_callback(update: dict[str, Any]) -> IncomingCallback | None:
@@ -59,7 +60,18 @@ def parse_message_callback(update: dict[str, Any]) -> IncomingCallback | None:
     user_id = user.get("user_id")
     if not callback_id or not isinstance(payload, str) or not isinstance(user_id, int):
         return None
-    return IncomingCallback(str(callback_id), user_id, payload)
+    message = update.get("message") or {}
+    body = message.get("body") or {}
+    text = body.get("text")
+    message_text = text if isinstance(text, str) else None
+    return IncomingCallback(str(callback_id), user_id, payload, message_text)
+
+
+def _callback_message_without_keyboard(callback: IncomingCallback) -> dict[str, Any]:
+    message: dict[str, Any] = {"attachments": []}
+    if callback.message_text is not None:
+        message["text"] = callback.message_text
+    return message
 
 
 def parse_message_created(update: dict[str, Any]) -> IncomingMessage | None:
@@ -365,7 +377,7 @@ class EchoHandler:
         async with self._sessions() as session:
             if not await claim_message(session, f"callback:{callback.callback_id}"):
                 return
-            callback_message: dict[str, Any] = {"attachments": []}
+            callback_message = _callback_message_without_keyboard(callback)
             person_id = await self._authorized_callback_person_id(session, callback.user_id)
             if person_id is None:
                 await session.commit()
@@ -436,6 +448,11 @@ class EchoHandler:
                         if str(lesson_id) not in lesson_answers
                     ]
                     callback_message = {
+                        **(
+                            {"text": callback.message_text}
+                            if callback.message_text is not None
+                            else {}
+                        ),
                         "attachments": (
                             [
                                 {
@@ -562,7 +579,7 @@ class EchoHandler:
         await self._api.answer_callback(
             callback_id=callback.callback_id,
             notification="Выберите ответ по каждому занятию",
-            message={"attachments": []},
+            message=_callback_message_without_keyboard(callback),
         )
 
     async def _handle_reason_callback(
@@ -609,7 +626,7 @@ class EchoHandler:
                 if action == "write"
                 else "Ответ сохранён без причины"
             ),
-            message={"attachments": []},
+            message=_callback_message_without_keyboard(callback),
         )
 
     @staticmethod
