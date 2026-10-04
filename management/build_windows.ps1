@@ -92,7 +92,7 @@ try {
     Get-ChildItem -LiteralPath $releaseDir -File |
         Where-Object Name -in @(
             "KRiT-Management-Windows-x64.zip",
-            "KRiT-Management-Setup-$appVersion.exe"
+            "SetupKrit.exe"
         ) | ForEach-Object {
             [pscustomobject]@{ Name = $_.Name; Size = $_.Length; SHA256 = (Get-FileHash $_).Hash }
         }

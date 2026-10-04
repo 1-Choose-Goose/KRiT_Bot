@@ -46,9 +46,17 @@ def test_updater_window_uses_bundled_brand_icon(tmp_path, monkeypatch) -> None:
 
     assert calls == [str(icon)]
     build_script = Path(__file__).resolve().parents[1] / "build_windows.ps1"
+    installer_script = (
+        Path(__file__).resolve().parents[1] / "packaging" / "windows-installer.iss"
+    )
     assert build_script.exists()
+    assert installer_script.exists()
     assert '--add-data "$assets\\app_icon.ico;krit_management\\assets"' in (
         build_script.read_text(encoding="utf-8-sig")
+    )
+    assert '"SetupKrit.exe"' in build_script.read_text(encoding="utf-8-sig")
+    assert "OutputBaseFilename=SetupKrit" in installer_script.read_text(
+        encoding="utf-8-sig"
     )
 
 
