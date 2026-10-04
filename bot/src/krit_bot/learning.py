@@ -335,6 +335,8 @@ async def _participants_for(
             ).all()
         )
     ids.difference_update(payload.excluded_participant_ids)
+    if payload.teacher_id in ids:
+        raise HTTPException(422, "Преподаватель не может быть участником своего занятия")
     if not ids:
         return []
     people = list(
@@ -1328,6 +1330,41 @@ def create_learning_router(
                 "default_duration_minutes",
                 "active",
             )
+
+    @router.delete("/groups/{item_id}")
+    async def delete_group(
+        item_id: int,
+        admin_id: int = Depends(require_management_token),
+    ) -> dict[str, Any]:
+        async with sessions() as session:
+            item = await session.get(StudyGroup, item_id)
+            if item is None:
+                raise HTTPException(404, "Группа не найдена")
+            await session.execute(
+                Lesson.__table__.update()
+                .where(Lesson.group_id == item_id)
+                .values(group_id=None)
+            )
+            await session.execute(
+                LessonSeries.__table__.update()
+                .where(LessonSeries.group_id == item_id)
+                .values(group_id=None)
+            )
+            await session.execute(
+                delete(GroupMembership).where(GroupMembership.group_id == item_id)
+            )
+            await session.delete(item)
+            session.add(
+                AuditEvent(
+                    actor_admin_id=admin_id,
+                    action="learning.group_deleted",
+                    entity_type="group",
+                    entity_id=item_id,
+                    details={"name": item.name},
+                )
+            )
+            await session.commit()
+            return {"id": item_id, "deleted": True}
 
     @router.get("/groups/{group_id}/memberships")
     async def group_memberships(group_id: int) -> list[dict[str, Any]]:

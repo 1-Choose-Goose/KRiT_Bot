@@ -105,6 +105,19 @@ def test_main_window_loads_learning_calendar_without_worker_argument_error() -> 
     assert window.learning_page.live_timer.isActive()
     window.close()
     app.processEvents()
+
+
+def test_main_window_shows_total_unread_messages_in_sidebar() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeApi())  # type: ignore[arg-type]
+
+    window._set_message_unread_total(4)
+    assert window.main_nav.item(2).text() == "Рассылки (4)"
+
+    window._set_message_unread_total(0)
+    assert window.main_nav.item(2).text() == "Рассылки"
+    window.close()
+    app.processEvents()
     assert not window.refresh_timer.isActive()
     assert not window.notification_timer.isActive()
     assert not window.learning_page.live_timer.isActive()
@@ -124,6 +137,32 @@ def test_reference_edit_is_available_from_rows_without_duplicate_button() -> Non
         "Дважды щёлкните" in table.toolTip()
         for table in window.learning_page.reference_tables.values()
     )
+    delete_group = next(
+        button for button in reference_buttons if button.text() == "Удалить группу"
+    )
+    assert delete_group.property("kind") == "danger"
+    assert not delete_group.isEnabled()
+    window.learning_page._references_loaded(
+        {
+            "subjects": [],
+            "rooms": [],
+            "groups": [
+                {
+                    "id": 15,
+                    "name": "Группа №15",
+                    "subject_id": None,
+                    "default_teacher_id": None,
+                    "default_duration_minutes": 60,
+                    "active": True,
+                    "memberships": [],
+                }
+            ],
+            "students": [],
+            "teachers": [],
+        }
+    )
+    window.learning_page.reference_tables["groups"].selectRow(0)
+    assert delete_group.isEnabled()
     window.close()
     app.processEvents()
 
@@ -404,6 +443,26 @@ def test_opening_planned_lesson_without_confirmations_loads_full_card(monkeypatc
     assert calls[0][0] == page.api.learning_lesson
     assert calls[0][1] == (41,)
     assert callable(calls[0][2])
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_editing_lesson_reloads_confirmation_state_from_server(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.shutdown()
+    calls: list[tuple[object, tuple[object, ...], object]] = []
+    monkeypatch.setattr(
+        page,
+        "_run",
+        lambda fn, *args, done=None, **_kwargs: calls.append((fn, args, done)),
+    )
+    dialog = type("Dialog", (), {"operation": "edit"})()
+
+    page._handle_lesson_operation({"id": 41, "status": "planned"}, dialog)
+
+    assert calls == [(page.api.learning_lesson, (41,), page.edit_lesson)]
     page.deleteLater()
     app.processEvents()
 
@@ -716,8 +775,13 @@ def test_lesson_editor_shows_participant_confirmation_and_resend_feedback() -> N
     assert "#f59e0b" in marker.styleSheet()
     assert not any(label.text() == "Ожидается" for label in holder.findChildren(QLabel))
     resend = next(
-        button for button in holder.findChildren(QPushButton) if button.text() == "Повторить"
+        button
+        for button in holder.findChildren(QPushButton)
+        if button.text() == "Повторить запрос"
     )
+    assert dialog.students.rowHeight(0) >= 44
+    assert resend.sizeHint().height() <= dialog.students.rowHeight(0) - 4
+    assert resend.sizeHint().width() <= dialog.students.columnWidth(2) - 32
     resend.click()
 
     assert emitted == [[target]]
@@ -1339,6 +1403,10 @@ def test_subject_dialog_uses_palette_button_and_saves_teacher_ids() -> None:
     payload = dialog.payload()
 
     assert dialog.color_button.text() == "Выбрать цвет"
+    assert (
+        dialog.subject_teachers.editTriggers()
+        == QTableWidget.EditTrigger.NoEditTriggers
+    )
     assert payload["color"] == "#2563eb"
     assert payload["teacher_ids"] == [10]
     dialog.deleteLater()
@@ -1622,6 +1690,57 @@ def test_group_selection_loads_members_and_keeps_extra_student_available() -> No
     app.processEvents()
 
 
+def test_lesson_teacher_cannot_also_be_a_participant() -> None:
+    app = QApplication.instance() or QApplication([])
+    references = {
+        "subjects": [{"id": 1, "name": "Программирование", "teacher_ids": [7, 9]}],
+        "teachers": [
+            {"id": 7, "full_name": "Куц Олег Олегович"},
+            {"id": 9, "full_name": "Иванова Мария Сергеевна"},
+        ],
+        "rooms": [{"id": 3, "name": "Кабинет №1"}],
+        "groups": [
+            {
+                "id": 4,
+                "name": "Группа А",
+                "subject_id": 1,
+                "default_teacher_id": 7,
+                "default_duration_minutes": 60,
+                "memberships": [
+                    {"person_id": 7, "start_at": "2020-01-01T00:00:00+05:00"},
+                    {"person_id": 8, "start_at": "2020-01-01T00:00:00+05:00"},
+                ],
+            }
+        ],
+        "students": [
+            {"id": 7, "full_name": "Куц Олег Олегович"},
+            {"id": 8, "full_name": "Пупкин Иван Пупкович"},
+        ],
+    }
+    dialog = LessonDialog(references)
+    dialog.group.setCurrentIndex(dialog.group.findData(4))
+    app.processEvents()
+
+    teacher_check = next(
+        dialog.students.cellWidget(row, 0).findChild(QCheckBox)
+        for row in range(dialog.students.rowCount())
+        if dialog.students.item(row, 1).text() == "Куц Олег Олегович"
+    )
+    assert dialog.teacher.currentData() == 7
+    assert not teacher_check.isChecked()
+    assert not teacher_check.isEnabled()
+    assert teacher_check.toolTip() == "Выбран как преподаватель этого занятия"
+    assert dialog.payload()["participant_ids"] == [8]
+    assert dialog.payload()["excluded_participant_ids"] == [7]
+
+    dialog.teacher.setCurrentIndex(dialog.teacher.findData(9))
+    app.processEvents()
+    assert teacher_check.isEnabled()
+    assert teacher_check.isChecked()
+    dialog.deleteLater()
+    app.processEvents()
+
+
 def test_repeat_count_is_shown_only_for_repeating_lessons() -> None:
     app = QApplication.instance() or QApplication([])
     dialog = LessonDialog(
@@ -1698,6 +1817,7 @@ def test_free_slot_student_search_keeps_selected_students() -> None:
             ],
         }
     )
+    assert dialog.students.editTriggers() == QTableWidget.EditTrigger.NoEditTriggers
     first = dialog.students.cellWidget(0, 0)
     first.setChecked(True)
     dialog.student_search.setText("мар")

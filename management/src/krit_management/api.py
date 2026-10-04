@@ -313,6 +313,10 @@ class ManagementApi:
         self._verify_subject_assignments(kind, payload, result)
         return result
 
+    def delete_learning_group(self, group_id: int) -> dict[str, Any]:
+        data = self._request("DELETE", f"/learning/groups/{group_id}")
+        return data if isinstance(data, dict) else {}
+
     @staticmethod
     def _verify_subject_assignments(kind: str, payload: dict[str, Any], result: object) -> None:
         if kind != "subjects" or "teacher_ids" not in payload:

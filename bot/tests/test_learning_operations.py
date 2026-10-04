@@ -54,7 +54,9 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
                 assert response.status_code == 201, response.text
                 return int(response.json()["id"])
 
-            teacher = await create_person("Иванов Иван Иванович", "+79000000001", ["teacher"])
+            teacher = await create_person(
+                "Иванов Иван Иванович", "+79000000001", ["teacher", "student"]
+            )
             substitute = await create_person("Петров Пётр Петрович", "+79000000002", ["teacher"])
             student = await create_person("Сидоров Сергей Сергеевич", "+79000000003", ["student"])
             absent = await create_person("Орлова Анна Олеговна", "+79000000004", ["student"])
@@ -97,9 +99,41 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
                 "end_at": (start + timedelta(hours=1)).isoformat(),
                 "participant_ids": [student, absent],
             }
+            teacher_as_student = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={**payload, "participant_ids": [teacher]},
+            )
+            assert teacher_as_student.status_code == 422
+            assert teacher_as_student.json()["detail"] == (
+                "Преподаватель не может быть участником своего занятия"
+            )
             lesson = await client.post("/api/v1/learning/lessons", headers=headers, json=payload)
             assert lesson.status_code == 201, lesson.text
             lesson_id = int(lesson.json()["id"])
+
+            manual_confirmation = await client.post(
+                f"/api/v1/communications/lessons/{lesson_id}/confirmations/confirm-by-admin",
+                headers=headers,
+                json={
+                    "recipient_context": "student",
+                    "recipient_person_id": student,
+                    "subject_person_id": student,
+                    "comment": "Подтверждено по телефону",
+                },
+            )
+            assert manual_confirmation.status_code == 200, manual_confirmation.text
+            refreshed_lesson = (
+                await client.get(f"/api/v1/learning/lesson/{lesson_id}", headers=headers)
+            ).json()
+            student_confirmation = next(
+                row
+                for row in refreshed_lesson["confirmation"]["rows"]
+                if row["recipient_context"] == "student"
+                and row["subject_person_id"] == student
+            )
+            assert student_confirmation["answer"] == "yes"
+            assert student_confirmation["reason"].startswith("Подтверждено администратором")
 
             cancelled = await client.post(
                 f"/api/v1/learning/lessons/{lesson_id}/participants/{student}/cancel",

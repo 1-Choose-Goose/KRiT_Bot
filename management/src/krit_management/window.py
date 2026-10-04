@@ -76,15 +76,18 @@ class MainWindow(QMainWindow):
         self._seen_notification_ids: set[int] = set()
         self._notifications: list[dict[str, Any]] = []
         self._last_toast_lesson_id: int | None = None
+        self._last_toast_person_id: int | None = None
+        self._conversation_unread_counts: dict[int, int] | None = None
         self.setWindowTitle("КРиТ · управление")
         self.setMinimumSize(1120, 620)
         self.resize(1240, 760)
         self._build_ui()
         self.learning_page.notifications_changed.connect(self._notifications_changed)
         self.learning_page.person_requested.connect(self._open_person_by_id)
+        self.communications_page.unread_changed.connect(self._set_message_unread_total)
         self.tray = QSystemTrayIcon(QIcon(str(ASSETS_DIR / "app_icon.ico")), self)
         self.tray.setToolTip("КРиТ · управление")
-        self.tray.messageClicked.connect(self._open_last_toast_lesson)
+        self.tray.messageClicked.connect(self._open_last_toast)
         self.tray.show()
         self.refresh()
         self.refresh_timer = QTimer(self)
@@ -192,6 +195,7 @@ class MainWindow(QMainWindow):
             self._last_toast_lesson_id = (
                 int(item["lesson_id"]) if item.get("lesson_id") is not None else None
             )
+            self._last_toast_person_id = None
             self.tray.showMessage(
                 str(item.get("title", "Уведомление КРиТ")),
                 str(item.get("message", "")),
@@ -200,9 +204,44 @@ class MainWindow(QMainWindow):
             )
         self._seen_notification_ids.update(int(item.get("id", 0)) for item in unread)
 
-    def _open_last_toast_lesson(self) -> None:
+    def _open_last_toast(self) -> None:
+        if self._last_toast_person_id is not None:
+            self.main_nav.setCurrentRow(2)
+            self.communications_page.current_person_id = self._last_toast_person_id
+            self.communications_page.tabs.setCurrentIndex(1)
+            self.communications_page.load_dialogs()
+            return
         if self._last_toast_lesson_id is not None:
             self._open_lesson_from_person(self._last_toast_lesson_id)
+
+    def _set_message_unread_total(self, total: int) -> None:
+        self.main_nav.item(2).setText(f"Рассылки ({total})" if total else "Рассылки")
+
+    def _conversations_changed(self, result: object) -> None:
+        rows = list(result) if isinstance(result, list) else []
+        counts = {
+            int(row["person_id"]): int(row.get("admin_unread_count") or 0)
+            for row in rows
+        }
+        self._set_message_unread_total(sum(counts.values()))
+        previous = self._conversation_unread_counts
+        self._conversation_unread_counts = counts
+        if previous is None:
+            return
+        for row in rows:
+            person_id = int(row["person_id"])
+            unread = counts[person_id]
+            if unread <= previous.get(person_id, 0):
+                continue
+            self._last_toast_lesson_id = None
+            self._last_toast_person_id = person_id
+            self.tray.showMessage(
+                f"Новое сообщение: {row.get('full_name', 'Клиент')}",
+                str(row.get("last_message_preview") or "Новое сообщение"),
+                QSystemTrayIcon.MessageIcon.Information,
+                7000,
+            )
+            break
 
     def open_notification_center(self) -> None:
         self._run(
@@ -216,6 +255,11 @@ class MainWindow(QMainWindow):
         self._run(
             lambda: self.api.admin_notifications(unread_only=False),
             lambda result: self._notifications_changed(result if isinstance(result, list) else []),
+        )
+        self._run(
+            self.api.communication_conversations,
+            self._conversations_changed,
+            lambda _message: None,
         )
 
     def _show_notification_center(self, result: object) -> None:

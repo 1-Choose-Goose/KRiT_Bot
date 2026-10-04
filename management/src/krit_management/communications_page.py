@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import html
+import re
 from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from PySide6.QtCore import QDate, QSize, Qt, QThreadPool, QTimer
+from PySide6.QtCore import QDate, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -181,8 +182,23 @@ def _table(headers: list[str]) -> QTableWidget:
 
 
 def _dialog_preview(full_name: str, value: object) -> str:
-    lines = [line.strip() for line in str(value or "").splitlines() if line.strip()]
-    lines = [line for line in lines if line.casefold() != full_name.strip().casefold()]
+    raw_lines = str(value or "").replace("\u200b", "").splitlines()
+    lines = [line.strip() for line in raw_lines if line.strip()]
+    name_parts = full_name.split()
+    if lines and name_parts:
+        name_prefix = r"^\s*" + r"\s+".join(map(re.escape, name_parts))
+        without_name = re.sub(
+            name_prefix + r"\s*(?::|—|-)?\s*",
+            "",
+            lines[0],
+            count=1,
+            flags=re.IGNORECASE,
+        ).strip()
+        if without_name != lines[0]:
+            if without_name:
+                lines[0] = without_name
+            else:
+                lines.pop(0)
     if not lines:
         return "Нет сообщений"
     first = lines[0]
@@ -308,6 +324,8 @@ class PollDetailsDialog(QDialog):
 
 
 class CommunicationsPage(QWidget):
+    unread_changed = Signal(int)
+
     def __init__(self, api: ManagementApi, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.api = api
@@ -323,6 +341,7 @@ class CommunicationsPage(QWidget):
         self.person_settings: dict[str, Any] = {}
         self.person_rule_rows: list[dict[str, Any]] = []
         self.current_person_id: int | None = None
+        self._total_unread_messages = 0
         self.pending_settings_person_id: int | None = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -488,6 +507,11 @@ class CommunicationsPage(QWidget):
         self.chat_title.setObjectName("sectionTitle")
         right_layout.addWidget(self.chat_title)
         self.chat_history = QTextBrowser()
+        self.chat_history.setObjectName("chatHistory")
+        self.chat_history.setStyleSheet(
+            "QTextBrowser#chatHistory { background: #eef2f6; border: 1px solid #d7e0ec; "
+            "border-radius: 10px; padding: 6px; }"
+        )
         right_layout.addWidget(self.chat_history, 1)
         reply = QHBoxLayout()
         self.reply_text = QLineEdit()
@@ -1383,31 +1407,60 @@ class CommunicationsPage(QWidget):
 
     def _dialogs_loaded(self, value: object) -> None:
         rows = list(value) if isinstance(value, list) else []
+        if not self.dialog_search.text().strip():
+            self._total_unread_messages = sum(
+                int(row.get("admin_unread_count") or 0) for row in rows
+            )
         current = self.current_person_id
         self.dialogs.clear()
         for row in rows:
             unread = int(row.get("admin_unread_count") or 0)
-            item = QListWidgetItem(str(row.get("full_name", "")))
+            item = QListWidgetItem()
+            item.setToolTip(str(row.get("full_name", "")))
             item.setData(Qt.ItemDataRole.UserRole, int(row["person_id"]))
             item.setData(Qt.ItemDataRole.UserRole + 1, row.get("full_name", ""))
             item.setData(Qt.ItemDataRole.UserRole + 2, unread)
             item.setData(Qt.ItemDataRole.UserRole + 3, row.get("last_message_preview", ""))
             item.setData(Qt.ItemDataRole.UserRole + 4, row.get("last_message_at"))
-            item.setSizeHint(QSize(0, 64))
+            item.setSizeHint(QSize(0, 68))
             self.dialogs.addItem(item)
             self._render_dialog_list_item(item)
             if current == int(row["person_id"]):
                 self.dialogs.setCurrentItem(item)
+        self._sync_unread_indicators()
+
+    def _sync_unread_indicators(self) -> None:
+        label = (
+            f"Диалоги ({self._total_unread_messages})"
+            if self._total_unread_messages
+            else "Диалоги"
+        )
+        self.tabs.setTabText(1, label)
+        self.unread_changed.emit(self._total_unread_messages)
 
     def _render_dialog_list_item(self, item: QListWidgetItem) -> None:
         container = QWidget()
         container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        content = QVBoxLayout(container)
-        content.setContentsMargins(9, 5, 9, 5)
+        outer = QHBoxLayout(container)
+        outer.setContentsMargins(8, 5, 8, 5)
+        outer.setSpacing(9)
+        full_name = str(item.data(Qt.ItemDataRole.UserRole + 1) or "")
+        initials = "".join(part[0] for part in full_name.split()[:2]).upper()
+        avatar = QLabel(initials or "?")
+        avatar.setObjectName("dialogAvatar")
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setFixedSize(40, 40)
+        avatar.setStyleSheet(
+            "background: #dce9ff; color: #164db3; border-radius: 20px; font-weight: 700;"
+        )
+        outer.addWidget(avatar)
+        details = QWidget()
+        content = QVBoxLayout(details)
+        content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(2)
         heading = QHBoxLayout()
         heading.setSpacing(7)
-        name = QLabel(str(item.data(Qt.ItemDataRole.UserRole + 1)))
+        name = QLabel(full_name)
         name.setObjectName("dialogName")
         heading.addWidget(name)
         heading.addStretch(1)
@@ -1429,7 +1482,9 @@ class CommunicationsPage(QWidget):
         )
         preview = QLabel(preview_text)
         preview.setObjectName("dialogPreview")
+        preview.setStyleSheet("color: #687386;")
         content.addWidget(preview)
+        outer.addWidget(details, 1)
         self.dialogs.setItemWidget(item, container)
 
     def _dialog_selected(self, item: QListWidgetItem | None) -> None:
@@ -1438,8 +1493,14 @@ class CommunicationsPage(QWidget):
         self.current_person_id = int(item.data(Qt.ItemDataRole.UserRole))
         self.chat_title.setText(str(item.data(Qt.ItemDataRole.UserRole + 1)))
         if int(item.data(Qt.ItemDataRole.UserRole + 2) or 0):
+            self._total_unread_messages = max(
+                0,
+                self._total_unread_messages
+                - int(item.data(Qt.ItemDataRole.UserRole + 2) or 0),
+            )
             item.setData(Qt.ItemDataRole.UserRole + 2, 0)
             self._render_dialog_list_item(item)
+            self._sync_unread_indicators()
         person_id = self.current_person_id
         self._run(
             lambda: self.api.communication_messages(person_id),
@@ -1478,14 +1539,13 @@ class CommunicationsPage(QWidget):
     def _render_chat_messages(self) -> None:
         lines = [
             "<style>body{font-family:'Segoe UI';font-size:10pt;color:#0f2347;}"
-            ".bubble{margin:4px 0;padding:9px 11px;border-radius:9px;}"
-            ".incoming{background:#f1f5f9;} .outgoing{background:#e8f1ff;}"
-            ".sender{font-weight:600;} .meta{color:#64748b;font-size:8pt;}"
-            ".text{margin-top:4px;}</style>"
+            ".bubble{margin:4px 0;padding:9px 11px;border:1px solid #d8e0ea;}"
+            ".incoming{background:#ffffff;} .outgoing{background:#dceaff;}"
+            ".meta{color:#64748b;font-size:8pt;}"
+            ".text{margin-bottom:5px;}</style>"
         ]
         for row in self.chat_messages:
             outbound = row.get("direction") == "outbound"
-            who = "Вы" if outbound else "Клиент"
             raw_status = str(row.get("delivery_status", ""))
             status = html.escape(DELIVERY_STATUS_LABELS.get(raw_status, "неизвестно"))
             try:
@@ -1500,12 +1560,12 @@ class CommunicationsPage(QWidget):
             kind_text = f" · {html.escape(kind)}" if kind else ""
             alignment = "right" if outbound else "left"
             bubble = "outgoing" if outbound else "incoming"
+            meta = f"{created_at} · {status}{kind_text}" if outbound else f"{created_at}{kind_text}"
             lines.append(
                 f"<table width='100%' cellspacing='0' cellpadding='2'><tr>"
                 f"<td align='{alignment}'><table width='78%' cellspacing='0' cellpadding='0'>"
-                f"<tr><td class='bubble {bubble}'><span class='sender'>{who}</span>"
-                f"<span class='meta'> · {created_at} · {status}{kind_text}</span>"
-                f"<div class='text'>{text}</div></td></tr></table></td></tr></table>"
+                f"<tr><td class='bubble {bubble}'><div class='text'>{text}</div>"
+                f"<div class='meta'>{meta}</div></td></tr></table></td></tr></table>"
             )
         self.chat_history.setHtml("".join(lines))
         self.chat_history.verticalScrollBar().setValue(

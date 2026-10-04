@@ -35,6 +35,29 @@ def wait_for_process(pid: int, timeout: int = 120) -> None:
 ProgressCallback = Callable[[str, int], None]
 
 
+def updater_icon_path() -> Path | None:
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    candidates = [Path(__file__).with_name("assets") / "app_icon.ico"]
+    if bundle_root:
+        candidates.insert(
+            0,
+            Path(bundle_root) / "krit_management" / "assets" / "app_icon.ico",
+        )
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def set_window_icon(root: object) -> None:
+    icon = updater_icon_path()
+    if icon is None:
+        return
+    try:
+        root.iconbitmap(default=str(icon))  # type: ignore[attr-defined]
+    except Exception:
+        # The update must remain usable even if a particular Tk build rejects
+        # a valid Windows icon resource.
+        return
+
+
 def safe_extract(
     archive: Path,
     destination: Path,
@@ -118,6 +141,7 @@ def run_with_window(archive: Path, install_dir: Path, pid: int, executable: str)
 
     root = tk.Tk()
     root.title("Обновление КРиТ")
+    set_window_icon(root)
     root.geometry("500x210")
     root.resizable(False, False)
     root.configure(background="#f5f7fb")

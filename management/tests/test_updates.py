@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,26 @@ from krit_management.updates import UpdateInfo, download_update, version_tuple
 
 def test_semantic_version_comparison() -> None:
     assert version_tuple("v1.12.0") > version_tuple("1.9.9")
+
+
+def test_updater_window_uses_bundled_brand_icon(tmp_path, monkeypatch) -> None:
+    icon = tmp_path / "app_icon.ico"
+    icon.write_bytes(b"icon")
+    calls: list[str] = []
+
+    class FakeRoot:
+        def iconbitmap(self, *, default: str) -> None:
+            calls.append(default)
+
+    monkeypatch.setattr(updater, "updater_icon_path", lambda: icon)
+    updater.set_window_icon(FakeRoot())
+
+    assert calls == [str(icon)]
+    build_script = Path(__file__).resolve().parents[1] / "build_windows.ps1"
+    assert build_script.exists()
+    assert '--add-data "$assets\\app_icon.ico;krit_management\\assets"' in (
+        build_script.read_text(encoding="utf-8-sig")
+    )
 
 
 def test_safe_extract_rejects_parent_traversal(tmp_path) -> None:

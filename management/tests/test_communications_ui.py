@@ -155,6 +155,7 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     )
     assert "<script>" not in page.chat_history.toHtml()
     assert "<script>alert(1)</script>" in page.chat_history.toPlainText()
+    assert "Клиент ·" not in page.chat_history.toPlainText()
     page.current_person_id = 1
     page.reply_text.setText("Ответ администратора")
     page._reply_sent(1, "Ответ администратора")
@@ -180,7 +181,7 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
             {
                 "person_id": 1,
                 "full_name": "Куц Олег Олегович",
-                "last_message_preview": "Куц Олег Олегович\nВаши занятия КРиТ 02.10.2026",
+                "last_message_preview": "Куц   Олег Олегович: ну привет",
                 "last_message_at": "2026-10-01T12:47:00+05:00",
                 "admin_unread_count": 3,
             }
@@ -189,14 +190,17 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     page.dialogs.blockSignals(False)
     dialog_item = page.dialogs.item(0)
     dialog_widget = page.dialogs.itemWidget(dialog_item)
-    assert dialog_item.text() == "Куц Олег Олегович"
+    assert dialog_item.text() == ""
     assert dialog_widget.findChild(QLabel, "dialogName").text() == "Куц Олег Олегович"
-    assert dialog_widget.findChild(QLabel, "dialogPreview").text() == "Расписание занятий"
+    assert dialog_widget.findChild(QLabel, "dialogAvatar").text() == "КО"
+    assert dialog_widget.findChild(QLabel, "dialogPreview").text() == "ну привет"
     assert dialog_widget.findChild(QLabel, "dialogTime").text()
     assert dialog_widget.findChild(QLabel, "unreadBadge").text() == "3"
+    assert page.tabs.tabText(1) == "Диалоги (3)"
     page._dialog_selected(dialog_item)
     assert dialog_item.data(Qt.ItemDataRole.UserRole + 2) == 0
     assert page.dialogs.itemWidget(dialog_item).findChild(QLabel, "unreadBadge") is None
+    assert page.tabs.tabText(1) == "Диалоги"
     page._settings_loaded(
         [
             {

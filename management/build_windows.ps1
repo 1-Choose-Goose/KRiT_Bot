@@ -43,6 +43,7 @@ try {
 
     & $python -m PyInstaller --noconfirm --clean --onefile --windowed `
         --name KRiTManagementUpdater --icon (Join-Path $assets "app_icon.ico") `
+        --add-data "$assets\app_icon.ico;krit_management\assets" `
         --distpath $distDir `
         --workpath (Join-Path $workDir "updater") --specpath $specDir `
         --paths $sourceDir (Join-Path $sourceDir "krit_management\updater.py")

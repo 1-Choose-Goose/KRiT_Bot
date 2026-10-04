@@ -440,6 +440,9 @@ class ReferenceDialog(QDialog):
         self.subject_teachers = QTableWidget(0, 2)
         self.subject_teachers.setHorizontalHeaderLabels(["Выбрать", "Преподаватель"])
         self.subject_teachers.verticalHeader().setVisible(False)
+        self.subject_teachers.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
         self.subject_teachers.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         self.subject_teachers.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Fixed
@@ -630,11 +633,12 @@ class LessonDialog(QDialog):
         self.students.setHorizontalHeaderLabels(["Выбрать", "Ученик", "Подтверждение"])
         self.students.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.students.verticalHeader().setVisible(False)
+        self.students.verticalHeader().setDefaultSectionSize(46)
         self.students.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.students.setColumnWidth(0, 90)
         self.students.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.students.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.students.setColumnWidth(2, 220)
+        self.students.setColumnWidth(2, 260)
         self.students.setMinimumHeight(290)
         selected = {p.get("person_id") for p in self.lesson.get("participants", [])}
         self._manual_participant_ids = {int(person_id) for person_id in selected if person_id}
@@ -715,6 +719,7 @@ class LessonDialog(QDialog):
             }
         self._refresh_group_participants()
         self.group.currentIndexChanged.connect(self._apply_group_defaults)
+        self.teacher.currentIndexChanged.connect(self._refresh_group_participants)
         self.start.dateTimeChanged.connect(self._refresh_group_participants)
         self._student_selection_changed()
         buttons = QDialogButtonBox(
@@ -772,6 +777,7 @@ class LessonDialog(QDialog):
 
     def _refresh_group_participants(self, _value: object = None) -> None:
         self._group_member_ids = self._active_group_member_ids()
+        teacher_id = self.teacher.currentData()
         for row in range(self.students.rowCount()):
             holder = self.students.cellWidget(row, 0)
             check = holder.findChild(QCheckBox) if holder else None
@@ -779,16 +785,24 @@ class LessonDialog(QDialog):
                 continue
             person_id = int(check.property("person_id"))
             from_group = person_id in self._group_member_ids
+            is_teacher = teacher_id is not None and person_id == int(teacher_id)
             check.blockSignals(True)
             check.setChecked(
-                (from_group and person_id not in self._excluded_group_member_ids)
-                or person_id in self._manual_participant_ids
+                not is_teacher
+                and (
+                    (from_group and person_id not in self._excluded_group_member_ids)
+                    or person_id in self._manual_participant_ids
+                )
             )
-            check.setEnabled(True)
+            check.setEnabled(not is_teacher)
             check.setToolTip(
-                "Снимите отметку, чтобы исключить ученика только из этого занятия"
-                if from_group
-                else "Дополнительный участник занятия"
+                "Выбран как преподаватель этого занятия"
+                if is_teacher
+                else (
+                    "Снимите отметку, чтобы исключить ученика только из этого занятия"
+                    if from_group
+                    else "Дополнительный участник занятия"
+                )
             )
             check.blockSignals(False)
             self._render_participant_confirmation(row, person_id, check.isChecked())
@@ -862,7 +876,7 @@ class LessonDialog(QDialog):
                 resend.setText("Отправлено")
                 self.resend_confirmation_requested.emit(available_targets)
 
-            resend = _button("Повторить", request_again, compact=True)
+            resend = _button("Повторить запрос", request_again, compact=True)
             bar.addWidget(resend)
         bar.addStretch(1)
         self.students.setCellWidget(row, 2, holder)
@@ -910,6 +924,7 @@ class LessonDialog(QDialog):
         selected = self.teacher.findData(current)
         self.teacher.setCurrentIndex(selected if selected >= 0 else 0)
         self.teacher.blockSignals(False)
+        self._refresh_group_participants()
 
     def set_period(self, start_at: str, end_at: str) -> None:
         start = QDateTime.fromString(start_at, Qt.DateFormat.ISODate)
@@ -1030,6 +1045,10 @@ class LessonDialog(QDialog):
                 participant_ids.append(int(check.property("person_id")))
         start = center_wall_time(self.start.dateTime().toPython())
         end = center_wall_time(self._end_datetime().toPython())
+        excluded_participant_ids = set(self._excluded_group_member_ids)
+        teacher_id = self.teacher.currentData()
+        if teacher_id is not None and int(teacher_id) in self._group_member_ids:
+            excluded_participant_ids.add(int(teacher_id))
         return {
             "subject_id": self.subject.currentData(),
             "teacher_id": self.teacher.currentData(),
@@ -1038,7 +1057,7 @@ class LessonDialog(QDialog):
             "start_at": start.isoformat(),
             "end_at": end.isoformat(),
             "participant_ids": participant_ids,
-            "excluded_participant_ids": sorted(self._excluded_group_member_ids),
+            "excluded_participant_ids": sorted(excluded_participant_ids),
             "notes": self.notes.toPlainText().strip() or None,
         }
 
@@ -1659,6 +1678,7 @@ class FreeSlotDialog(QDialog):
         self.students = QTableWidget(0, 2)
         self.students.setHorizontalHeaderLabels(["Выбрать", "ФИО"])
         self.students.verticalHeader().setVisible(False)
+        self.students.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.students.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.students.setColumnWidth(0, 90)
         self.students.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -1997,6 +2017,8 @@ class LearningPage(QWidget):
         self.reference_tabs = QTabWidget()
         self.reference_tables: dict[str, QTableWidget] = {}
         self.reference_empty_labels: dict[str, QLabel] = {}
+        self.group_members_button: QPushButton | None = None
+        self.delete_group_button: QPushButton | None = None
         for kind, title, headers in (
             (
                 "subjects",
@@ -2026,6 +2048,12 @@ class LearningPage(QWidget):
                 group_members_button = _button("Состав группы", self.manage_selected_group)
                 group_members_button.setEnabled(False)
                 buttons.addWidget(group_members_button)
+                self.group_members_button = group_members_button
+                self.delete_group_button = _button(
+                    "Удалить группу", self.delete_selected_group, "danger"
+                )
+                self.delete_group_button.setEnabled(False)
+                buttons.addWidget(self.delete_group_button)
             tab_layout.addLayout(buttons)
             if kind == "subjects":
                 table = _table(headers, stretch=(0, 2), fixed={1: 72, 3: 105})
@@ -2034,11 +2062,8 @@ class LearningPage(QWidget):
             else:
                 table = _table(headers, stretch=(0,), compact=tuple(range(1, len(headers))))
             self.reference_tables[kind] = table
-            table.itemSelectionChanged.connect(
-                lambda widget=table, members=group_members_button: (
-                    members.setEnabled(widget.currentRow() >= 0) if members else None
-                )
-            )
+            if kind == "groups":
+                table.itemSelectionChanged.connect(self._sync_group_reference_actions)
             table.itemActivated.connect(lambda _item, key=kind: self.edit_selected_reference(key))
             table.setToolTip("Дважды щёлкните строку или нажмите Enter для изменения")
             tab_layout.addWidget(table)
@@ -2924,7 +2949,7 @@ class LearningPage(QWidget):
     def _handle_lesson_operation(self, lesson: dict[str, Any], dialog: LessonCardDialog) -> None:
         lesson_id = int(lesson["id"])
         if dialog.operation == "edit":
-            self.edit_lesson(lesson)
+            self._run(self.api.learning_lesson, lesson_id, done=self.edit_lesson)
             return
         if dialog.operation == "reschedule":
             self.reschedule_lesson(lesson)
@@ -3237,6 +3262,36 @@ class LearningPage(QWidget):
             self.api.group_memberships,
             int(group["id"]),
             done=lambda result: self._show_group_members(group, result),
+        )
+
+    def _sync_group_reference_actions(self) -> None:
+        selected = self.reference_tables["groups"].currentRow() >= 0
+        if self.group_members_button is not None:
+            self.group_members_button.setEnabled(selected)
+        if self.delete_group_button is not None:
+            self.delete_group_button.setEnabled(selected)
+
+    def delete_selected_group(self) -> None:
+        table = self.reference_tables["groups"]
+        row = table.currentRow()
+        item = table.item(row, 0) if row >= 0 else None
+        if item is None:
+            return
+        group = item.data(Qt.ItemDataRole.UserRole)
+        answer = QMessageBox.question(
+            self,
+            "Удаление группы",
+            f"Удалить группу «{group.get('name', '')}»?\n"
+            "Состав группы будет удалён, а проведённые занятия сохранятся в истории.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._run(
+            self.api.delete_learning_group,
+            int(group["id"]),
+            done=lambda _result: self.refresh(),
         )
 
     def _show_group_members(self, group: dict[str, Any], result: object) -> None:

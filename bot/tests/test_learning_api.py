@@ -498,3 +498,21 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
                 f"/api/v1/people/{student_one}", headers=headers
             )
             assert cannot_delete_history.status_code == 409
+
+            deleted_group = await client.delete(
+                f"/api/v1/learning/groups/{group_id}", headers=headers
+            )
+            assert deleted_group.status_code == 200, deleted_group.text
+            assert deleted_group.json() == {"id": group_id, "deleted": True}
+            references_after_delete = await client.get(
+                "/api/v1/learning/reference-data", headers=headers
+            )
+            assert all(
+                item["id"] != group_id
+                for item in references_after_delete.json()["groups"]
+            )
+            lesson_after_group_delete = await client.get(
+                f"/api/v1/learning/lesson/{excluded_group_member.json()['id']}",
+                headers=headers,
+            )
+            assert lesson_after_group_delete.json()["group_id"] is None
