@@ -1553,7 +1553,10 @@ def create_learning_router(
                 (
                     await session.scalars(
                         select(AdminNotification)
-                        .where(AdminNotification.read_at.is_(None))
+                        .where(
+                            AdminNotification.read_at.is_(None),
+                            AdminNotification.resolved_at.is_(None),
+                        )
                         .order_by(AdminNotification.created_at.desc())
                         .limit(50)
                     )
@@ -3913,7 +3916,7 @@ def create_learning_router(
 
     @router.get("/admin-notifications")
     async def admin_notifications(unread_only: bool = True) -> list[dict[str, Any]]:
-        query = select(AdminNotification)
+        query = select(AdminNotification).where(AdminNotification.resolved_at.is_(None))
         if unread_only:
             query = query.where(AdminNotification.read_at.is_(None))
         async with sessions() as session:
@@ -3958,7 +3961,10 @@ def create_learning_router(
             items = list(
                 (
                     await session.scalars(
-                        select(AdminNotification).where(AdminNotification.read_at.is_(None))
+                        select(AdminNotification).where(
+                            AdminNotification.read_at.is_(None),
+                            AdminNotification.resolved_at.is_(None),
+                        )
                     )
                 ).all()
             )

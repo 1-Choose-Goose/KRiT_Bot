@@ -449,6 +449,20 @@ async def test_stale_presence_is_not_current_and_must_be_closed(tmp_path) -> Non
             if saved_departure.tzinfo is None:
                 saved_departure = saved_departure.replace(tzinfo=UTC)
             assert saved_departure == corrected_departure
+            corrected_today = (
+                await client.get("/api/v1/learning/today", headers=headers)
+            ).json()
+            assert corrected_today["stale_presence"] == []
+            assert all(
+                alert["kind"] != "stale_presence" for alert in corrected_today["alerts"]
+            )
+            active_alerts = (
+                await client.get(
+                    "/api/v1/learning/admin-notifications?unread_only=false",
+                    headers=headers,
+                )
+            ).json()
+            assert all(alert["kind"] != "stale_presence" for alert in active_alerts)
             new_arrival = await client.post(
                 f"/api/v1/learning/presence/{person_id}/arrival", headers=headers
             )

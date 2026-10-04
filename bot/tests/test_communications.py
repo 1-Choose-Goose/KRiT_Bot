@@ -54,6 +54,7 @@ from krit_bot.db import (
 )
 from krit_bot.learning import _conflicts
 from krit_bot.learning_models import (
+    AdminNotification,
     GroupMembership,
     Lesson,
     LessonParticipant,
@@ -867,7 +868,101 @@ async def test_student_and_guardian_disagreement_is_a_conflict(tmp_path) -> None
         intent = await session.scalar(select(LessonAttendanceIntent))
         assert intent is not None
         assert intent.status == "conflict"
+        conflict = await session.scalar(select(AdminNotification))
+        assert conflict is not None
+        assert conflict.resolved_at is None
+
+        await save_interaction_response(
+            session,
+            request=requests[1],
+            respondent_person_id=guardian.id,
+            respondent_context="guardian",
+            answer="yes",
+        )
+        assert intent.status == "confirmed"
+        assert conflict.resolved_at is not None
+
+        await save_interaction_response(
+            session,
+            request=requests[1],
+            respondent_person_id=guardian.id,
+            respondent_context="guardian",
+            answer="no",
+        )
+        assert intent.status == "conflict"
+        assert conflict.resolved_at is None
+        assert conflict.read_at is None
     await engine.dispose()
+
+
+async def test_retry_failed_campaign_does_not_revive_cancelled_jobs(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'retry-failed.db').as_posix()}"
+    settings = Settings(
+        database_url=database_url,
+        max_bot_token=SecretStr("test-token"),
+        jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
+        bot_mode="webhook",
+        vk_syndication_enabled=False,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        engine = build_engine(database_url)
+        sessions = build_session_factory(engine)
+        async with sessions() as session:
+            person = Person(full_name="Получатель", phone="+79000000024")
+            campaign = CommunicationCampaign(
+                campaign_type="manual_message",
+                title="Проверка повторов",
+                status="partial",
+            )
+            session.add_all([person, campaign])
+            await session.flush()
+            session.add_all(
+                [
+                    NotificationJob(
+                        dedupe_key="retry-only-failed",
+                        event_type="manual_message",
+                        recipient_person_id=person.id,
+                        campaign_id=campaign.id,
+                        scheduled_at=utcnow(),
+                        status="failed",
+                    ),
+                    NotificationJob(
+                        dedupe_key="keep-intentionally-cancelled",
+                        event_type="manual_message",
+                        recipient_person_id=person.id,
+                        campaign_id=campaign.id,
+                        scheduled_at=utcnow(),
+                        status="cancelled",
+                    ),
+                ]
+            )
+            await session.commit()
+            campaign_id = int(campaign.id)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            login = await client.post(
+                "/api/v1/auth/login", json={"username": "admin", "password": "admin"}
+            )
+            headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+            response = await client.post(
+                f"/api/v1/communications/campaigns/{campaign_id}/retry-failed",
+                headers=headers,
+            )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["retried"] == 1
+        async with sessions() as session:
+            cancelled = await session.scalar(
+                select(NotificationJob).where(
+                    NotificationJob.dedupe_key == "keep-intentionally-cancelled"
+                )
+            )
+            assert cancelled is not None
+            assert cancelled.status == "cancelled"
+        await engine.dispose()
 
 
 async def test_anchor_moves_to_next_lesson_without_recreating_sent_offsets(tmp_path) -> None:

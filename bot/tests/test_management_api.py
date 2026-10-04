@@ -79,6 +79,32 @@ async def test_login_protects_management_api_and_allows_person_creation(tmp_path
             parent_view = next(item for item in people if item["id"] == parent_id)
             assert parent_view["students"][0]["id"] == person_id
 
+            all_roles = await client.put(
+                f"/api/v1/people/{person_id}",
+                headers=headers,
+                json={
+                    "full_name": "Куц Олег Олегович",
+                    "phone": "+79001234567",
+                    "roles": ["student", "parent", "teacher"],
+                    "active": True,
+                },
+            )
+            assert all_roles.status_code == 200, all_roles.text
+            assert set(all_roles.json()["roles"]) == {"student", "parent", "teacher"}
+
+            student_only = await client.put(
+                f"/api/v1/people/{person_id}",
+                headers=headers,
+                json={
+                    "full_name": "Куц Олег Олегович",
+                    "phone": "+79001234567",
+                    "roles": ["student"],
+                    "active": True,
+                },
+            )
+            assert student_only.status_code == 200, student_only.text
+            assert student_only.json()["roles"] == ["student"]
+
             archived = await client.post(f"/api/v1/people/{person_id}/archive", headers=headers)
             assert archived.status_code == 200
             assert archived.json()["archived_at"] is not None

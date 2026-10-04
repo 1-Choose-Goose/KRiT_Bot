@@ -1608,15 +1608,15 @@ async def save_interaction_response(
         intent.status = _intent_status(answers)
         intent.responded_at = utcnow()
         intent.updated_at = utcnow()
-        if intent.status == "conflict":
-            from .learning_models import AdminNotification
+        from .learning_models import AdminNotification
 
-            conflict_key = (
-                f"confirmation-conflict:{intent.lesson_id}:"
-                f"{intent.student_person_id}:{intent.lesson_revision}"
-            )
+        conflict_key = (
+            f"confirmation-conflict:{intent.lesson_id}:"
+            f"{intent.student_person_id}:{intent.lesson_revision}"
+        )
+        if intent.status == "conflict":
             existing_alert = await session.scalar(
-                select(AdminNotification.id).where(
+                select(AdminNotification).where(
                     AdminNotification.dedupe_key == conflict_key
                 )
             )
@@ -1624,12 +1624,29 @@ async def save_interaction_response(
                 session.add(
                     AdminNotification(
                         dedupe_key=conflict_key,
+                        condition_key=conflict_key,
                         kind="confirmation_conflict",
                         title="Конфликт подтверждений",
                         message="Ответы ученика и родителя по занятию расходятся.",
                         lesson_id=intent.lesson_id,
                     )
                 )
+            else:
+                existing_alert.condition_key = conflict_key
+                existing_alert.resolved_at = None
+                existing_alert.read_at = None
+        else:
+            await session.execute(
+                update(AdminNotification)
+                .where(
+                    or_(
+                        AdminNotification.condition_key == conflict_key,
+                        AdminNotification.dedupe_key == conflict_key,
+                    ),
+                    AdminNotification.resolved_at.is_(None),
+                )
+                .values(resolved_at=utcnow())
+            )
     complete = answer in {"yes", "no"} or all(
         merged_lesson_map.get(str(link.lesson_id)) in {"yes", "no"}
         for link in links
@@ -3329,7 +3346,7 @@ def create_communications_router(
                     await session.scalars(
                         select(NotificationJob).where(
                             NotificationJob.campaign_id == campaign_id,
-                            NotificationJob.status.in_(["failed", "cancelled"]),
+                            NotificationJob.status == "failed",
                         )
                     )
                 ).all()
