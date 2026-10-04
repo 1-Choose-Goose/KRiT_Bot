@@ -78,6 +78,8 @@ async def test_parallel_daily_reconciliation_keeps_one_job_per_dedupe_key() -> N
                 )
             ).all()
         )
-        assert len(jobs) == 6
+        # Two recipients (student and teacher) each receive the configured
+        # three-hour and one-hour reminders, without concurrent duplicates.
+        assert len(jobs) == 4
         assert len({job.dedupe_key for job in jobs}) == len(jobs)
     await engine.dispose()
