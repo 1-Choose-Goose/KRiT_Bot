@@ -37,6 +37,7 @@
 
 - `bot/src/krit_bot/auth.py` — authenticated administrator principal, role checks, token issue/revocation, and first-password guard.
 - `bot/src/krit_bot/administration.py` — user CRUD, audit writes, and service-control API.
+- `bot/src/krit_bot/system_status.py` — allowlisted Linux/process/database/bot/queue/backup health snapshot with partial-failure isolation.
 - `bot/src/krit_bot/backups.py` — fixed-command PostgreSQL/SQLite backup creation and download metadata.
 - `bot/src/krit_bot/restores.py` — restore upload validation, target-state classification, persisted operation state, and privileged-helper dispatch.
 - `bot/alembic/versions/20261004_administration_v7.py` — administrator role/profile/session fields and constraints.
@@ -107,6 +108,25 @@
 - [ ] **Step 5: Run** `pytest bot/tests/test_management_api.py bot/tests/test_max_callback_webhook.py bot/tests/test_release_safety.py -q` and expect all passing.
 - [ ] **Step 6: Commit** `feat: add safe KRiT service restart controls`.
 
+### Task 3A: SuperAdmin server and bot status dashboard API
+
+**Files:**
+- Create: `bot/src/krit_bot/system_status.py`
+- Modify: `bot/src/krit_bot/administration.py`
+- Modify: `bot/src/krit_bot/webhook.py`
+- Test: `bot/tests/test_system_status.py`
+
+**Interfaces:**
+- Produces: `SystemStatusProvider.snapshot() -> Awaitable[SystemStatusView]` and `GET /api/v1/administration/system-status`.
+- Consumes: Task 2 SuperAdmin guard, Task 3 worker state, configured KRiT database allowlist, notification/communications queues, and backup/restore status providers.
+
+- [ ] **Step 1: Write failing authorization/shape tests** for the exact server/resource/database/API/bot/queue/backup sections and `403` for director/administrator.
+- [ ] **Step 2: Write failing provider tests** for Linux disk/RAM/load/uptime units, PostgreSQL version/size/connections/revision, worker heartbeat/error state, bounded 10-second cache, and partial collector failure.
+- [ ] **Step 3: Implement `system_status.py`** using allowlisted fields, `shutil.disk_usage`, Linux `/proc` readers, injected async database/worker/backup collectors, and no environment/process-command exposure.
+- [ ] **Step 4: Implement the guarded endpoint and structured collection-failure logs** with request/entry-point identifiers and no secrets or PII.
+- [ ] **Step 5: Run** `pytest bot/tests/test_system_status.py bot/tests/test_management_api.py -q` and expect all passing.
+- [ ] **Step 6: Commit** `feat: expose SuperAdmin system health status`.
+
 ### Task 4: Complete server backup API and verified local backup store (release-critical)
 
 **Files:**
@@ -175,7 +195,7 @@
 - [ ] **Step 2: Implement profile-aware login and role-filtered navigation**, including the styled Reports placeholder.
 - [ ] **Step 3: Write failing administration UI tests** for all user actions, protected/self/last-SuperAdmin feedback, confirmation dialogs, and refresh after success.
 - [ ] **Step 4: Implement the user table/forms and service-control cards** using background workers and disabled busy buttons.
-- [ ] **Step 5: Write failing backup/restore UI tests** for startup daily schedule, 24-hour throttle, manual backup, 7-daily/4-weekly history, suspicious-copy explanation/trust/delete actions, automatically discovered latest trusted set, address/port/login/password form with no file chooser, new/existing target indication, strong existing-server confirmation, upload progress, forced re-login, pending safety-set display, rollback, confirmed deletion, and restore lockout until a decision.
+- [ ] **Step 5: Write failing status/backup/restore UI tests** for 15-second/manual status refresh, normal/warning/critical cards, partial unavailable values, startup daily backup schedule, 24-hour throttle, manual backup, 7-daily/4-weekly history, suspicious-copy explanation/trust/delete actions, automatically discovered latest trusted set, address/port/login/password form with no file chooser, new/existing target indication, strong existing-server confirmation, upload progress, forced re-login, pending safety-set display, rollback, confirmed deletion, and restore lockout until a decision.
 - [ ] **Step 6: Implement backup scheduling and restore workflow**; clear the restore password immediately after request completion/failure and never place it in settings.
 - [ ] **Step 7: Run** `pytest management/tests/test_administration_ui.py management/tests/test_learning_ui.py management/tests/test_communications_ui.py -q` and expect all passing.
 - [ ] **Step 8: Commit** `feat: add administration and disaster recovery UI`.
