@@ -8,11 +8,28 @@ import pytest
 
 from krit_management import updater, updates
 from krit_management.updater import ApplyUpdateError, apply_update, safe_extract
-from krit_management.updates import UpdateInfo, download_update, version_tuple
+from krit_management.updates import (
+    UpdateInfo,
+    download_update,
+    release_notes_html,
+    version_tuple,
+)
 
 
 def test_semantic_version_comparison() -> None:
     assert version_tuple("v1.12.0") > version_tuple("1.9.9")
+
+
+def test_release_notes_are_rendered_as_safe_readable_list() -> None:
+    rendered = release_notes_html(
+        "- Первый пункт\\n- Второй <важный> пункт\n\nДополнительная информация"
+    )
+
+    assert "<ul" in rendered
+    assert "<li>Первый пункт</li>" in rendered
+    assert "<li>Второй &lt;важный&gt; пункт</li>" in rendered
+    assert "<p>Дополнительная информация</p>" in rendered
+    assert "\\n" not in rendered
 
 
 def test_updater_window_uses_bundled_brand_icon(tmp_path, monkeypatch) -> None:

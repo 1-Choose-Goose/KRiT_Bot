@@ -42,6 +42,7 @@ from .updates import (
     check_for_update,
     download_update,
     launch_updater,
+    release_notes_html,
     updates_supported,
 )
 from .widgets import SafeComboBox, matches_word_prefix
@@ -934,23 +935,34 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Обновления", "Установлена актуальная версия.")
             return
         info: UpdateInfo = update  # type: ignore[assignment]
-        notes = info.notes or "Описание изменений не указано."
+        notes = release_notes_html(info.notes)
+        prompt = QMessageBox(self)
+        prompt.setIcon(QMessageBox.Icon.Information)
+        prompt.setWindowTitle(f"Обновление КРиТ {info.version}")
+        prompt.setTextFormat(Qt.TextFormat.RichText)
+        prompt.setText(f"<b>Доступна новая версия {info.version}</b>")
         if not updates_supported():
-            answer = QMessageBox.information(
-                self,
-                f"Доступна версия {info.version}",
-                notes + "\n\nАвтоустановка включится в собранной Windows-версии.",
-                QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Close,
-                QMessageBox.StandardButton.Open,
+            prompt.setInformativeText(
+                notes + "<p>Автоустановка доступна в собранной Windows-версии.</p>"
             )
+            prompt.setStandardButtons(
+                QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Close
+            )
+            prompt.setDefaultButton(QMessageBox.StandardButton.Open)
+            prompt.button(QMessageBox.StandardButton.Open).setText("Открыть страницу")
+            prompt.button(QMessageBox.StandardButton.Close).setText("Закрыть")
+            answer = prompt.exec()
             if answer == QMessageBox.StandardButton.Open and info.page_url:
                 webbrowser.open(info.page_url)
             return
-        answer = QMessageBox.question(
-            self,
-            f"Доступна версия {info.version}",
-            notes + "\n\nСкачать и установить обновление?",
+        prompt.setInformativeText(notes + "<p><b>Установить обновление сейчас?</b></p>")
+        prompt.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
+        prompt.setDefaultButton(QMessageBox.StandardButton.Yes)
+        prompt.button(QMessageBox.StandardButton.Yes).setText("Установить")
+        prompt.button(QMessageBox.StandardButton.No).setText("Позже")
+        answer = prompt.exec()
         if answer == QMessageBox.StandardButton.Yes:
             self._start_update_download(info)
 

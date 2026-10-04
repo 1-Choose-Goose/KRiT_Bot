@@ -11,6 +11,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -60,6 +61,38 @@ def version_tuple(value: str) -> tuple[int, int, int]:
     if not match:
         raise ValueError(f"Unsupported version: {value}")
     return tuple(int(part) for part in match.groups())
+
+
+def release_notes_html(notes: str) -> str:
+    """Render the small release-notes subset used by the updater safely."""
+    normalized = notes.replace("\\r\\n", "\n").replace("\\n", "\n").strip()
+    if not normalized:
+        return "<p>Описание изменений не указано.</p>"
+    blocks: list[str] = []
+    bullets: list[str] = []
+
+    def flush_bullets() -> None:
+        if bullets:
+            blocks.append(
+                "<ul style='margin: 4px 0 8px 18px; padding: 0;'>"
+                + "".join(f"<li>{item}</li>" for item in bullets)
+                + "</ul>"
+            )
+            bullets.clear()
+
+    for raw_line in normalized.splitlines():
+        line = raw_line.strip()
+        if not line:
+            flush_bullets()
+            continue
+        bullet = re.match(r"^(?:[-*•])\s+(.+)$", line)
+        if bullet:
+            bullets.append(escape(bullet.group(1).strip()))
+            continue
+        flush_bullets()
+        blocks.append(f"<p>{escape(line)}</p>")
+    flush_bullets()
+    return "".join(blocks)
 
 
 def updates_supported() -> bool:
