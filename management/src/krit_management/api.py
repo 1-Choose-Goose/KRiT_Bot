@@ -191,13 +191,18 @@ def _format_api_error(status_code: int, detail: object, path: str = "") -> str:
 class ManagementApi:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
+        self.profile: dict[str, Any] = {}
         self._client = httpx.Client(
             base_url=self.base_url,
             headers={"User-Agent": "KRiT-Management/0.1"},
             timeout=httpx.Timeout(15, connect=8),
         )
 
-    def login(self, username: str, password: str) -> None:
+    @classmethod
+    def for_server(cls, base_url: str) -> ManagementApi:
+        return cls(base_url.rstrip("/") + "/krit-api/api/v1")
+
+    def login(self, username: str, password: str) -> dict[str, Any]:
         data = self._request(
             "POST",
             "/auth/login",
@@ -208,6 +213,62 @@ class ManagementApi:
         if not token:
             raise ApiError("Сервер не выдал токен доступа")
         self._client.headers["Authorization"] = f"Bearer {token}"
+        self.profile = dict(data)
+        self.profile.pop("access_token", None)
+        return self.profile
+
+    def change_initial_password(
+        self, current_password: str, new_password: str
+    ) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            "/auth/change-initial-password",
+            json={
+                "current_password": current_password,
+                "new_password": new_password,
+            },
+        )
+        if not isinstance(data, dict) or not data.get("access_token"):
+            raise ApiError("Сервер не подтвердил смену пароля")
+        self._client.headers["Authorization"] = f"Bearer {data['access_token']}"
+        self.profile = dict(data)
+        self.profile.pop("access_token", None)
+        return self.profile
+
+    def administration_users(self) -> list[dict[str, Any]]:
+        data = self._request("GET", "/administration/users")
+        return data if isinstance(data, list) else []
+
+    def create_administrator(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/administration/users", json=payload)
+
+    def update_administrator(
+        self, user_id: int, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._request("PATCH", f"/administration/users/{user_id}", json=payload)
+
+    def change_administrator_password(
+        self, user_id: int, password: str
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST", f"/administration/users/{user_id}/password", json={"password": password}
+        )
+
+    def set_administrator_access(self, user_id: int, *, enabled: bool) -> dict[str, Any]:
+        action = "enable" if enabled else "disable"
+        return self._request("POST", f"/administration/users/{user_id}/{action}")
+
+    def delete_administrator(self, user_id: int) -> dict[str, Any]:
+        return self._request("DELETE", f"/administration/users/{user_id}")
+
+    def system_status(self) -> dict[str, Any]:
+        data = self._request("GET", "/administration/system-status")
+        return data if isinstance(data, dict) else {}
+
+    def restart_service(self, service: str) -> dict[str, Any]:
+        if service not in {"bot", "server"}:
+            raise ValueError("Unknown service")
+        return self._request("POST", f"/administration/services/{service}/restart")
 
     def close(self) -> None:
         self._client.close()
@@ -272,6 +333,58 @@ class ManagementApi:
                 "Не удалось сохранить резервную копию. Проверьте свободное место на диске."
             ) from exc
         return destination
+
+    def create_restore(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        data = self._request("POST", "/administration/restores", json=metadata)
+        return data if isinstance(data, dict) else {}
+
+    def upload_restore(
+        self,
+        operation_id: str,
+        archive: Path,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> dict[str, Any]:
+        total = archive.stat().st_size
+
+        def content() -> Any:
+            downloaded = 0
+            with archive.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    downloaded += len(block)
+                    if progress is not None:
+                        progress(downloaded, total)
+                    yield block
+
+        data = self._request(
+            "PUT",
+            f"/administration/restores/{operation_id}/content",
+            content=content(),
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=httpx.Timeout(600, connect=15),
+        )
+        return data if isinstance(data, dict) else {}
+
+    def apply_restore(
+        self,
+        operation_id: str,
+        *,
+        password: str = "",
+        confirmation_phrase: str = "",
+    ) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            f"/administration/restores/{operation_id}/apply",
+            json={
+                "password": password,
+                "confirmation_phrase": confirmation_phrase,
+            },
+            timeout=httpx.Timeout(600, connect=15),
+        )
+        return data if isinstance(data, dict) else {}
+
+    def restore_status(self, operation_id: str) -> dict[str, Any]:
+        data = self._request("GET", f"/administration/restores/{operation_id}")
+        return data if isinstance(data, dict) else {}
 
     def snapshot(self) -> dict[str, Any]:
         data = self._request("GET", "/snapshot")

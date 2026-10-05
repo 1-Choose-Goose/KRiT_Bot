@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     krit_database_names: tuple[str, ...] = ("krit_bot",)
     backup_root: Path = Path("./data/backups")
+    restore_root: Path = Path("./data/restore")
 
     @model_validator(mode="after")
     def load_token_file(self) -> Settings:

@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import secrets
+import shutil
 import signal
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -54,6 +55,7 @@ from .learning_models import (
 from .learning_notifications import LearningNotificationWorker
 from .max_api import WEBHOOK_UPDATE_TYPES, MaxApiClient
 from .polling import run_polling
+from .restores import RestoreService, create_restore_router
 from .syndication import (
     SyndicationWorker,
     VkApiClient,
@@ -240,6 +242,8 @@ def create_app(
     restart_bot: Callable[[], Awaitable[None]] | None = None,
     restart_server: Callable[[], Awaitable[None]] | None = None,
     status_snapshot: Callable[[], Awaitable[dict[str, Any]]] | None = None,
+    restore_dispatcher: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+    safety_rollback_dispatcher: Callable[[], Awaitable[None]] | None = None,
 ) -> FastAPI:
     engine = build_engine(settings.database_url)
     sessions = build_session_factory(engine)
@@ -276,6 +280,48 @@ def create_app(
         database_names=settings.krit_database_names,
         root=settings.backup_root,
         metadata_collector=collect_backup_metadata,
+    )
+
+    async def systemd_restore_dispatcher(operation_id: str) -> dict[str, Any]:
+        process = await asyncio.create_subprocess_exec(
+            "sudo",
+            "-n",
+            "/usr/bin/systemctl",
+            "start",
+            "--no-block",
+            f"krit-restore@{operation_id}.service",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, _stderr = await process.communicate()
+        if process.returncode:
+            raise RuntimeError("Privileged restore helper could not be started")
+        return {"_async": True}
+
+    async def systemd_safety_rollback_dispatcher() -> None:
+        process = await asyncio.create_subprocess_exec(
+            "sudo",
+            "-n",
+            "/usr/bin/systemctl",
+            "start",
+            "--no-block",
+            "krit-restore-rollback.service",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, _stderr = await process.communicate()
+        if process.returncode:
+            raise RuntimeError("Privileged safety rollback helper could not be started")
+
+    restore_service = RestoreService(
+        root=settings.restore_root,
+        database_names=settings.krit_database_names,
+        dispatcher=restore_dispatcher or systemd_restore_dispatcher,
+        safety_rollback_dispatcher=(
+            safety_rollback_dispatcher or systemd_safety_rollback_dispatcher
+        ),
     )
     polling_task: asyncio.Task[None] | None = None
     syndication_task: asyncio.Task[None] | None = None
@@ -497,15 +543,29 @@ def create_app(
         latest_data = (
             json.loads(latest.read_text(encoding="utf-8")) if latest is not None else None
         )
+        try:
+            free_bytes = shutil.disk_usage(settings.backup_root.parent).free
+        except OSError:
+            free_bytes = None
         return {
             "available": True,
             "last_backup_at": latest_data.get("created_at") if latest_data else None,
             "last_result": "success" if latest_data else "not_started",
             "trusted_count": len(metadata_files),
             "suspicious_count": 0,
-            "safety_set_pending": False,
-            "free_bytes": None,
+            "safety_set_pending": restore_service.pending_safety() is not None,
+            "free_bytes": free_bytes,
         }
+
+    async def target_has_business_data() -> bool:
+        async with sessions() as session:
+            counts = [
+                await session.scalar(select(func.count(Person.id))),
+                await session.scalar(select(func.count(Lesson.id))),
+                await session.scalar(select(func.count(CommunicationMessage.id))),
+            ]
+            admin_count = await session.scalar(select(func.count(AdminUser.id)))
+        return any(int(value or 0) > 0 for value in counts) or int(admin_count or 0) > 1
 
     status_provider = SystemStatusProvider(
         data_root=Path.cwd(),
@@ -597,6 +657,14 @@ def create_app(
         )
     )
     app.include_router(create_backup_router(require_admin, backup_service))
+    app.include_router(
+        create_restore_router(
+            sessions,
+            require_admin,
+            restore_service,
+            target_has_business_data,
+        )
+    )
     app.include_router(
         create_communications_router(
             sessions,
