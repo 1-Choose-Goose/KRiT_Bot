@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 from krit_management.administration_page import AdministrationPage
 from krit_management.dialogs import ChangePasswordDialog
@@ -153,13 +153,37 @@ def test_suspicious_backup_requires_superadmin_decision(monkeypatch, tmp_path) -
     app.processEvents()
 
 
-def test_reports_are_visible_to_director_but_administration_is_not() -> None:
+def test_restricted_sections_stay_visible_and_show_role_requirements() -> None:
     app = QApplication.instance() or QApplication([])
     director = MainWindow(FakeAdministrationApi("director"))  # type: ignore[arg-type]
     administrator = MainWindow(FakeAdministrationApi("administrator"))  # type: ignore[arg-type]
-    assert _labels(director) == ["Клиенты", "Учебный процесс", "Рассылки", "Отчёты"]
+    expected = [
+        "Клиенты",
+        "Учебный процесс",
+        "Рассылки",
+        "Отчёты",
+        "Администрирование",
+    ]
+    assert _labels(director) == expected
     assert director.administration_page is None
-    assert _labels(administrator) == ["Клиенты", "Учебный процесс", "Рассылки"]
+    director.main_nav.setCurrentRow(4)
+    director_denied = director.pages.currentWidget().findChild(QLabel, "accessDeniedMessage")
+    assert director_denied is not None
+    assert "SuperAdmin" in director_denied.text()
+
+    assert _labels(administrator) == expected
+    administrator.main_nav.setCurrentRow(3)
+    reports_denied = administrator.pages.currentWidget().findChild(
+        QLabel, "accessDeniedMessage"
+    )
+    assert reports_denied is not None
+    assert "директора или SuperAdmin" in reports_denied.text()
+    administrator.main_nav.setCurrentRow(4)
+    administration_denied = administrator.pages.currentWidget().findChild(
+        QLabel, "accessDeniedMessage"
+    )
+    assert administration_denied is not None
+    assert "SuperAdmin" in administration_denied.text()
     director.close()
     administrator.close()
     app.processEvents()

@@ -82,11 +82,13 @@ class MainWindow(QMainWindow):
         self._conversation_unread_counts: dict[int, int] | None = None
         self.profile = dict(getattr(api, "profile", {}) or {})
         self.role = str(self.profile.get("role") or "administrator")
-        self.section_names = ["Клиенты", "Учебный процесс", "Рассылки"]
-        if self.role in {"superadmin", "director"}:
-            self.section_names.append("Отчёты")
-        if self.role == "superadmin":
-            self.section_names.append("Администрирование")
+        self.section_names = [
+            "Клиенты",
+            "Учебный процесс",
+            "Рассылки",
+            "Отчёты",
+            "Администрирование",
+        ]
         self.administration_page: AdministrationPage | None = None
         self.setWindowTitle("КРиТ · управление")
         self.setMinimumSize(1120, 620)
@@ -136,12 +138,24 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.learning_page)
         self.communications_page = CommunicationsPage(self.api)
         self.pages.addWidget(self.communications_page)
-        if self.role in {"superadmin", "director"}:
-            self.reports_page = ReportsPage()
-            self.pages.addWidget(self.reports_page)
+        self.reports_page = (
+            ReportsPage()
+            if self.role in {"superadmin", "director"}
+            else self._access_denied_page(
+                "Отчёты",
+                "Для просмотра отчётов нужны права директора или SuperAdmin.",
+            )
+        )
+        self.pages.addWidget(self.reports_page)
         if self.role == "superadmin":
             self.administration_page = AdministrationPage(self.api)
-            self.pages.addWidget(self.administration_page)
+            administration_widget: QWidget = self.administration_page
+        else:
+            administration_widget = self._access_denied_page(
+                "Администрирование",
+                "Для управления системой нужны права SuperAdmin.",
+            )
+        self.pages.addWidget(administration_widget)
         workspace_layout.addWidget(self.pages, 1)
         root_layout.addWidget(workspace, 1)
         self.setCentralWidget(root)
@@ -174,6 +188,10 @@ class MainWindow(QMainWindow):
         for label in self.section_names:
             item = QListWidgetItem(label)
             item.setSizeHint(QSize(0, 42))
+            if label == "Отчёты" and self.role not in {"superadmin", "director"}:
+                item.setToolTip("Доступно директору и SuperAdmin")
+            elif label == "Администрирование" and self.role != "superadmin":
+                item.setToolTip("Доступно только SuperAdmin")
             self.main_nav.addItem(item)
         self.main_nav.setCurrentRow(0)
         self.main_nav.currentRowChanged.connect(self._change_section)
@@ -184,6 +202,27 @@ class MainWindow(QMainWindow):
         update_button.clicked.connect(self.check_updates)
         layout.addWidget(update_button)
         return sidebar
+
+    @staticmethod
+    def _access_denied_page(title: str, message: str) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        card = QFrame()
+        card.setObjectName("controlPanel")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 20, 20, 20)
+        card_layout.setSpacing(8)
+        heading = QLabel(title)
+        heading.setObjectName("sectionTitle")
+        card_layout.addWidget(heading)
+        explanation = QLabel(message)
+        explanation.setObjectName("accessDeniedMessage")
+        explanation.setWordWrap(True)
+        card_layout.addWidget(explanation)
+        card_layout.addStretch(1)
+        layout.addWidget(card)
+        return page
 
     def _workspace_header(self) -> QWidget:
         card = QFrame()
