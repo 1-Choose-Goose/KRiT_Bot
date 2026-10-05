@@ -21,6 +21,8 @@ from sqlalchemy.exc import IntegrityError
 
 from .administration import create_administration_router
 from .auth import AdminPrincipal, decode_access_token, issue_access_token, normalize_admin_username
+from .backups import BackupService, create_backup_router
+from .communication_models import CommunicationMessage
 from .communications import create_communications_router, run_communications_maintenance
 from .config import Settings
 from .db import (
@@ -251,6 +253,30 @@ def create_app(
         required_channel_id=settings.max_required_channel_id,
         required_channel_link=settings.max_required_channel_link,
     )
+
+    async def collect_backup_metadata(database_name: str) -> dict[str, Any]:
+        if database_name != "krit_bot":
+            return {"critical_counts": {}, "audit_watermark": None}
+        async with sessions() as session:
+            counts = {
+                "persons": int(await session.scalar(select(func.count(Person.id))) or 0),
+                "lessons": int(await session.scalar(select(func.count(Lesson.id))) or 0),
+                "messages": int(
+                    await session.scalar(select(func.count(CommunicationMessage.id))) or 0
+                ),
+                "administrators": int(
+                    await session.scalar(select(func.count(AdminUser.id))) or 0
+                ),
+            }
+            watermark = await session.scalar(select(func.max(AuditEvent.id)))
+        return {"critical_counts": counts, "audit_watermark": watermark}
+
+    backup_service = BackupService(
+        database_url=settings.database_url,
+        database_names=settings.krit_database_names,
+        root=settings.backup_root,
+        metadata_collector=collect_backup_metadata,
+    )
     polling_task: asyncio.Task[None] | None = None
     syndication_task: asyncio.Task[None] | None = None
     vk_long_poll_task: asyncio.Task[None] | None = None
@@ -466,11 +492,16 @@ def create_app(
         return {"available": True, **counts}
 
     async def collect_backup_status() -> dict[str, Any]:
+        metadata_files = list(settings.backup_root.glob("*.json"))
+        latest = max(metadata_files, key=lambda item: item.stat().st_mtime, default=None)
+        latest_data = (
+            json.loads(latest.read_text(encoding="utf-8")) if latest is not None else None
+        )
         return {
-            "available": False,
-            "last_backup_at": None,
-            "last_result": "not_configured",
-            "trusted_count": 0,
+            "available": True,
+            "last_backup_at": latest_data.get("created_at") if latest_data else None,
+            "last_result": "success" if latest_data else "not_started",
+            "trusted_count": len(metadata_files),
             "suspicious_count": 0,
             "safety_set_pending": False,
             "free_bytes": None,
@@ -565,6 +596,7 @@ def create_app(
             center_timezone=settings.center_timezone,
         )
     )
+    app.include_router(create_backup_router(require_admin, backup_service))
     app.include_router(
         create_communications_router(
             sessions,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -215,6 +217,61 @@ class ManagementApi:
         if isinstance(data, dict) and data.get("center_timezone"):
             configure_center_timezone(str(data["center_timezone"]))
         return data
+
+    def create_backup(self) -> dict[str, Any]:
+        data = self._request("POST", "/administration/backups")
+        return data if isinstance(data, dict) else {}
+
+    def download_backup(
+        self,
+        backup_id: str,
+        destination: Path,
+        progress: Callable[[int, int | None], None] | None = None,
+    ) -> Path:
+        downloaded = 0
+        try:
+            with self._client.stream(
+                "GET", f"/administration/backups/{backup_id}"
+            ) as response:
+                if response.is_error:
+                    try:
+                        payload = response.json()
+                        detail = (
+                            payload.get("detail", payload)
+                            if isinstance(payload, dict)
+                            else payload
+                        )
+                    except ValueError:
+                        detail = response.text
+                    raise ApiError(
+                        _format_api_error(
+                            response.status_code,
+                            detail,
+                            f"/administration/backups/{backup_id}",
+                        ),
+                        status_code=response.status_code,
+                        detail=detail,
+                        path=f"/administration/backups/{backup_id}",
+                    )
+                total_header = response.headers.get("content-length")
+                total = int(total_header) if total_header else None
+                with destination.open("wb") as stream:
+                    for block in response.iter_bytes():
+                        stream.write(block)
+                        downloaded += len(block)
+                        if progress is not None:
+                            progress(downloaded, total)
+        except httpx.HTTPError as exc:
+            destination.unlink(missing_ok=True)
+            raise ApiError(
+                "Не удалось скачать резервную копию. Проверьте подключение к сети."
+            ) from exc
+        except OSError as exc:
+            destination.unlink(missing_ok=True)
+            raise ApiError(
+                "Не удалось сохранить резервную копию. Проверьте свободное место на диске."
+            ) from exc
+        return destination
 
     def snapshot(self) -> dict[str, Any]:
         data = self._request("GET", "/snapshot")

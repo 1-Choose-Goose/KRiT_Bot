@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     )
     center_timezone: str = "Asia/Yekaterinburg"
     log_level: str = "INFO"
+    krit_database_names: tuple[str, ...] = ("krit_bot",)
+    backup_root: Path = Path("./data/backups")
 
     @model_validator(mode="after")
     def load_token_file(self) -> Settings:
