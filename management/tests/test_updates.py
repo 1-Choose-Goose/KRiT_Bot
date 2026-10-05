@@ -55,6 +55,7 @@ def test_updater_window_uses_bundled_brand_icon(tmp_path, monkeypatch) -> None:
         build_script.read_text(encoding="utf-8-sig")
     )
     assert '"SetupKrit.exe"' in build_script.read_text(encoding="utf-8-sig")
+    assert '"RESTORE_DATABASES.txt"' in build_script.read_text(encoding="utf-8-sig")
     assert "OutputBaseFilename=SetupKrit" in installer_script.read_text(
         encoding="utf-8-sig"
     )

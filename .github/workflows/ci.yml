@@ -13,25 +13,27 @@ jobs:
         env:
           POSTGRES_USER: krit_test
           POSTGRES_PASSWORD: krit_test
-          POSTGRES_DB: krit_test
+          POSTGRES_DB: krit_bot
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U krit_test -d krit_test"
+          --health-cmd "pg_isready -U krit_test -d krit_bot"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
       QT_QPA_PLATFORM: offscreen
-      KRIT_TEST_POSTGRES_URL: postgresql+asyncpg://krit_test:krit_test@127.0.0.1:5432/krit_test
+      KRIT_TEST_POSTGRES_URL: postgresql+asyncpg://krit_test:krit_test@127.0.0.1:5432/krit_bot
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
-      - name: Install minimal Qt runtime
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1
+      - name: Install system test tools
+        run: >-
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          libegl1 postgresql-client
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -40,10 +42,12 @@ jobs:
         run: ruff check bot/src bot/tests management/src management/tests
       - name: Compile
         run: python -m compileall -q bot/src management/src
+      - name: Validate deployment scripts
+        run: bash -n deploy/install-krit-server.sh
       - name: Migrate PostgreSQL test database
         run: krit-migrate
         env:
-          DATABASE_URL: postgresql+asyncpg://krit_test:krit_test@127.0.0.1:5432/krit_test
+          DATABASE_URL: postgresql+asyncpg://krit_test:krit_test@127.0.0.1:5432/krit_bot
           BOOTSTRAP_ADMIN_PASSWORD: ci-only-strong-password
       - name: Server and migration tests
         run: pytest bot/tests -q

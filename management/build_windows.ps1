@@ -58,6 +58,8 @@ try {
 
     Copy-Item -LiteralPath (Join-Path $distDir "KRiTManagementUpdater.exe") `
         -Destination (Join-Path $stagingDir "_internal\KRiTManagementUpdater.exe") -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot "RESTORE_DATABASES.txt") `
+        -Destination (Join-Path $stagingDir "RESTORE_DATABASES.txt") -Force
 
     $foreignIcu = Get-ChildItem -LiteralPath (Join-Path $stagingDir "_internal") `
         -Filter "icu*.dll" -File -Recurse -ErrorAction SilentlyContinue
