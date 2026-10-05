@@ -1,10 +1,8 @@
-from __future__ import annotations
-
 import asyncio
 import json
 import secrets
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Annotated, Any
 
 import jwt
@@ -17,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
+from .administration import create_administration_router
+from .auth import AdminPrincipal, decode_access_token, issue_access_token, normalize_admin_username
 from .communications import create_communications_router, run_communications_maintenance
 from .config import Settings
 from .db import (
@@ -85,9 +85,19 @@ class LoginPayload(BaseModel):
 
 
 class TokenView(BaseModel):
+    id: int
     access_token: str
     token_type: str = "bearer"
     expires_in: int
+    username: str
+    full_name: str
+    role: str
+    must_change_password: bool
+
+
+class InitialPasswordPayload(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=7, max_length=256)
 
 
 class PersonPayload(BaseModel):
@@ -236,28 +246,31 @@ def create_app(settings: Settings) -> FastAPI:
     syndication_worker: SyndicationWorker | None = None
     invalid_password_hash = password_hash.hash("invalid-password")
 
-    async def require_management_token(
+    async def require_admin(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-    ) -> int:
+    ) -> AdminPrincipal:
         configured = settings.jwt_secret
         if configured is None or credentials is None or credentials.scheme.lower() != "bearer":
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
         try:
-            payload = jwt.decode(
+            admin_id, token_version = decode_access_token(
                 credentials.credentials,
                 configured.get_secret_value(),
-                algorithms=["HS256"],
-                issuer="krit-bot",
-                options={"require": ["exp", "sub", "iss"]},
             )
-            admin_id = int(payload["sub"])
-        except (jwt.PyJWTError, ValueError, KeyError) as exc:
+        except (jwt.PyJWTError, ValueError, KeyError, TypeError) as exc:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED) from exc
         async with sessions() as session:
             admin = await session.get(AdminUser, admin_id)
-        if admin is None or not admin.active:
+        if admin is None or not admin.active or admin.auth_version != token_version:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
-        return admin_id
+        return AdminPrincipal.from_model(admin)
+
+    async def require_management_token(
+        principal: Annotated[AdminPrincipal, Depends(require_admin)],
+    ) -> int:
+        if principal.must_change_password:
+            raise HTTPException(status_code=403, detail="password_change_required")
+        return principal.id
 
     async def ensure_bootstrap_admin() -> None:
         async with sessions() as session:
@@ -288,14 +301,16 @@ def create_app(settings: Settings) -> FastAPI:
         configured = settings.jwt_secret
         if configured is None:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
-        lifetime = timedelta(hours=8)
-        now = datetime.now(UTC)
-        encoded = jwt.encode(
-            {"sub": str(admin.id), "iss": "krit-bot", "iat": now, "exp": now + lifetime},
-            configured.get_secret_value(),
-            algorithm="HS256",
+        encoded, expires_in = issue_access_token(admin, configured.get_secret_value())
+        return TokenView(
+            id=admin.id,
+            access_token=encoded,
+            expires_in=expires_in,
+            username=admin.username,
+            full_name=admin.full_name,
+            role=admin.role,
+            must_change_password=admin.must_change_password,
         )
-        return TokenView(access_token=encoded, expires_in=int(lifetime.total_seconds()))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -423,6 +438,7 @@ def create_app(settings: Settings) -> FastAPI:
             center_timezone=settings.center_timezone,
         )
     )
+    app.include_router(create_administration_router(sessions, require_admin))
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -432,13 +448,59 @@ def create_app(settings: Settings) -> FastAPI:
     async def login(payload: LoginPayload) -> TokenView:
         async with sessions() as session:
             admin = await session.scalar(
-                select(AdminUser).where(AdminUser.username == payload.username)
+                select(AdminUser).where(
+                    AdminUser.username == normalize_admin_username(payload.username)
+                )
             )
         comparison_hash = admin.password_hash if admin is not None else invalid_password_hash
         password_valid = password_hash.verify(payload.password, comparison_hash)
         if admin is None or not admin.active or not password_valid:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
         return issue_token(admin)
+
+    @app.get("/api/v1/auth/me")
+    async def auth_me(
+        principal: Annotated[AdminPrincipal, Depends(require_admin)],
+    ) -> dict[str, Any]:
+        return {
+            "id": principal.id,
+            "username": principal.username,
+            "full_name": principal.full_name,
+            "role": principal.role,
+            "must_change_password": principal.must_change_password,
+        }
+
+    @app.post("/api/v1/auth/change-initial-password", response_model=TokenView)
+    async def change_initial_password(
+        payload: InitialPasswordPayload,
+        principal: Annotated[AdminPrincipal, Depends(require_admin)],
+    ) -> TokenView:
+        async with sessions() as session:
+            admin = await session.get(AdminUser, principal.id)
+            if admin is None or not password_hash.verify(
+                payload.current_password, admin.password_hash
+            ):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+            if not admin.must_change_password:
+                raise HTTPException(status_code=409, detail="Password change is not required")
+            if password_hash.verify(payload.new_password, admin.password_hash):
+                raise HTTPException(status_code=422, detail="New password must be different")
+            admin.password_hash = password_hash.hash(payload.new_password)
+            admin.must_change_password = False
+            admin.auth_version += 1
+            admin.updated_at = utcnow()
+            session.add(
+                AuditEvent(
+                    actor_admin_id=admin.id,
+                    action="admin_initial_password_changed",
+                    entity_type="admin_user",
+                    entity_id=admin.id,
+                    details={"username": admin.username},
+                )
+            )
+            await session.commit()
+            await session.refresh(admin)
+            return issue_token(admin)
 
     @app.get("/api/v1/status", dependencies=[Depends(require_management_token)])
     async def management_status() -> dict[str, str]:

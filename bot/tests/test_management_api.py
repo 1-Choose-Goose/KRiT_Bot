@@ -2,12 +2,34 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from pwdlib import PasswordHash
 from pydantic import SecretStr
+from sqlalchemy import select
 
 from krit_bot.config import Settings
 from krit_bot.db import AdminUser, build_engine, build_session_factory
-from krit_bot.learning_models import PersonMaxIdentity
+from krit_bot.learning_models import AuditEvent, PersonMaxIdentity
 from krit_bot.webhook import create_app
+
+password_hash = PasswordHash.recommended()
+
+
+def _settings(database_path: str) -> Settings:
+    return Settings(
+        database_url=f"sqlite+aiosqlite:///{database_path}",
+        max_bot_token=SecretStr("test-token"),
+        jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
+        bot_mode="webhook",
+        vk_syndication_enabled=False,
+    )
+
+
+async def _login(client: httpx.AsyncClient, username: str, password: str) -> dict:
+    response = await client.post(
+        "/api/v1/auth/login", json={"username": username, "password": password}
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def test_initial_admin_credentials_are_environment_specific() -> None:
@@ -61,6 +83,211 @@ async def test_sqlite_bootstrap_has_superadmin_profile_and_is_not_reset(tmp_path
             assert admin.full_name == "Не сбрасывать"
         await engine.dispose()
 
+
+@pytest.mark.asyncio
+async def test_forced_password_change_blocks_business_api_and_revokes_old_token(tmp_path) -> None:
+    settings = _settings((tmp_path / "forced-change.db").as_posix())
+    app = create_app(settings)
+
+    async with app.router.lifespan_context(app):
+        engine = build_engine(settings.database_url)
+        sessions = build_session_factory(engine)
+        async with sessions() as session:
+            admin = await session.get(AdminUser, 1)
+            assert admin is not None
+            admin.password_hash = password_hash.hash("123")
+            admin.must_change_password = True
+            admin.is_protected = True
+            await session.commit()
+        await engine.dispose()
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            login = await _login(client, " ADMIN ", "123")
+            assert login["id"] == 1
+            assert login["role"] == "superadmin"
+            assert login["full_name"] == "Администратор"
+            assert login["must_change_password"] is True
+            old_headers = {"Authorization": f"Bearer {login['access_token']}"}
+            blocked = await client.get("/api/v1/status", headers=old_headers)
+            assert blocked.status_code == 403
+            assert blocked.json()["detail"] == "password_change_required"
+
+            changed = await client.post(
+                "/api/v1/auth/change-initial-password",
+                headers=old_headers,
+                json={"current_password": "123", "new_password": "new-password-456"},
+            )
+            assert changed.status_code == 200, changed.text
+            assert changed.json()["must_change_password"] is False
+            assert (await client.get("/api/v1/status", headers=old_headers)).status_code == 401
+            assert (
+                await client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "admin", "password": "123"},
+                )
+            ).status_code == 401
+            current = await _login(client, "AdMiN", "new-password-456")
+            assert current["must_change_password"] is False
+            current_headers = {"Authorization": f"Bearer {current['access_token']}"}
+            assert (await client.get("/api/v1/status", headers=current_headers)).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_superadmin_manages_users_roles_protection_and_audit(tmp_path) -> None:
+    settings = _settings((tmp_path / "administration.db").as_posix())
+    app = create_app(settings)
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            login = await _login(client, "admin", "admin")
+            headers = {"Authorization": f"Bearer {login['access_token']}"}
+
+            director = await client.post(
+                "/api/v1/administration/users",
+                headers=headers,
+                json={
+                    "full_name": "Директор Клуба",
+                    "username": " Director ",
+                    "role": "director",
+                    "password": "1234567",
+                },
+            )
+            assert director.status_code == 201, director.text
+            director_data = director.json()
+            assert director_data["username"] == "director"
+            assert director_data["active"] is True
+            assert "password" not in director_data
+
+            administrator = await client.post(
+                "/api/v1/administration/users",
+                headers=headers,
+                json={
+                    "full_name": "Администратор Клуба",
+                    "username": "operator",
+                    "role": "administrator",
+                    "password": "operator-password",
+                },
+            )
+            assert administrator.status_code == 201, administrator.text
+            operator_id = administrator.json()["id"]
+
+            duplicate = await client.post(
+                "/api/v1/administration/users",
+                headers=headers,
+                json={
+                    "full_name": "Дубликат",
+                    "username": "DIRECTOR",
+                    "role": "administrator",
+                    "password": "another-password",
+                },
+            )
+            assert duplicate.status_code == 409
+
+            users = (await client.get("/api/v1/administration/users", headers=headers)).json()
+            assert [item["username"] for item in users] == ["admin", "operator", "director"]
+
+            invalid_login = await client.post(
+                "/api/v1/administration/users",
+                headers=headers,
+                json={
+                    "full_name": "Некорректный Логин",
+                    "username": "bad login",
+                    "role": "administrator",
+                    "password": "1234567",
+                },
+            )
+            assert invalid_login.status_code == 422
+
+            updated = await client.patch(
+                f"/api/v1/administration/users/{operator_id}",
+                headers=headers,
+                json={
+                    "full_name": "Новый Директор",
+                    "username": " NewOperator ",
+                    "role": "director",
+                },
+            )
+            assert updated.status_code == 200, updated.text
+            assert updated.json()["username"] == "newoperator"
+            assert updated.json()["role"] == "director"
+
+            changed_password = await client.post(
+                f"/api/v1/administration/users/{operator_id}/password",
+                headers=headers,
+                json={"password": "replacement-password"},
+            )
+            assert changed_password.status_code == 200
+
+            disabled = await client.post(
+                f"/api/v1/administration/users/{operator_id}/disable", headers=headers
+            )
+            assert disabled.status_code == 200
+            assert (
+                await client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "newoperator", "password": "replacement-password"},
+                )
+            ).status_code == 401
+            assert (
+                await client.post(
+                    f"/api/v1/administration/users/{operator_id}/enable", headers=headers
+                )
+            ).status_code == 200
+
+            director_login = await _login(client, "director", "1234567")
+            director_headers = {
+                "Authorization": f"Bearer {director_login['access_token']}"
+            }
+            assert (
+                await client.get("/api/v1/administration/users", headers=director_headers)
+            ).status_code == 403
+
+            assert (
+                await client.post("/api/v1/administration/users/1/disable", headers=headers)
+            ).status_code == 409
+            assert (
+                await client.delete("/api/v1/administration/users/1", headers=headers)
+            ).status_code == 409
+            assert (
+                await client.patch(
+                    "/api/v1/administration/users/1",
+                    headers=headers,
+                    json={
+                        "full_name": "Администратор",
+                        "username": "admin",
+                        "role": "director",
+                    },
+                )
+            ).status_code == 409
+
+            assert (
+                await client.delete(
+                    f"/api/v1/administration/users/{operator_id}", headers=headers
+                )
+            ).status_code == 200
+
+        engine = build_engine(settings.database_url)
+        sessions = build_session_factory(engine)
+        async with sessions() as session:
+            events = list(
+                (
+                    await session.scalars(
+                        select(AuditEvent).where(AuditEvent.entity_type == "admin_user")
+                    )
+                ).all()
+            )
+            assert {event.action for event in events} >= {
+                "admin_user_created",
+                "admin_user_updated",
+                "admin_user_password_changed",
+                "admin_user_disabled",
+                "admin_user_enabled",
+                "admin_user_deleted",
+            }
+            assert "replacement-password" not in repr([event.details for event in events])
+        await engine.dispose()
 
 @pytest.mark.asyncio
 async def test_login_protects_management_api_and_allows_person_creation(tmp_path) -> None:
