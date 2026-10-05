@@ -87,6 +87,36 @@ async def test_sqlite_bootstrap_has_superadmin_profile_and_is_not_reset(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_protected_bootstrap_is_added_to_existing_server_database(
+    tmp_path, monkeypatch
+) -> None:
+    settings = _settings((tmp_path / "existing-server.db").as_posix())
+    first_app = create_app(settings)
+    async with first_app.router.lifespan_context(first_app):
+        pass
+
+    monkeypatch.setattr(
+        Settings,
+        "initial_admin_credentials",
+        lambda _settings: ("Choose_Goose", "123", True),
+    )
+    upgraded_app = create_app(settings)
+    async with upgraded_app.router.lifespan_context(upgraded_app):
+        engine = build_engine(settings.database_url)
+        sessions = build_session_factory(engine)
+        async with sessions() as session:
+            admins = list((await session.scalars(select(AdminUser).order_by(AdminUser.id))).all())
+            assert [admin.username for admin in admins] == ["admin", "choose_goose"]
+            protected = admins[1]
+            assert protected.role == "superadmin"
+            assert protected.active is True
+            assert protected.must_change_password is True
+            assert protected.is_protected is True
+            assert password_hash.verify("123", protected.password_hash)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_forced_password_change_blocks_business_api_and_revokes_old_token(tmp_path) -> None:
     settings = _settings((tmp_path / "forced-change.db").as_posix())
     app = create_app(settings)

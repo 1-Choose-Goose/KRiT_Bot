@@ -383,14 +383,20 @@ def create_app(
 
     async def ensure_bootstrap_admin() -> None:
         async with sessions() as session:
-            if await session.scalar(select(AdminUser.id).limit(1)) is not None:
-                return
             username, initial_password, must_change_password = (
                 settings.initial_admin_credentials()
             )
+            normalized_username = normalize_admin_username(username)
+            existing_query = select(AdminUser.id).limit(1)
+            if must_change_password:
+                existing_query = existing_query.where(
+                    AdminUser.username == normalized_username
+                )
+            if await session.scalar(existing_query) is not None:
+                return
             session.add(
                 AdminUser(
-                    username=username.strip().lower(),
+                    username=normalized_username,
                     full_name=(
                         "Суперадминистратор"
                         if must_change_password
