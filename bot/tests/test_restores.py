@@ -114,6 +114,24 @@ async def test_restore_rejects_bad_hash_database_set_space_and_weak_confirmation
 
 
 @pytest.mark.asyncio
+async def test_restore_refuses_to_start_while_backup_is_active(tmp_path) -> None:
+    async def dispatch(_operation_id: str) -> dict:
+        return {"id": "safety"}
+
+    service = RestoreService(
+        root=tmp_path,
+        database_names=("krit_bot",),
+        dispatcher=dispatch,
+        free_space=lambda: 10_000_000,
+        conflict_checker=lambda: True,
+    )
+    info, _body = _backup_body()
+
+    with pytest.raises(RestoreConflict, match="backup"):
+        await service.create(info, target_has_business_data=False)
+
+
+@pytest.mark.asyncio
 async def test_restore_api_streams_archive_and_requires_safety_decision(tmp_path) -> None:
     dispatched: list[str] = []
 

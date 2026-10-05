@@ -8,7 +8,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from krit_bot.backups import BackupService
+from krit_bot.backups import BackupBusyError, BackupService
 from krit_bot.config import Settings
 from krit_bot.webhook import create_app
 
@@ -82,3 +82,16 @@ async def test_postgresql_backup_uses_allowlist_and_fixed_pg_dump_arguments(tmp_
         assert "--format=custom" in argv
         assert "top-secret" not in " ".join(argv)
         assert env["PGPASSWORD"] == "top-secret"
+
+
+@pytest.mark.asyncio
+async def test_backup_refuses_to_start_while_restore_is_active(tmp_path) -> None:
+    service = BackupService(
+        database_url=f"sqlite+aiosqlite:///{(tmp_path / 'krit.db').as_posix()}",
+        database_names=("krit_bot",),
+        root=tmp_path / "backups",
+        conflict_checker=lambda: True,
+    )
+
+    with pytest.raises(BackupBusyError):
+        await service.create()

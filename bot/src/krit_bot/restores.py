@@ -29,6 +29,7 @@ class RestoreConflict(RuntimeError):
 RestoreDispatcher = Callable[[str], Awaitable[dict[str, Any]]]
 SafetyRollbackDispatcher = Callable[[], Awaitable[None]]
 SafetyDeleteDispatcher = Callable[[], Awaitable[None]]
+ConflictChecker = Callable[[], bool]
 password_hash = PasswordHash.recommended()
 
 
@@ -42,6 +43,7 @@ class RestoreService:
         safety_rollback_dispatcher: SafetyRollbackDispatcher | None = None,
         safety_delete_dispatcher: SafetyDeleteDispatcher | None = None,
         free_space: Callable[[], int] | None = None,
+        conflict_checker: ConflictChecker | None = None,
     ) -> None:
         self.root = root
         self.database_names = database_names
@@ -49,6 +51,7 @@ class RestoreService:
         self.safety_rollback_dispatcher = safety_rollback_dispatcher
         self.safety_delete_dispatcher = safety_delete_dispatcher
         self.free_space = free_space or (lambda: shutil.disk_usage(self.root).free)
+        self.conflict_checker = conflict_checker or (lambda: False)
         self.safety_path = root / "pending-safety.json"
 
     def _operation_dir(self, operation_id: str) -> Path:
@@ -93,12 +96,17 @@ class RestoreService:
                 return True
         return False
 
+    def has_active_operation(self) -> bool:
+        return self._has_active_operation()
+
     async def create(
         self, metadata: dict[str, Any], *, target_has_business_data: bool
     ) -> dict[str, Any]:
         self.root.mkdir(parents=True, exist_ok=True)
         if self.pending_safety() is not None:
             raise RestoreConflict("pending safety set must be resolved")
+        if self.conflict_checker():
+            raise RestoreConflict("a backup operation is active")
         if self._has_active_operation():
             raise RestoreConflict("another restore operation is active")
         names = [str(item.get("name")) for item in metadata.get("databases", [])]

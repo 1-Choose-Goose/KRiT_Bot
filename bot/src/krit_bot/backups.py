@@ -21,6 +21,7 @@ from .db import EXPECTED_ALEMBIC_REVISION
 
 SubprocessRunner = Callable[[list[str], dict[str, str]], Awaitable[None]]
 MetadataCollector = Callable[[str], Awaitable[dict[str, Any]]]
+ConflictChecker = Callable[[], bool]
 
 
 class BackupBusyError(RuntimeError):
@@ -59,6 +60,7 @@ class BackupService:
         root: Path,
         subprocess_runner: SubprocessRunner | None = None,
         metadata_collector: MetadataCollector | None = None,
+        conflict_checker: ConflictChecker | None = None,
     ) -> None:
         if not database_names or any(
             not name.replace("_", "").isalnum() for name in database_names
@@ -69,6 +71,7 @@ class BackupService:
         self.root = root
         self.subprocess_runner = subprocess_runner or _run_subprocess
         self.metadata_collector = metadata_collector
+        self.conflict_checker = conflict_checker or (lambda: False)
         self.lock = asyncio.Lock()
 
     async def _sqlite_dump(self, source: Path, destination: Path) -> None:
@@ -104,9 +107,11 @@ class BackupService:
         )
 
     async def create(self) -> dict[str, Any]:
-        if self.lock.locked():
+        if self.lock.locked() or self.conflict_checker():
             raise BackupBusyError
         async with self.lock:
+            if self.conflict_checker():
+                raise BackupBusyError
             self.root.mkdir(parents=True, exist_ok=True)
             backup_id = uuid.uuid4().hex
             created_at = datetime.now(UTC)
