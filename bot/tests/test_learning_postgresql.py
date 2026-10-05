@@ -13,6 +13,30 @@ from krit_bot.config import Settings
 from krit_bot.webhook import create_app
 
 POSTGRES_URL = os.getenv("KRIT_TEST_POSTGRES_URL")
+CI_ADMIN_PASSWORD = "ci-only-strong-password"
+
+
+async def _admin_headers(client: httpx.AsyncClient) -> dict[str, str]:
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "Choose_Goose", "password": CI_ADMIN_PASSWORD},
+    )
+    if login.status_code == 401:
+        login = await client.post(
+            "/api/v1/auth/login",
+            json={"username": "Choose_Goose", "password": "123"},
+        )
+    assert login.status_code == 200, login.text
+    token = login.json()
+    if token["must_change_password"]:
+        changed = await client.post(
+            "/api/v1/auth/change-initial-password",
+            headers={"Authorization": f"Bearer {token['access_token']}"},
+            json={"current_password": "123", "new_password": CI_ADMIN_PASSWORD},
+        )
+        assert changed.status_code == 200, changed.text
+        token = changed.json()
+    return {"Authorization": f"Bearer {token['access_token']}"}
 
 
 @pytest.mark.skipif(
@@ -37,11 +61,7 @@ async def test_concurrent_booking_allows_only_one_lesson(conflict_kind: str) -> 
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
-            login = await client.post(
-                "/api/v1/auth/login",
-                json={"username": "admin", "password": "ci-only-strong-password"},
-            )
-            headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+            headers = await _admin_headers(client)
 
             async def person(name: str, phone: str, roles: list[str]) -> int:
                 response = await client.post(
@@ -140,11 +160,7 @@ async def test_concurrent_arrival_and_group_membership_are_serialized() -> None:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
-            login = await client.post(
-                "/api/v1/auth/login",
-                json={"username": "admin", "password": "ci-only-strong-password"},
-            )
-            headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+            headers = await _admin_headers(client)
             person = await client.post(
                 "/api/v1/people",
                 headers=headers,
