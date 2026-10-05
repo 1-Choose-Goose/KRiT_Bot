@@ -9,11 +9,14 @@ from pathlib import Path
 import httpx
 import pytest
 from deploy.krit_restore_helper import restore_operation
+from pwdlib import PasswordHash
 from pydantic import SecretStr
 
 from krit_bot.config import Settings
 from krit_bot.restores import RestoreConflict, RestoreService, RestoreValidationError
 from krit_bot.webhook import create_app
+
+password_hash = PasswordHash.recommended()
 
 
 def _backup_body() -> tuple[dict, bytes]:
@@ -73,7 +76,11 @@ async def test_restore_validates_stream_dispatches_only_operation_id_and_blocks_
     operation = await service.create(info, target_has_business_data=False)
     uploaded = await service.upload(operation["id"], [body[:10], body[10:]])
     assert uploaded["phase"] == "uploaded"
-    completed = await service.apply(operation["id"], allow_existing=False)
+    completed = await service.apply(
+        operation["id"],
+        allow_existing=False,
+        protected_admin_password_hash=password_hash.hash("target-password"),
+    )
     assert completed["phase"] == "completed"
     assert dispatched == [operation["id"]]
     assert service.pending_safety()["id"] == "safety-1"
@@ -110,7 +117,11 @@ async def test_restore_rejects_bad_hash_database_set_space_and_weak_confirmation
     operation = await service.create(info, target_has_business_data=True)
     await service.upload(operation["id"], [body])
     with pytest.raises(RestoreConflict, match="confirmation"):
-        await service.apply(operation["id"], allow_existing=False)
+        await service.apply(
+            operation["id"],
+            allow_existing=False,
+            protected_admin_password_hash=password_hash.hash("target-password"),
+        )
 
 
 @pytest.mark.asyncio
@@ -134,9 +145,17 @@ async def test_restore_refuses_to_start_while_backup_is_active(tmp_path) -> None
 @pytest.mark.asyncio
 async def test_restore_api_streams_archive_and_requires_safety_decision(tmp_path) -> None:
     dispatched: list[str] = []
+    preserved_hashes: list[str] = []
+    restore_root = tmp_path / "restore"
 
     async def dispatch(operation_id: str) -> dict:
         dispatched.append(operation_id)
+        credentials = json.loads(
+            (restore_root / operation_id / "protected-admin.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        preserved_hashes.append(str(credentials["password_hash"]))
         return {"id": "safety-api", "size": 42}
 
     settings = Settings(
@@ -146,7 +165,7 @@ async def test_restore_api_streams_archive_and_requires_safety_decision(tmp_path
         bot_mode="webhook",
         vk_syndication_enabled=False,
         backup_root=tmp_path / "backups",
-        restore_root=tmp_path / "restore",
+        restore_root=restore_root,
     )
     app = create_app(settings, restore_dispatcher=dispatch)
     info, body = _backup_body()
@@ -178,6 +197,10 @@ async def test_restore_api_streams_archive_and_requires_safety_decision(tmp_path
             )
             assert applied.status_code == 200, applied.text
             assert dispatched == [operation_id]
+            assert len(preserved_hashes) == 1
+            assert password_hash.verify("admin", preserved_hashes[0])
+            assert not (restore_root / operation_id / "protected-admin.json").exists()
+            assert "password_hash" not in str(applied.json())
             assert (
                 await client.post(
                     "/api/v1/administration/restores", headers=headers, json=info
@@ -220,6 +243,10 @@ def test_privileged_helper_safety_dumps_all_databases_and_rolls_back_set(tmp_pat
     (operation_dir / "state.json").write_text(
         json.dumps({"id": operation_id, "phase": "applying"}), encoding="utf-8"
     )
+    preserved_hash = password_hash.hash("target-password")
+    (operation_dir / "protected-admin.json").write_text(
+        json.dumps({"password_hash": preserved_hash}), encoding="utf-8"
+    )
     commands: list[list[str]] = []
 
     def runner(argv: list[str], _environment: dict[str, str]) -> None:
@@ -240,6 +267,14 @@ def test_privileged_helper_safety_dumps_all_databases_and_rolls_back_set(tmp_pat
     assert len([item for item in commands if item[0] == "pg_dump"]) == 2
     assert len([item for item in commands if item[0] == "pg_restore"]) == 2
     assert all("secret" not in " ".join(item) for item in commands)
+    admin_commands = [
+        item
+        for item in commands
+        if item[0] == "psql" and "admin_hash" in " ".join(item)
+    ]
+    assert len(admin_commands) == 1
+    assert f"admin_hash={preserved_hash}" in admin_commands[0]
+    assert not (operation_dir / "protected-admin.json").exists()
 
 
 def test_privileged_helper_reapplies_every_safety_dump_after_restore_failure(
@@ -262,6 +297,10 @@ def test_privileged_helper_reapplies_every_safety_dump_after_restore_failure(
         archive.writestr("krit_messages.dump", second)
     (operation_dir / "state.json").write_text(
         json.dumps({"id": operation_id, "phase": "applying"}), encoding="utf-8"
+    )
+    (operation_dir / "protected-admin.json").write_text(
+        json.dumps({"password_hash": password_hash.hash("target-password")}),
+        encoding="utf-8",
     )
     restored_paths: list[str] = []
     failed_once = False

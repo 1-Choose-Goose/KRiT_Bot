@@ -12,8 +12,6 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from pwdlib import PasswordHash
-
 DATABASE_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,62}$")
 CommandRunner = Callable[[list[str], dict[str, str]], None]
 
@@ -133,6 +131,12 @@ def restore_operation(
     state = json.loads(state_path.read_text(encoding="utf-8"))
     if state.get("phase") != "applying":
         raise ValueError("Operation is not ready")
+    credentials_path = operation_dir / "protected-admin.json"
+    credentials = json.loads(credentials_path.read_text(encoding="utf-8"))
+    admin_hash = str(credentials.get("password_hash") or "")
+    if not admin_hash.startswith("$argon2") or len(admin_hash) > 512:
+        raise ValueError("Invalid protected administrator hash")
+    credentials_path.unlink()
     safety_root = root / "safety-pending"
     if safety_root.exists():
         raise RuntimeError("A pending safety set already exists")
@@ -166,7 +170,6 @@ def restore_operation(
                 runner=runner,
             )
         runner(["/opt/krit-bot/venv/bin/krit-migrate"], config)
-        admin_hash = PasswordHash.recommended().hash("123")
         runner(
             [
                 "psql",

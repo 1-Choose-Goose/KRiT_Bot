@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
+from krit_management.administration_page import AdministrationPage
 from krit_management.dialogs import ChangePasswordDialog
 from krit_management.window import MainWindow
 
@@ -53,7 +56,10 @@ def _labels(window: MainWindow) -> list[str]:
     return [window.main_nav.item(index).text() for index in range(window.main_nav.count())]
 
 
-def test_navigation_respects_roles_and_admin_status_runs_only_while_visible() -> None:
+def test_navigation_respects_roles_and_admin_status_runs_only_while_visible(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     app = QApplication.instance() or QApplication([])
     api = FakeAdministrationApi("superadmin")
     window = MainWindow(api)  # type: ignore[arg-type]
@@ -80,6 +86,70 @@ def test_navigation_respects_roles_and_admin_status_runs_only_while_visible() ->
     window.main_nav.setCurrentRow(0)
     assert not window.administration_page.status_timer.isActive()
     window.close()
+    app.processEvents()
+
+
+def test_suspicious_backup_requires_superadmin_decision(monkeypatch, tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    archive_one = tmp_path / "first.backup"
+    archive_two = tmp_path / "second.backup"
+    archive_one.write_bytes(b"first")
+    archive_two.write_bytes(b"second")
+    entries = [
+        SimpleNamespace(
+            archive=archive_one,
+            created_at=datetime(2026, 10, 5, 10, tzinfo=UTC),
+            trust="suspicious",
+            reason="unexplained_data_loss",
+        ),
+        SimpleNamespace(
+            archive=archive_two,
+            created_at=datetime(2026, 10, 5, 11, tzinfo=UTC),
+            trust="suspicious",
+            reason="unexplained_data_loss",
+        ),
+    ]
+
+    class Store:
+        def entries(self):
+            return list(entries)
+
+        def latest_trusted(self):
+            return None
+
+        def trust(self, archive_name: str):
+            next(item for item in entries if item.archive.name == archive_name).trust = "trusted"
+
+        def delete_suspicious(self, archive_name: str):
+            entries[:] = [item for item in entries if item.archive.name != archive_name]
+
+        def rotate(self, **_kwargs):
+            return None
+
+    page = AdministrationPage(FakeAdministrationApi("superadmin"))  # type: ignore[arg-type]
+    page.backup_store = Store()  # type: ignore[assignment]
+    page._render_backup_summary()
+    page.backups_table.selectRow(1)
+    assert page.trust_backup_button.isEnabled()
+    assert page.delete_backup_button.isEnabled()
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+    page._trust_selected_backup()
+    assert any(item.trust == "trusted" for item in entries)
+
+    page.backups_table.selectRow(0)
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+    page._delete_selected_backup()
+    assert len(entries) == 1
+    page.shutdown()
     app.processEvents()
 
 

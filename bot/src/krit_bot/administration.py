@@ -187,11 +187,17 @@ def create_administration_router(
         async with sessions() as session:
             target = await get_target(session, user_id)
             role = _validate_role(payload.role)
+            username = _clean_username(payload.username)
+            if target.is_protected and username != target.username:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Логин защищённой записи нельзя изменить",
+                )
             if target.is_protected and role != "superadmin":
                 raise HTTPException(status_code=409, detail="Защищённую запись нельзя понизить")
             if target.role == "superadmin" and role != "superadmin":
                 await ensure_can_remove_superadmin(session, target)
-            target.username = _clean_username(payload.username)
+            target.username = username
             target.full_name = _clean_full_name(payload.full_name)
             target.role = role
             target.updated_at = utcnow()

@@ -133,6 +133,16 @@ async def test_forced_password_change_blocks_business_api_and_revokes_old_token(
             assert current["must_change_password"] is False
             current_headers = {"Authorization": f"Bearer {current['access_token']}"}
             assert (await client.get("/api/v1/status", headers=current_headers)).status_code == 200
+            renamed = await client.patch(
+                "/api/v1/administration/users/1",
+                headers=current_headers,
+                json={
+                    "full_name": "Администратор",
+                    "username": "renamed-bootstrap",
+                    "role": "superadmin",
+                },
+            )
+            assert renamed.status_code == 409
 
 
 @pytest.mark.asyncio

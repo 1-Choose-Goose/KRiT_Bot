@@ -7,6 +7,7 @@ import zipfile
 
 import pytest
 from deploy.krit_restore_helper import restore_operation, run_command
+from pwdlib import PasswordHash
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -51,6 +52,12 @@ async def test_postgresql_backup_can_replace_database_and_recover_data(tmp_path)
     shutil.copy2(archive_path, operation_dir / "upload.backup")
     (operation_dir / "state.json").write_text(
         json.dumps({"id": operation_id, "phase": "applying"}), encoding="utf-8"
+    )
+    (operation_dir / "protected-admin.json").write_text(
+        json.dumps(
+            {"password_hash": PasswordHash.recommended().hash("target-password")}
+        ),
+        encoding="utf-8",
     )
 
     environment = {

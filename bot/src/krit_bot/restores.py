@@ -11,6 +11,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pwdlib import PasswordHash
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .auth import AdminPrincipal
@@ -209,7 +210,13 @@ class RestoreService:
             self._atomic_json(operation_dir / "state.json", state)
             raise
 
-    async def apply(self, operation_id: str, *, allow_existing: bool) -> dict[str, Any]:
+    async def apply(
+        self,
+        operation_id: str,
+        *,
+        allow_existing: bool,
+        protected_admin_password_hash: str,
+    ) -> dict[str, Any]:
         state = self._read_state(operation_id)
         if state["phase"] != "uploaded":
             raise RestoreConflict("restore is not ready to apply")
@@ -218,9 +225,17 @@ class RestoreService:
         state["phase"] = "applying"
         operation_dir = self._operation_dir(operation_id)
         self._atomic_json(operation_dir / "state.json", state)
+        credentials_path = operation_dir / "protected-admin.json"
+        self._atomic_json(
+            credentials_path,
+            {"password_hash": protected_admin_password_hash},
+        )
+        credentials_path.chmod(0o600)
+        asynchronous_handoff = False
         try:
             safety = await self.dispatcher(operation_id)
             if safety.pop("_async", False):
+                asynchronous_handoff = True
                 return state
             self._atomic_json(self.safety_path, safety)
             state["phase"] = "completed"
@@ -232,6 +247,9 @@ class RestoreService:
             state["error"] = type(exc).__name__
             self._atomic_json(operation_dir / "state.json", state)
             raise
+        finally:
+            if not asynchronous_handoff:
+                credentials_path.unlink(missing_ok=True)
 
     async def delete_safety(self) -> None:
         if self.pending_safety() is None:
@@ -320,17 +338,32 @@ def create_restore_router(
         except Exception as exc:
             raise translate_restore_error(exc) from None
         allow_existing = not bool(state["target_has_business_data"])
-        if not allow_existing:
-            async with sessions() as session:
-                admin = await session.get(AdminUser, principal.id)
+        async with sessions() as session:
+            admin = await session.get(AdminUser, principal.id)
+            protected_admin = await session.scalar(
+                select(AdminUser)
+                .where(AdminUser.is_protected.is_(True))
+                .order_by(AdminUser.id)
+            )
+            preserved_admin = protected_admin or admin
+            if not allow_existing:
                 password_valid = admin is not None and password_hash.verify(
                     payload.password, admin.password_hash
                 )
+            else:
+                password_valid = True
+        if preserved_admin is None:
+            raise HTTPException(status_code=503, detail="Защищённая запись не найдена")
+        if not allow_existing:
             allow_existing = (
                 password_valid and payload.confirmation_phrase == "ВОССТАНОВИТЬ"
             )
         try:
-            result = await service.apply(operation_id, allow_existing=allow_existing)
+            result = await service.apply(
+                operation_id,
+                allow_existing=allow_existing,
+                protected_admin_password_hash=preserved_admin.password_hash,
+            )
         except Exception as exc:
             raise translate_restore_error(exc) from None
         return result

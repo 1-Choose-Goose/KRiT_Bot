@@ -296,6 +296,32 @@ class AdministrationPage(QWidget):
         self.backup_summary = QLabel("Локальные резервные копии: проверка…")
         self.backup_summary.setWordWrap(True)
         layout.addWidget(self.backup_summary)
+        self.backups_table = QTableWidget(0, 4)
+        self.backups_table.setHorizontalHeaderLabels(
+            ["Дата и время", "Состояние", "Причина", "Размер"]
+        )
+        self.backups_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.backups_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.backups_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch
+        )
+        self.backups_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.backups_table.setMaximumHeight(170)
+        layout.addWidget(self.backups_table)
+        backup_actions = QHBoxLayout()
+        self.trust_backup_button = QPushButton("Подтвердить сохранённые данные")
+        self.delete_backup_button = QPushButton("Удалить подозрительную копию")
+        self.delete_backup_button.setProperty("kind", "danger")
+        backup_actions.addWidget(self.trust_backup_button)
+        backup_actions.addWidget(self.delete_backup_button)
+        backup_actions.addStretch(1)
+        layout.addLayout(backup_actions)
         safety_actions = QHBoxLayout()
         self.safety_label = QLabel("Страховочная копия сервера: не ожидает решения")
         self.rollback_safety_button = QPushButton("Вернуть прежние базы")
@@ -325,6 +351,11 @@ class AdministrationPage(QWidget):
         self.users_table.itemSelectionChanged.connect(self._selection_changed)
         self.rollback_safety_button.clicked.connect(self._rollback_safety)
         self.delete_safety_button.clicked.connect(self._delete_safety)
+        self.backups_table.itemSelectionChanged.connect(
+            self._backup_selection_changed
+        )
+        self.trust_backup_button.clicked.connect(self._trust_selected_backup)
+        self.delete_backup_button.clicked.connect(self._delete_selected_backup)
         self._selection_changed()
         self._render_backup_summary()
 
@@ -583,6 +614,82 @@ class AdministrationPage(QWidget):
             f"Локальные копии: доверенных {len(trusted)}, подозрительных "
             f"{len(suspicious)} · последняя: {latest_text}"
         )
+        self.backups_table.setRowCount(0)
+        for entry in reversed(entries):
+            row = self.backups_table.rowCount()
+            self.backups_table.insertRow(row)
+            date_item = QTableWidgetItem(
+                entry.created_at.astimezone().strftime("%d.%m.%Y %H:%M")
+            )
+            date_item.setData(Qt.ItemDataRole.UserRole, entry.archive.name)
+            state = "Доверенная" if entry.trust == "trusted" else "Требует решения"
+            reason = (
+                "Количество записей уменьшилось без подтверждённого изменения"
+                if entry.reason == "unexplained_data_loss"
+                else "—"
+            )
+            values = (
+                date_item,
+                QTableWidgetItem(state),
+                QTableWidgetItem(reason),
+                QTableWidgetItem(f"{entry.archive.stat().st_size / (1024 * 1024):.1f} МБ"),
+            )
+            for column, item in enumerate(values):
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.backups_table.setItem(row, column, item)
+        self._backup_selection_changed()
+
+    def _selected_backup(self):
+        row = self.backups_table.currentRow()
+        if row < 0:
+            return None
+        item = self.backups_table.item(row, 0)
+        archive_name = item.data(Qt.ItemDataRole.UserRole) if item else None
+        return next(
+            (
+                entry
+                for entry in self.backup_store.entries()
+                if entry.archive.name == archive_name
+            ),
+            None,
+        )
+
+    def _backup_selection_changed(self) -> None:
+        selected = self._selected_backup()
+        suspicious = selected is not None and selected.trust == "suspicious"
+        self.trust_backup_button.setEnabled(suspicious)
+        self.delete_backup_button.setEnabled(suspicious)
+
+    def _trust_selected_backup(self) -> None:
+        selected = self._selected_backup()
+        if selected is None or selected.trust != "suspicious":
+            return
+        answer = QMessageBox.question(
+            self,
+            "Подтвердить резервную копию",
+            "Подтвердите, что уменьшение данных было ожидаемым (например, клиенты "
+            "были удалены намеренно). Сделать эту копию доверенной?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.backup_store.trust(selected.archive.name)
+            self.backup_store.rotate(daily=7, weekly=4)
+            self._render_backup_summary()
+
+    def _delete_selected_backup(self) -> None:
+        selected = self._selected_backup()
+        if selected is None or selected.trust != "suspicious":
+            return
+        answer = QMessageBox.warning(
+            self,
+            "Удалить резервную копию",
+            "Подозрительная копия будет полностью удалена с этого компьютера. "
+            "Продолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.backup_store.delete_suspicious(selected.archive.name)
+            self._render_backup_summary()
 
     def _restore_databases(self) -> None:
         latest = self.backup_store.latest_trusted()
