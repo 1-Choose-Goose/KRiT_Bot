@@ -14,8 +14,10 @@ from krit_management.window import MainWindow
 
 
 class FakeAdministrationApi:
-    def __init__(self, role: str) -> None:
-        self.profile = {"id": 1, "username": "test", "role": role}
+    def __init__(self, role: str | None, username: str = "test") -> None:
+        self.profile = {"id": 1, "username": username}
+        if role is not None:
+            self.profile["role"] = role
         self.status_calls = 0
 
     def snapshot(self) -> dict:
@@ -169,7 +171,10 @@ def test_restricted_sections_stay_visible_and_show_role_requirements() -> None:
     director.main_nav.setCurrentRow(4)
     director_denied = director.pages.currentWidget().findChild(QLabel, "accessDeniedMessage")
     assert director_denied is not None
-    assert "SuperAdmin" in director_denied.text()
+    assert director_denied.text() == (
+        "У вашей учётной записи нет доступа к этому разделу. "
+        "Если он нужен для работы, обратитесь к руководителю."
+    )
 
     assert _labels(administrator) == expected
     administrator.main_nav.setCurrentRow(3)
@@ -177,15 +182,27 @@ def test_restricted_sections_stay_visible_and_show_role_requirements() -> None:
         QLabel, "accessDeniedMessage"
     )
     assert reports_denied is not None
-    assert "директора или SuperAdmin" in reports_denied.text()
+    assert "директора" not in reports_denied.text()
+    assert "SuperAdmin" not in reports_denied.text()
     administrator.main_nav.setCurrentRow(4)
     administration_denied = administrator.pages.currentWidget().findChild(
         QLabel, "accessDeniedMessage"
     )
     assert administration_denied is not None
-    assert "SuperAdmin" in administration_denied.text()
+    assert "SuperAdmin" not in administration_denied.text()
     director.close()
     administrator.close()
+    app.processEvents()
+
+
+def test_legacy_admin_account_keeps_superadmin_access() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeAdministrationApi(None, username="admin"))  # type: ignore[arg-type]
+    assert window.role == "superadmin"
+    assert window.administration_page is not None
+    window.main_nav.setCurrentRow(4)
+    assert window.pages.currentWidget() is window.administration_page
+    window.close()
     app.processEvents()
 
 

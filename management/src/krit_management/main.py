@@ -34,6 +34,18 @@ QFrame#workspaceHeader { background: transparent; border: 0; }
 QFrame#controlPanel {
     background: #f8faff; border: 1px solid #e1e7f0; border-radius: 9px;
 }
+QFrame#accessDeniedCard {
+    background: white; border: 1px solid #dfe6f0; border-radius: 14px;
+}
+QLabel#accessDeniedIcon {
+    background: #eef4ff; color: #1b63db; border-radius: 28px;
+    font-size: 24px; font-weight: 800;
+}
+QLabel#accessDeniedTitle {
+    color: #172033; font-size: 20px; font-weight: 750;
+}
+QLabel#accessDeniedMessage { color: #536178; font-size: 13px; }
+QLabel#accessDeniedContext { color: #8a96a8; font-size: 12px; }
 QTabWidget#clientTabs::pane {
     background: white; border: 1px solid #dfe5ee; border-radius: 10px;
     top: -1px;

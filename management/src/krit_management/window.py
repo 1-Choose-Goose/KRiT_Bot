@@ -5,12 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QThreadPool, QTimer
-from PySide6.QtGui import QCloseEvent, QIcon, QPixmap
+from PySide6.QtGui import QCloseEvent, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -81,7 +82,12 @@ class MainWindow(QMainWindow):
         self._last_toast_person_id: int | None = None
         self._conversation_unread_counts: dict[int, int] | None = None
         self.profile = dict(getattr(api, "profile", {}) or {})
-        self.role = str(self.profile.get("role") or "administrator")
+        username = str(self.profile.get("username") or "").strip().lower()
+        self.role = (
+            "superadmin"
+            if username == "admin"
+            else str(self.profile.get("role") or "administrator")
+        )
         self.section_names = [
             "Клиенты",
             "Учебный процесс",
@@ -143,7 +149,6 @@ class MainWindow(QMainWindow):
             if self.role in {"superadmin", "director"}
             else self._access_denied_page(
                 "Отчёты",
-                "Для просмотра отчётов нужны права директора или SuperAdmin.",
             )
         )
         self.pages.addWidget(self.reports_page)
@@ -153,7 +158,6 @@ class MainWindow(QMainWindow):
         else:
             administration_widget = self._access_denied_page(
                 "Администрирование",
-                "Для управления системой нужны права SuperAdmin.",
             )
         self.pages.addWidget(administration_widget)
         workspace_layout.addWidget(self.pages, 1)
@@ -189,9 +193,9 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(label)
             item.setSizeHint(QSize(0, 42))
             if label == "Отчёты" and self.role not in {"superadmin", "director"}:
-                item.setToolTip("Доступно директору и SuperAdmin")
+                item.setToolTip("Доступ к разделу ограничен")
             elif label == "Администрирование" and self.role != "superadmin":
-                item.setToolTip("Доступно только SuperAdmin")
+                item.setToolTip("Доступ к разделу ограничен")
             self.main_nav.addItem(item)
         self.main_nav.setCurrentRow(0)
         self.main_nav.currentRowChanged.connect(self._change_section)
@@ -204,24 +208,50 @@ class MainWindow(QMainWindow):
         return sidebar
 
     @staticmethod
-    def _access_denied_page(title: str, message: str) -> QWidget:
+    def _access_denied_page(title: str) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.addStretch(1)
+        centered = QHBoxLayout()
+        centered.addStretch(1)
         card = QFrame()
-        card.setObjectName("controlPanel")
+        card.setObjectName("accessDeniedCard")
+        card.setMaximumWidth(540)
+        card.setMinimumHeight(220)
+        shadow = QGraphicsDropShadowEffect(card)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(20, 42, 82, 28))
+        card.setGraphicsEffect(shadow)
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(20, 20, 20, 20)
-        card_layout.setSpacing(8)
-        heading = QLabel(title)
-        heading.setObjectName("sectionTitle")
+        card_layout.setContentsMargins(36, 30, 36, 30)
+        card_layout.setSpacing(12)
+        icon = QLabel("i")
+        icon.setObjectName("accessDeniedIcon")
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setFixedSize(56, 56)
+        card_layout.addWidget(icon, 0, Qt.AlignmentFlag.AlignHCenter)
+        heading = QLabel("Раздел недоступен")
+        heading.setObjectName("accessDeniedTitle")
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(heading)
-        explanation = QLabel(message)
+        explanation = QLabel(
+            "У вашей учётной записи нет доступа к этому разделу. "
+            "Если он нужен для работы, обратитесь к руководителю."
+        )
         explanation.setObjectName("accessDeniedMessage")
+        explanation.setAlignment(Qt.AlignmentFlag.AlignCenter)
         explanation.setWordWrap(True)
         card_layout.addWidget(explanation)
-        card_layout.addStretch(1)
-        layout.addWidget(card)
+        context = QLabel(f"Раздел: {title}")
+        context.setObjectName("accessDeniedContext")
+        context.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(context)
+        centered.addWidget(card)
+        centered.addStretch(1)
+        layout.addLayout(centered)
+        layout.addStretch(2)
         return page
 
     def _workspace_header(self) -> QWidget:
