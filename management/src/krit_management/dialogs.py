@@ -83,6 +83,56 @@ class LoginDialog(QDialog):
             self.password.setFocus(Qt.FocusReason.OtherFocusReason)
 
 
+class ChangePasswordDialog(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Смена временного пароля · КРиТ")
+        self.setMinimumWidth(460)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 22)
+        title = QLabel("Задайте постоянный пароль")
+        title.setObjectName("dialogTitle")
+        layout.addWidget(title)
+        hint = QLabel(
+            "Временный пароль действует только для первого входа. "
+            "Введите новый пароль не короче 7 символов."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        form = QFormLayout()
+        configure_form_layout(form)
+        self.new_password = QLineEdit()
+        self.new_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.repeat_password = QLineEdit()
+        self.repeat_password.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Новый пароль", self.new_password)
+        form.addRow("Повторите пароль", self.repeat_password)
+        layout.addLayout(form)
+        self.error = QLabel("")
+        self.error.setStyleSheet("color: #a72c3c;")
+        layout.addWidget(self.error)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Сохранить пароль")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отменить вход")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setProperty("kind", "secondary")
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.new_password.setFocus()
+
+    def _accept_if_valid(self) -> None:
+        password = self.new_password.text()
+        if len(password) < 7:
+            self.error.setText("Пароль должен содержать не менее 7 символов.")
+            return
+        if password != self.repeat_password.text():
+            self.error.setText("Введённые пароли не совпадают.")
+            return
+        self.accept()
+
+
 class PersonPickerDialog(QDialog):
     def __init__(self, people: list[dict[str, Any]], parent=None) -> None:
         super().__init__(parent)

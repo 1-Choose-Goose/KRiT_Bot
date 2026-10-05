@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 
 from .api import ApiError, ManagementApi
 from .config import API_URL
-from .dialogs import LoginDialog
+from .dialogs import ChangePasswordDialog, LoginDialog
 from .window import MainWindow
 
 STYLESHEET = """
@@ -320,12 +320,30 @@ def run() -> None:
             api.close()
             raise SystemExit(0)
         try:
-            api.login(dialog.username.text().strip(), dialog.password.text())
+            current_password = dialog.password.text()
+            profile = api.login(dialog.username.text().strip(), current_password)
         except ApiError as exc:
             from PySide6.QtWidgets import QMessageBox
 
             QMessageBox.warning(None, "Вход не выполнен", str(exc))
             continue
+        if profile.get("must_change_password"):
+            password_dialog = ChangePasswordDialog()
+            if password_dialog.exec() != QDialog.DialogCode.Accepted:
+                api._client.headers.pop("Authorization", None)
+                api.profile = {}
+                continue
+            try:
+                api.change_initial_password(
+                    current_password,
+                    password_dialog.new_password.text(),
+                )
+            except ApiError as exc:
+                from PySide6.QtWidgets import QMessageBox
+
+                QMessageBox.warning(None, "Пароль не изменён", str(exc))
+                continue
+        current_password = ""
         break
 
     window = MainWindow(api)

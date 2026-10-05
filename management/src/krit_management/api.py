@@ -386,6 +386,24 @@ class ManagementApi:
         data = self._request("GET", f"/administration/restores/{operation_id}")
         return data if isinstance(data, dict) else {}
 
+    def pending_restore_safety(self) -> dict[str, Any] | None:
+        data = self._request("GET", "/administration/restores/safety/pending")
+        return data if isinstance(data, dict) else None
+
+    def rollback_restore_safety(self) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/administration/restores/safety/rollback",
+            json={"confirmation_phrase": "ВЕРНУТЬ"},
+        )
+
+    def delete_restore_safety(self) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/administration/restores/safety/delete",
+            json={"confirmation_phrase": "УДАЛИТЬ"},
+        )
+
     def snapshot(self) -> dict[str, Any]:
         data = self._request("GET", "/snapshot")
         if isinstance(data, dict) and data.get("center_timezone"):

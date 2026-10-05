@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .administration_page import AdministrationPage, ReportsPage
 from .api import ManagementApi
 from .communications_page import CommunicationsPage
 from .dialogs import ROLE_LABELS, PersonDialog, person_roles
@@ -79,6 +80,14 @@ class MainWindow(QMainWindow):
         self._last_toast_lesson_id: int | None = None
         self._last_toast_person_id: int | None = None
         self._conversation_unread_counts: dict[int, int] | None = None
+        self.profile = dict(getattr(api, "profile", {}) or {})
+        self.role = str(self.profile.get("role") or "administrator")
+        self.section_names = ["Клиенты", "Учебный процесс", "Рассылки"]
+        if self.role in {"superadmin", "director"}:
+            self.section_names.append("Отчёты")
+        if self.role == "superadmin":
+            self.section_names.append("Администрирование")
+        self.administration_page: AdministrationPage | None = None
         self.setWindowTitle("КРиТ · управление")
         self.setMinimumSize(1120, 620)
         self.resize(1240, 760)
@@ -99,7 +108,13 @@ class MainWindow(QMainWindow):
         self.notification_timer.setInterval(10_000)
         self.notification_timer.timeout.connect(self._poll_notifications)
         self.notification_timer.start()
+        if self.administration_page is not None:
+            QTimer.singleShot(5_000, self._run_daily_backup)
         QTimer.singleShot(2500, self._check_updates_automatically)
+
+    def _run_daily_backup(self) -> None:
+        if not self._closing and self.administration_page is not None:
+            self.administration_page.run_daily_backup()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -121,6 +136,12 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.learning_page)
         self.communications_page = CommunicationsPage(self.api)
         self.pages.addWidget(self.communications_page)
+        if self.role in {"superadmin", "director"}:
+            self.reports_page = ReportsPage()
+            self.pages.addWidget(self.reports_page)
+        if self.role == "superadmin":
+            self.administration_page = AdministrationPage(self.api)
+            self.pages.addWidget(self.administration_page)
         workspace_layout.addWidget(self.pages, 1)
         root_layout.addWidget(workspace, 1)
         self.setCentralWidget(root)
@@ -150,7 +171,7 @@ class MainWindow(QMainWindow):
         self.main_nav = QListWidget()
         self.main_nav.setObjectName("mainNavigation")
         self.main_nav.setSpacing(3)
-        for label in ("Клиенты", "Учебный процесс", "Рассылки"):
+        for label in self.section_names:
             item = QListWidgetItem(label)
             item.setSizeHint(QSize(0, 42))
             self.main_nav.addItem(item)
@@ -403,12 +424,19 @@ class MainWindow(QMainWindow):
     def _change_section(self, index: int) -> None:
         if index < 0:
             return
+        if self.administration_page is not None:
+            self.administration_page.deactivate()
         self.pages.setCurrentIndex(index)
-        self.section_title.setText(("Клиенты", "Учебный процесс", "Рассылки")[index])
+        self.section_title.setText(self.section_names[index])
         if index == 1:
             self.learning_page.refresh()
         elif index == 2:
             self.communications_page.refresh()
+        elif (
+            self.administration_page is not None
+            and self.section_names[index] == "Администрирование"
+        ):
+            self.administration_page.activate()
 
     def _clients_section(self) -> QWidget:
         section = QWidget()
@@ -1068,6 +1096,8 @@ class MainWindow(QMainWindow):
         self.notification_timer.stop()
         self.learning_page.shutdown()
         self.communications_page.shutdown()
+        if self.administration_page is not None:
+            self.administration_page.shutdown()
         self.pool.clear()
         self.pool.waitForDone(16000)
         self._workers.clear()
