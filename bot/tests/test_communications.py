@@ -471,7 +471,9 @@ async def test_daily_lessons_are_bundled_once_per_person_and_day(tmp_path) -> No
         room = Room(name="Кабинет 1", capacity=10)
         session.add_all([subject, room])
         await session.flush()
-        local_start = datetime(2026, 10, 5, 10, 0, tzinfo=timezone)
+        local_start = (utcnow().astimezone(timezone) + timedelta(days=2)).replace(
+            hour=10, minute=0, second=0, microsecond=0
+        )
         for index in range(2):
             start = local_start + timedelta(hours=index * 2)
             lesson = Lesson(
@@ -508,8 +510,9 @@ async def test_daily_lessons_are_bundled_once_per_person_and_day(tmp_path) -> No
             "teacher",
         }
         assert all(len(bundle.lessons) == 2 for bundle in bundles)
-        await reconcile_daily_reminders(session, now=utcnow(), timezone=timezone)
-        await reconcile_confirmation_requests(session, now=utcnow(), timezone=timezone)
+        scenario_now = utcnow()
+        await reconcile_daily_reminders(session, now=scenario_now, timezone=timezone)
+        await reconcile_confirmation_requests(session, now=scenario_now, timezone=timezone)
         jobs = list((await session.scalars(select(NotificationJob))).all())
         assert len([job for job in jobs if job.event_type == "lesson_reminder"]) == 6
         confirmation_jobs = [
