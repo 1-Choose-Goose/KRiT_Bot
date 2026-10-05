@@ -1,6 +1,9 @@
 import asyncio
 import json
+import os
 import secrets
+import signal
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated, Any
@@ -225,7 +228,12 @@ def _new_person(payload: PersonPayload) -> Person:
     return person
 
 
-def create_app(settings: Settings) -> FastAPI:
+def create_app(
+    settings: Settings,
+    *,
+    restart_bot: Callable[[], Awaitable[None]] | None = None,
+    restart_server: Callable[[], Awaitable[None]] | None = None,
+) -> FastAPI:
     engine = build_engine(settings.database_url)
     sessions = build_session_factory(engine)
     api = MaxApiClient(
@@ -312,12 +320,27 @@ def create_app(settings: Settings) -> FastAPI:
             must_change_password=admin.must_change_password,
         )
 
-    @asynccontextmanager
-    async def lifespan(_: FastAPI):
-        nonlocal polling_task, syndication_task, vk_long_poll_task, syndication_worker
-        nonlocal learning_notifications_task, communications_task
-        await ensure_schema(engine)
-        await ensure_bootstrap_admin()
+    async def stop_max_workers() -> None:
+        nonlocal polling_task, learning_notifications_task, communications_task
+        tasks = [
+            task
+            for task in (
+                polling_task,
+                learning_notifications_task,
+                communications_task,
+            )
+            if task is not None
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        polling_task = None
+        learning_notifications_task = None
+        communications_task = None
+
+    async def start_max_workers() -> None:
+        nonlocal polling_task, learning_notifications_task, communications_task
         try:
             if await ensure_max_webhook_subscription(api, settings):
                 log.info(
@@ -326,21 +349,24 @@ def create_app(settings: Settings) -> FastAPI:
                     update_types=WEBHOOK_UPDATE_TYPES,
                 )
         except Exception as exc:
-            # MAX must not take down the management API when its subscription
-            # endpoint is temporarily unavailable. The existing subscription
-            # remains usable and the next application start retries the check.
+            # A temporary MAX subscription failure must not stop the API or
+            # the notification queues. The next restart retries registration.
             log.warning("max_webhook_subscription_failed", error=str(exc))
         learning_notifications_task = asyncio.create_task(
             LearningNotificationWorker(sessions=sessions, api=api).run(),
             name="learning-notifications",
         )
         communications_task = asyncio.create_task(
-            run_communications_maintenance(sessions, center_timezone=settings.center_timezone),
+            run_communications_maintenance(
+                sessions, center_timezone=settings.center_timezone
+            ),
             name="communications-maintenance",
         )
         if settings.bot_mode == "polling":
             me = await api.get_me()
-            log.info("bot_started", bot_id=me.get("user_id"), username=me.get("username"))
+            log.info(
+                "bot_started", bot_id=me.get("user_id"), username=me.get("username")
+            )
             polling_task = asyncio.create_task(
                 run_polling(
                     api=api,
@@ -350,6 +376,25 @@ def create_app(settings: Settings) -> FastAPI:
                 ),
                 name="max-long-polling",
             )
+
+    async def restart_max_workers() -> None:
+        await stop_max_workers()
+        await start_max_workers()
+
+    async def schedule_process_restart() -> None:
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.5, os.kill, os.getpid(), signal.SIGTERM)
+
+    restart_bot_callback = restart_bot or restart_max_workers
+    restart_server_callback = restart_server or schedule_process_restart
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        nonlocal polling_task, syndication_task, vk_long_poll_task, syndication_worker
+        nonlocal learning_notifications_task, communications_task
+        await ensure_schema(engine)
+        await ensure_bootstrap_admin()
+        await start_max_workers()
         if settings.vk_syndication_enabled:
             required = {
                 "VK_ACCESS_TOKEN": settings.vk_access_token,
@@ -411,15 +456,7 @@ def create_app(settings: Settings) -> FastAPI:
             await asyncio.gather(syndication_task, return_exceptions=True)
         if syndication_worker is not None:
             await syndication_worker.close()
-        if polling_task is not None:
-            polling_task.cancel()
-            await asyncio.gather(polling_task, return_exceptions=True)
-        if learning_notifications_task is not None:
-            learning_notifications_task.cancel()
-            await asyncio.gather(learning_notifications_task, return_exceptions=True)
-        if communications_task is not None:
-            communications_task.cancel()
-            await asyncio.gather(communications_task, return_exceptions=True)
+        await stop_max_workers()
         await api.close()
         await engine.dispose()
 
@@ -438,7 +475,14 @@ def create_app(settings: Settings) -> FastAPI:
             center_timezone=settings.center_timezone,
         )
     )
-    app.include_router(create_administration_router(sessions, require_admin))
+    app.include_router(
+        create_administration_router(
+            sessions,
+            require_admin,
+            restart_bot=restart_bot_callback,
+            restart_server=restart_server_callback,
+        )
+    )
 
     @app.get("/health")
     async def health() -> dict[str, str]:

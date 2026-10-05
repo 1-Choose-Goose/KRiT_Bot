@@ -1,7 +1,9 @@
-from collections.abc import Callable
+import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Annotated, Any
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pwdlib import PasswordHash
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,6 +16,7 @@ from .db import ADMIN_ROLES, AdminUser, utcnow
 from .learning_models import AuditEvent
 
 password_hash = PasswordHash.recommended()
+log = structlog.get_logger()
 
 
 class AdminUserView(BaseModel):
@@ -89,8 +92,15 @@ async def _audit(
 def create_administration_router(
     sessions: async_sessionmaker[AsyncSession],
     require_admin: Callable[..., Any],
+    *,
+    restart_bot: Callable[[], Awaitable[None]],
+    restart_server: Callable[[], Awaitable[None]],
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/administration")
+    restart_locks = {
+        "bot": asyncio.Lock(),
+        "server": asyncio.Lock(),
+    }
 
     async def require_superadmin(
         principal: Annotated[AdminPrincipal, Depends(require_admin)],
@@ -292,5 +302,54 @@ def create_administration_router(
             await session.delete(target)
             await session.commit()
             return {"deleted": True}
+
+    async def run_restart(
+        *,
+        service: str,
+        callback: Callable[[], Awaitable[None]],
+        principal: AdminPrincipal,
+    ) -> dict[str, str]:
+        lock = restart_locks[service]
+        if lock.locked():
+            raise HTTPException(status_code=409, detail="Перезапуск уже выполняется")
+        async with lock:
+            async with sessions() as session:
+                await _audit(
+                    session,
+                    principal,
+                    f"{service}_restart_requested",
+                    None,
+                    {"service": service},
+                )
+                await session.commit()
+            try:
+                await callback()
+            except Exception as exc:
+                log.error(
+                    "service_restart_failed",
+                    service=service,
+                    error_type=type(exc).__name__,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="Не удалось запустить перезапуск. Повторите попытку позже.",
+                ) from None
+        return {"status": "requested", "service": service}
+
+    @router.post("/services/bot/restart")
+    async def restart_bot_service(
+        principal: Annotated[AdminPrincipal, Depends(require_superadmin)],
+    ) -> dict[str, str]:
+        return await run_restart(
+            service="bot", callback=restart_bot, principal=principal
+        )
+
+    @router.post("/services/server/restart")
+    async def restart_server_service(
+        principal: Annotated[AdminPrincipal, Depends(require_superadmin)],
+    ) -> dict[str, str]:
+        return await run_restart(
+            service="server", callback=restart_server, principal=principal
+        )
 
     return router

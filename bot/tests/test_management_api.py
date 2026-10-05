@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 from pwdlib import PasswordHash
@@ -288,6 +290,100 @@ async def test_superadmin_manages_users_roles_protection_and_audit(tmp_path) -> 
             }
             assert "replacement-password" not in repr([event.details for event in events])
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_service_restarts_are_authorized_serialized_and_audited(tmp_path) -> None:
+    settings = _settings((tmp_path / "service-restarts.db").as_posix())
+    callback_started = asyncio.Event()
+    release_callback = asyncio.Event()
+    callback_audit_actions: list[str] = []
+    server_failures = 0
+
+    async def restart_bot() -> None:
+        engine = build_engine(settings.database_url)
+        sessions = build_session_factory(engine)
+        async with sessions() as session:
+            callback_audit_actions.extend(
+                list(
+                    await session.scalars(
+                        select(AuditEvent.action).where(
+                            AuditEvent.action == "bot_restart_requested"
+                        )
+                    )
+                )
+            )
+        await engine.dispose()
+        callback_started.set()
+        await release_callback.wait()
+
+    async def restart_server() -> None:
+        nonlocal server_failures
+        server_failures += 1
+        raise RuntimeError("secret internal restart failure")
+
+    app = create_app(
+        settings,
+        restart_bot=restart_bot,
+        restart_server=restart_server,
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            login = await _login(client, "admin", "admin")
+            headers = {"Authorization": f"Bearer {login['access_token']}"}
+            created = await client.post(
+                "/api/v1/administration/users",
+                headers=headers,
+                json={
+                    "full_name": "Директор Проверки",
+                    "username": "director",
+                    "role": "director",
+                    "password": "1234567",
+                },
+            )
+            assert created.status_code == 201
+            director_login = await _login(client, "director", "1234567")
+            director_headers = {
+                "Authorization": f"Bearer {director_login['access_token']}"
+            }
+            assert (
+                await client.post(
+                    "/api/v1/administration/services/bot/restart",
+                    headers=director_headers,
+                )
+            ).status_code == 403
+
+            first = asyncio.create_task(
+                client.post(
+                    "/api/v1/administration/services/bot/restart",
+                    headers=headers,
+                )
+            )
+            await callback_started.wait()
+            assert callback_audit_actions == ["bot_restart_requested"]
+            duplicate = await client.post(
+                "/api/v1/administration/services/bot/restart",
+                headers=headers,
+            )
+            assert duplicate.status_code == 409
+            release_callback.set()
+            assert (await first).status_code == 200
+            assert (await client.get("/health")).status_code == 200
+
+            failed = await client.post(
+                "/api/v1/administration/services/server/restart",
+                headers=headers,
+            )
+            assert failed.status_code == 503
+            assert "secret" not in failed.text
+            retry = await client.post(
+                "/api/v1/administration/services/server/restart",
+                headers=headers,
+            )
+            assert retry.status_code == 503
+            assert server_failures == 2
 
 @pytest.mark.asyncio
 async def test_login_protects_management_api_and_allows_person_creation(tmp_path) -> None:
