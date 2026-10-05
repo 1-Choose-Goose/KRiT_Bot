@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 DATABASE_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,62}$")
+ARGON2_HASH = re.compile(r"^\$argon2(?:id|i|d)\$[A-Za-z0-9$=,+./~-]{20,500}$")
 CommandRunner = Callable[[list[str], dict[str, str]], None]
 
 
@@ -74,6 +75,8 @@ def replace_database(
     environment: dict[str, str],
     runner: CommandRunner,
 ) -> None:
+    if not DATABASE_NAME.fullmatch(database):
+        raise ValueError("Invalid database name")
     args = postgres_args(environment)
     runner(
         [
@@ -81,12 +84,10 @@ def replace_database(
             *args,
             "--dbname",
             "postgres",
-            "--set",
-            f"target_db={database}",
             "--command",
             (
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = :'target_db' AND pid <> pg_backend_pid()"
+                f"WHERE datname = '{database}' AND pid <> pg_backend_pid()"
             ),
         ],
         environment,
@@ -134,7 +135,7 @@ def restore_operation(
     credentials_path = operation_dir / "protected-admin.json"
     credentials = json.loads(credentials_path.read_text(encoding="utf-8"))
     admin_hash = str(credentials.get("password_hash") or "")
-    if not admin_hash.startswith("$argon2") or len(admin_hash) > 512:
+    if not ARGON2_HASH.fullmatch(admin_hash):
         raise ValueError("Invalid protected administrator hash")
     credentials_path.unlink()
     safety_root = root / "safety-pending"
@@ -181,29 +182,34 @@ def restore_operation(
             ],
             config,
         )
-        runner(
-            [
-                "psql",
-                *args,
-                "--dbname",
-                "krit_bot",
-                "--set",
-                f"admin_hash={admin_hash}",
-                "--command",
-                (
-                    "INSERT INTO admin_users "
-                    "(username, full_name, password_hash, role, active, "
-                    "must_change_password, auth_version, is_protected, created_at, updated_at) "
-                    "VALUES ('choose_goose', 'Суперадминистратор', :'admin_hash', "
-                    "'superadmin', TRUE, TRUE, 1, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
-                    "ON CONFLICT (username) DO UPDATE SET role='superadmin', active=TRUE, "
-                    "must_change_password=TRUE, is_protected=TRUE, "
-                    "auth_version=admin_users.auth_version+1, password_hash=EXCLUDED.password_hash, "
-                    "updated_at=CURRENT_TIMESTAMP"
-                ),
-            ],
-            config,
+        admin_sql_path = operation_dir / "restore-protected-admin.sql"
+        admin_sql_path.write_text(
+            "INSERT INTO admin_users "
+            "(username, full_name, password_hash, role, active, "
+            "must_change_password, auth_version, is_protected, created_at, updated_at) "
+            f"VALUES ('choose_goose', 'Суперадминистратор', '{admin_hash}', "
+            "'superadmin', TRUE, TRUE, 1, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+            "ON CONFLICT (username) DO UPDATE SET role='superadmin', active=TRUE, "
+            "must_change_password=TRUE, is_protected=TRUE, "
+            "auth_version=admin_users.auth_version+1, password_hash=EXCLUDED.password_hash, "
+            "updated_at=CURRENT_TIMESTAMP;\n",
+            encoding="utf-8",
         )
+        admin_sql_path.chmod(0o600)
+        try:
+            runner(
+                [
+                    "psql",
+                    *args,
+                    "--dbname",
+                    "krit_bot",
+                    "--file",
+                    str(admin_sql_path),
+                ],
+                config,
+            )
+        finally:
+            admin_sql_path.unlink(missing_ok=True)
     except Exception:
         for database in database_names:
             safety_dump = safety_root / f"{database}.dump"

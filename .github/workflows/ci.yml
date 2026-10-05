@@ -51,6 +51,8 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://krit_test:krit_test@127.0.0.1:5432/krit_bot
           BOOTSTRAP_ADMIN_PASSWORD: ci-only-strong-password
       - name: Server and migration tests
-        run: pytest bot/tests -q
+        run: pytest bot/tests -q --ignore=bot/tests/test_backup_restore_postgresql.py
+      - name: PostgreSQL backup and restore round trip
+        run: pytest bot/tests/test_backup_restore_postgresql.py -q
       - name: Management tests
         run: pytest management/tests -q

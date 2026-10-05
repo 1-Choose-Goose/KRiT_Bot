@@ -248,11 +248,14 @@ def test_privileged_helper_safety_dumps_all_databases_and_rolls_back_set(tmp_pat
         json.dumps({"password_hash": preserved_hash}), encoding="utf-8"
     )
     commands: list[list[str]] = []
+    sql_files: list[str] = []
 
     def runner(argv: list[str], _environment: dict[str, str]) -> None:
         commands.append(argv)
         if argv[0] == "pg_dump":
             Path(argv[argv.index("--file") + 1]).write_bytes(b"PGDMP safety")
+        if argv[0] == "psql" and "--file" in argv:
+            sql_files.append(Path(argv[argv.index("--file") + 1]).read_text(encoding="utf-8"))
 
     safety = restore_operation(
         tmp_path,
@@ -267,13 +270,26 @@ def test_privileged_helper_safety_dumps_all_databases_and_rolls_back_set(tmp_pat
     assert len([item for item in commands if item[0] == "pg_dump"]) == 2
     assert len([item for item in commands if item[0] == "pg_restore"]) == 2
     assert all("secret" not in " ".join(item) for item in commands)
+    terminate_commands = [
+        item
+        for item in commands
+        if item[0] == "psql" and "pg_terminate_backend" in " ".join(item)
+    ]
+    assert len(terminate_commands) == 2
+    assert all(":'target_db'" not in " ".join(item) for item in terminate_commands)
+    assert all("WHERE datname = 'krit_" in " ".join(item) for item in terminate_commands)
     admin_commands = [
         item
         for item in commands
-        if item[0] == "psql" and "admin_hash" in " ".join(item)
+        if item[0] == "psql" and "--file" in item
     ]
     assert len(admin_commands) == 1
-    assert f"admin_hash={preserved_hash}" in admin_commands[0]
+    assert "--set" not in admin_commands[0]
+    assert preserved_hash not in " ".join(admin_commands[0])
+    assert len(sql_files) == 1
+    assert "INSERT INTO admin_users" in sql_files[0]
+    assert preserved_hash in sql_files[0]
+    assert not (operation_dir / "restore-protected-admin.sql").exists()
     assert not (operation_dir / "protected-admin.json").exists()
 
 
