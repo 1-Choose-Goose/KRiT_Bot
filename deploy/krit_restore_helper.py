@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -29,11 +30,16 @@ def run_command(argv: list[str], environment: dict[str, str]) -> None:
 
 
 def atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    owner_source = path if path.exists() else path.parent
+    owner = owner_source.stat()
     temporary = path.with_suffix(path.suffix + ".part")
     temporary.write_text(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2),
         encoding="utf-8",
     )
+    change_owner = getattr(os, "chown", None)
+    if change_owner is not None:
+        change_owner(temporary, owner.st_uid, owner.st_gid)
     os.replace(temporary, path)
 
 
@@ -255,13 +261,28 @@ def rollback_pending_safety(
     pending_path.unlink()
 
 
+def delete_pending_safety(root: Path) -> None:
+    pending_path = root / "pending-safety.json"
+    if not pending_path.is_file():
+        raise FileNotFoundError(pending_path)
+    safety_root = root / "safety-pending"
+    if safety_root.is_dir():
+        shutil.rmtree(safety_root)
+    pending_path.unlink()
+
+
 def main() -> int:
     if len(sys.argv) != 2:
-        print("Usage: krit_restore_helper.py OPERATION_ID|--rollback", file=sys.stderr)
+        print(
+            "Usage: krit_restore_helper.py OPERATION_ID|--rollback|--delete-safety",
+            file=sys.stderr,
+        )
         return 2
     root = Path("/var/lib/krit/restore")
     if sys.argv[1] == "--rollback":
         rollback_pending_safety(root)
+    elif sys.argv[1] == "--delete-safety":
+        delete_pending_safety(root)
     else:
         restore_operation(root, sys.argv[1])
     return 0

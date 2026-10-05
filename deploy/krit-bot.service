@@ -1,0 +1,24 @@
+[Unit]
+Description=KRiT management API and MAX bot
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=krit
+Group=krit
+WorkingDirectory=/opt/krit-bot
+EnvironmentFile=/etc/krit-bot/krit-bot.env
+ExecStart=/opt/krit-bot/venv/bin/krit-bot
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/krit
+
+[Install]
+WantedBy=multi-user.target

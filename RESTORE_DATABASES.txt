@@ -6,6 +6,45 @@
 нужны как аварийный запасной вариант.
 
 
+0. КАК РАЗВЕРНУТЬ НОВЫЙ СЕРВЕР — САМЫЙ ПРОСТОЙ ПУТЬ
+---------------------------------------------------
+
+Вам понадобятся: IP нового сервера, пароль root, домен, направленный на этот IP,
+токен MAX-бота и файл KRiTServer.tar.gz.
+
+1) Откройте Windows PowerShell и подключитесь (замените SERVER_IP):
+
+   ssh root@SERVER_IP
+
+   Например, `ssh root@178.217.99.218` означает пользователя root и IP сервера;
+   это НЕ публичный адрес программы и НЕ надо вводить в KRiTManagement.
+
+2) В другом окне PowerShell отправьте архив на сервер:
+
+   scp KRiTServer.tar.gz root@SERVER_IP:/root/
+
+3) Вернитесь в окно SSH и выполните по очереди:
+
+   cd /root
+   tar -xzf KRiTServer.tar.gz
+   bash deploy/install-krit-server.sh
+
+4) Установщик спросит только:
+   - домен без `https://`, например `krit.example.ru`;
+   - токен MAX-бота (при вводе он не отображается — это нормально).
+
+5) Дождитесь строк «КРиТ установлен и запущен» и
+   «Первый вход: Choose_Goose / 123».
+
+6) Откройте KRiTManagement. Адрес программы имеет вид:
+   https://ВАШ-ДОМЕН/krit-api/api/v1
+   Первый логин: Choose_Goose, пароль: 123. Сразу задайте новый пароль.
+
+7) Если нужно вернуть сохранённые данные, откройте «Администрирование» ->
+   «Восстановить базы». Файл выбирать не надо: программа сама возьмёт последнюю
+   доверенную копию из стандартной папки Windows.
+
+
 1. ГДЕ KRiTManagement ХРАНИТ ПОСЛЕДНЮЮ КОПИЮ В WINDOWS
 ------------------------------------------------------
 
@@ -121,11 +160,16 @@ sudo -u postgres createdb --owner=krit_bot krit_bot
 sudo -u postgres dropdb --if-exists krit_bot
 sudo -u postgres createdb --owner=krit_bot krit_bot
 
-Восстановите архив с немедленной остановкой при первой ошибке:
+Файл `.backup` является комплектом. Сначала извлеките из него дамп PostgreSQL:
+
+unzip -j /var/lib/krit/restore/KRiT-latest.backup krit_bot.dump \
+  -d /var/lib/krit/restore
+
+Затем восстановите дамп с немедленной остановкой при первой ошибке:
 
 sudo -u postgres pg_restore --exit-on-error --clean --if-exists --no-owner \
   --role=krit_bot --dbname=krit_bot \
-  /var/lib/krit/restore/KRiT-latest.backup
+  /var/lib/krit/restore/krit_bot.dump
 
 После восстановления примените миграции из установленной версии КРиТ:
 sudo -u krit /opt/krit-bot/.venv/bin/krit-migrate

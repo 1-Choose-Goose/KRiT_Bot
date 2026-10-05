@@ -244,6 +244,7 @@ def create_app(
     status_snapshot: Callable[[], Awaitable[dict[str, Any]]] | None = None,
     restore_dispatcher: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
     safety_rollback_dispatcher: Callable[[], Awaitable[None]] | None = None,
+    safety_delete_dispatcher: Callable[[], Awaitable[None]] | None = None,
 ) -> FastAPI:
     engine = build_engine(settings.database_url)
     sessions = build_session_factory(engine)
@@ -315,12 +316,33 @@ def create_app(
         if process.returncode:
             raise RuntimeError("Privileged safety rollback helper could not be started")
 
+    async def systemd_safety_delete_dispatcher() -> None:
+        process = await asyncio.create_subprocess_exec(
+            "sudo",
+            "-n",
+            "/usr/bin/systemctl",
+            "start",
+            "--no-block",
+            "krit-restore-delete.service",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, _stderr = await process.communicate()
+        if process.returncode:
+            raise RuntimeError("Privileged safety deletion helper could not be started")
+
     restore_service = RestoreService(
         root=settings.restore_root,
         database_names=settings.krit_database_names,
         dispatcher=restore_dispatcher or systemd_restore_dispatcher,
         safety_rollback_dispatcher=(
             safety_rollback_dispatcher or systemd_safety_rollback_dispatcher
+        ),
+        safety_delete_dispatcher=(
+            safety_delete_dispatcher
+            if safety_delete_dispatcher is not None
+            else (None if restore_dispatcher is not None else systemd_safety_delete_dispatcher)
         ),
     )
     polling_task: asyncio.Task[None] | None = None

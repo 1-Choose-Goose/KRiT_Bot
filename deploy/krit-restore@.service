@@ -1,0 +1,17 @@
+[Unit]
+Description=Restore KRiT databases for operation %i
+After=postgresql.service
+Conflicts=krit-bot.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/krit-bot/krit-bot.env
+ExecStartPre=/usr/bin/systemctl stop krit-bot.service
+ExecStart=/opt/krit-bot/venv/bin/python /opt/krit-bot/deploy/krit_restore_helper.py %i
+ExecStopPost=/usr/bin/systemctl start krit-bot.service
+UMask=0077
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/var/lib/krit /opt/krit-bot

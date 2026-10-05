@@ -28,6 +28,7 @@ class RestoreConflict(RuntimeError):
 
 RestoreDispatcher = Callable[[str], Awaitable[dict[str, Any]]]
 SafetyRollbackDispatcher = Callable[[], Awaitable[None]]
+SafetyDeleteDispatcher = Callable[[], Awaitable[None]]
 password_hash = PasswordHash.recommended()
 
 
@@ -39,12 +40,14 @@ class RestoreService:
         database_names: tuple[str, ...],
         dispatcher: RestoreDispatcher,
         safety_rollback_dispatcher: SafetyRollbackDispatcher | None = None,
+        safety_delete_dispatcher: SafetyDeleteDispatcher | None = None,
         free_space: Callable[[], int] | None = None,
     ) -> None:
         self.root = root
         self.database_names = database_names
         self.dispatcher = dispatcher
         self.safety_rollback_dispatcher = safety_rollback_dispatcher
+        self.safety_delete_dispatcher = safety_delete_dispatcher
         self.free_space = free_space or (lambda: shutil.disk_usage(self.root).free)
         self.safety_path = root / "pending-safety.json"
 
@@ -222,9 +225,12 @@ class RestoreService:
             self._atomic_json(operation_dir / "state.json", state)
             raise
 
-    def delete_safety(self) -> None:
+    async def delete_safety(self) -> None:
         if self.pending_safety() is None:
             raise FileNotFoundError("pending safety set")
+        if self.safety_delete_dispatcher is not None:
+            await self.safety_delete_dispatcher()
+            return
         safety_directory = self.root / "safety-pending"
         if safety_directory.is_dir():
             shutil.rmtree(safety_directory)
@@ -346,7 +352,7 @@ def create_restore_router(
             raise HTTPException(status_code=409, detail="Требуется подтверждение удаления")
         try:
             pending = service.pending_safety()
-            service.delete_safety()
+            await service.delete_safety()
         except Exception as exc:
             raise translate_restore_error(exc) from None
         async with sessions() as session:

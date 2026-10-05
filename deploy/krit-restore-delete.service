@@ -1,0 +1,12 @@
+[Unit]
+Description=Delete confirmed KRiT restore safety set
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/krit-bot/venv/bin/python /opt/krit-bot/deploy/krit_restore_helper.py --delete-safety
+UMask=0077
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/var/lib/krit

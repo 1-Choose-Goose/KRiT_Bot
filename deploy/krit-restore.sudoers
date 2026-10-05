@@ -1,0 +1,3 @@
+krit ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block krit-restore@[0-9a-f]*.service
+krit ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block krit-restore-rollback.service
+krit ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block krit-restore-delete.service
