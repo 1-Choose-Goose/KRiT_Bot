@@ -95,6 +95,7 @@ def create_administration_router(
     *,
     restart_bot: Callable[[], Awaitable[None]],
     restart_server: Callable[[], Awaitable[None]],
+    status_snapshot: Callable[[], Awaitable[dict[str, Any]]],
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/administration")
     restart_locks = {
@@ -351,5 +352,11 @@ def create_administration_router(
         return await run_restart(
             service="server", callback=restart_server, principal=principal
         )
+
+    @router.get("/system-status")
+    async def system_status(
+        _principal: Annotated[AdminPrincipal, Depends(require_superadmin)],
+    ) -> dict[str, Any]:
+        return await status_snapshot()
 
     return router

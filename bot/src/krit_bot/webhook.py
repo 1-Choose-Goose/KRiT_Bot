@@ -6,6 +6,7 @@ import signal
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated, Any
 
 import jwt
@@ -15,7 +16,7 @@ from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pwdlib import PasswordHash
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from .administration import create_administration_router
@@ -23,12 +24,14 @@ from .auth import AdminPrincipal, decode_access_token, issue_access_token, norma
 from .communications import create_communications_router, run_communications_maintenance
 from .config import Settings
 from .db import (
+    EXPECTED_ALEMBIC_REVISION,
     AccessAttempt,
     AdminUser,
     BotState,
     Person,
     PersonRole,
     StudentGuardian,
+    SyndicationJob,
     build_engine,
     build_session_factory,
     ensure_schema,
@@ -55,6 +58,7 @@ from .syndication import (
     VkLongPollWorker,
     register_vk_event,
 )
+from .system_status import SystemStatusProvider
 
 log = structlog.get_logger()
 bearer = HTTPBearer(auto_error=False)
@@ -233,6 +237,7 @@ def create_app(
     *,
     restart_bot: Callable[[], Awaitable[None]] | None = None,
     restart_server: Callable[[], Awaitable[None]] | None = None,
+    status_snapshot: Callable[[], Awaitable[dict[str, Any]]] | None = None,
 ) -> FastAPI:
     engine = build_engine(settings.database_url)
     sessions = build_session_factory(engine)
@@ -388,6 +393,98 @@ def create_app(
     restart_bot_callback = restart_bot or restart_max_workers
     restart_server_callback = restart_server or schedule_process_restart
 
+    async def collect_database_status() -> dict[str, Any]:
+        async with sessions() as session:
+            if engine.dialect.name == "postgresql":
+                database_version = await session.scalar(text("SELECT version()"))
+                active_connections = await session.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database()"
+                    )
+                )
+                databases = []
+                for database_name in ("krit_bot",):
+                    size = await session.scalar(
+                        text("SELECT pg_database_size(:database_name)"),
+                        {"database_name": database_name},
+                    )
+                    databases.append(
+                        {"name": database_name, "size_bytes": int(size or 0)}
+                    )
+                revision = await session.scalar(
+                    text("SELECT version_num FROM alembic_version")
+                )
+            else:
+                database_version = "SQLite " + str(
+                    await session.scalar(text("SELECT sqlite_version()"))
+                )
+                active_connections = 1
+                databases = [{"name": "krit_bot", "size_bytes": None}]
+                revision = EXPECTED_ALEMBIC_REVISION
+        return {
+            "available": True,
+            "version": database_version,
+            "revision": revision,
+            "active_connections": int(active_connections or 0),
+            "databases": databases,
+        }
+
+    async def collect_worker_status() -> dict[str, Any]:
+        worker_tasks = [learning_notifications_task, communications_task]
+        if settings.bot_mode == "polling":
+            worker_tasks.append(polling_task)
+        return {
+            "available": True,
+            "mode": settings.bot_mode,
+            "running": bool(worker_tasks)
+            and all(task is not None and not task.done() for task in worker_tasks),
+            "last_success_at": None,
+            "last_error": None,
+        }
+
+    async def collect_queue_status() -> dict[str, Any]:
+        counts = {"pending": 0, "processing": 0, "failed": 0}
+        async with sessions() as session:
+            notification_rows = await session.execute(
+                select(NotificationJob.status, func.count(NotificationJob.id)).group_by(
+                    NotificationJob.status
+                )
+            )
+            syndication_rows = await session.execute(
+                select(SyndicationJob.status, func.count(SyndicationJob.id)).group_by(
+                    SyndicationJob.status
+                )
+            )
+        for status_name, count in [*notification_rows.all(), *syndication_rows.all()]:
+            if status_name in {"pending", "retry", "scheduled"}:
+                counts["pending"] += int(count)
+            elif status_name == "processing":
+                counts["processing"] += int(count)
+            elif status_name == "failed":
+                counts["failed"] += int(count)
+        return {"available": True, **counts}
+
+    async def collect_backup_status() -> dict[str, Any]:
+        return {
+            "available": False,
+            "last_backup_at": None,
+            "last_result": "not_configured",
+            "trusted_count": 0,
+            "suspicious_count": 0,
+            "safety_set_pending": False,
+            "free_bytes": None,
+        }
+
+    status_provider = SystemStatusProvider(
+        data_root=Path.cwd(),
+        database_collector=collect_database_status,
+        worker_collector=collect_worker_status,
+        queue_collector=collect_queue_status,
+        backup_collector=collect_backup_status,
+    )
+    status_snapshot_callback = status_snapshot or status_provider.snapshot
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         nonlocal polling_task, syndication_task, vk_long_poll_task, syndication_worker
@@ -481,6 +578,7 @@ def create_app(
             require_admin,
             restart_bot=restart_bot_callback,
             restart_server=restart_server_callback,
+            status_snapshot=status_snapshot_callback,
         )
     )
 
