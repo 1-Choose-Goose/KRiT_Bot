@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -43,9 +44,19 @@ class Settings(BaseSettings):
     )
     center_timezone: str = "Asia/Yekaterinburg"
     log_level: str = "INFO"
-    krit_database_names: tuple[str, ...] = ("krit_bot",)
+    krit_database_names: Annotated[tuple[str, ...], NoDecode] = ("krit_bot",)
     backup_root: Path = Path("./data/backups")
     restore_root: Path = Path("./data/restore")
+
+    @field_validator("krit_database_names", mode="before")
+    @classmethod
+    def parse_database_names(cls, value: object) -> object:
+        if isinstance(value, str):
+            if value.lstrip().startswith("["):
+                value = json.loads(value)
+                return tuple(str(item).strip() for item in value if str(item).strip())
+            return tuple(item.strip() for item in value.split(",") if item.strip())
+        return value
 
     def initial_admin_credentials(self) -> tuple[str, str, bool]:
         if self.database_url.startswith(("postgresql", "postgres")):

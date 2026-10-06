@@ -34,18 +34,14 @@ def test_systemd_and_nginx_assets_are_locked_down() -> None:
 
     for asset in DEPLOY.iterdir():
         if asset.is_file() and asset.suffix in {".sh", ".service", ".sudoers", ".conf"}:
-            blob_id = subprocess.run(
-                ["git", "hash-object", "--path", str(asset.relative_to(ROOT)), "--stdin"],
-                input=asset.read_bytes(),
+            relative_path = str(asset.relative_to(ROOT))
+            attributes = subprocess.run(
+                ["git", "check-attr", "eol", "--", relative_path],
                 check=True,
                 capture_output=True,
-            ).stdout.strip()
-            normalized = subprocess.run(
-                ["git", "cat-file", "blob", blob_id],
-                check=True,
-                capture_output=True,
+                text=True,
             ).stdout
-            assert b"\r\n" not in normalized, f"{asset.name} must be archived with LF"
+            assert attributes.rstrip().endswith("eol: lf")
 
 
 def test_installer_is_idempotent_generates_secrets_and_never_embeds_real_ones() -> None:
@@ -55,6 +51,8 @@ def test_installer_is_idempotent_generates_secrets_and_never_embeds_real_ones() 
     assert "IF NOT EXISTS" in installer
     assert "openssl rand" in installer
     assert "chmod 0640 /etc/krit-bot/krit-bot.env" in installer
+    assert "chown -R root:krit /opt/krit-bot/venv" in installer
+    assert "chmod -R u=rwX,g=rX,o= /opt/krit-bot/venv" in installer
     assert "/usr/local/sbin/krit-restore-dispatch" in installer
     assert "systemctl enable --now krit-bot.service" in installer
     assert "curl --fail" in installer

@@ -42,6 +42,8 @@ rsync -a --delete "${PACKAGE_ROOT}/deploy/" /opt/krit-bot/deploy/
 python3 -m venv /opt/krit-bot/venv
 /opt/krit-bot/venv/bin/python -m pip install --upgrade pip
 /opt/krit-bot/venv/bin/python -m pip install -e /opt/krit-bot/bot
+chown -R root:krit /opt/krit-bot/venv
+chmod -R u=rwX,g=rX,o= /opt/krit-bot/venv
 
 DB_PASSWORD=$(openssl rand -hex 24)
 JWT_SECRET=$(openssl rand -hex 32)
