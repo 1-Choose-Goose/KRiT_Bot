@@ -11,7 +11,7 @@ from krit_bot.communication_models import (
     InteractionResponse,
     MaxRegistrationPending,
 )
-from krit_bot.config import Settings, extract_first_token
+from krit_bot.config import Settings
 from krit_bot.db import Base, Person, PersonRole, build_session_factory
 from krit_bot.handler import EchoHandler, parse_message_callback, parse_message_created
 from krit_bot.learning_models import PersonMaxIdentity
@@ -156,11 +156,6 @@ async def test_webhook_startup_subscribes_to_button_callbacks() -> None:
         }
     ]
     assert "message_callback" in api.calls[0]["update_types"]
-
-
-def test_token_file_uses_only_first_non_empty_line() -> None:
-    raw = "max-token\n\nANOTHER_SECRET=must-not-be-used\n"
-    assert extract_first_token(raw) == "max-token"
 
 
 async def test_only_authorized_message_is_stored_for_the_admin() -> None:

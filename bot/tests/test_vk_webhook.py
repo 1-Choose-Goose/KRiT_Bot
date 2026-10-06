@@ -10,7 +10,6 @@ def settings(tmp_path) -> Settings:
     return Settings(
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'webhook.db'}",
         max_bot_token="test-max-token",
-        max_token_file=tmp_path / "missing",
         bot_mode="webhook",
         vk_callback_secret="callback-secret",
         vk_callback_confirmation="confirmation-code",

@@ -4,15 +4,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-def extract_first_token(raw: str) -> str | None:
-    first_line = next((line.strip() for line in raw.splitlines() if line.strip()), "")
-    if not first_line:
-        return None
-    return first_line.split("=", 1)[-1].strip().strip("\"'") or None
 
 
 class Settings(BaseSettings):
@@ -23,8 +16,7 @@ class Settings(BaseSettings):
     )
 
     database_url: str = "sqlite+aiosqlite:///./data/krit.db"
-    max_bot_token: SecretStr | None = None
-    max_token_file: Path = Path("../TOKEN.txt")
+    max_bot_token: SecretStr
     max_api_base_url: str = "https://platform-api2.max.ru"
     max_webhook_secret: SecretStr | None = None
     max_webhook_url: str | None = None
@@ -54,22 +46,6 @@ class Settings(BaseSettings):
     krit_database_names: tuple[str, ...] = ("krit_bot",)
     backup_root: Path = Path("./data/backups")
     restore_root: Path = Path("./data/restore")
-
-    @model_validator(mode="after")
-    def load_token_file(self) -> Settings:
-        if self.max_bot_token is None:
-            candidates = [self.max_token_file, Path("TOKEN.txt")]
-            for candidate in candidates:
-                if not candidate.is_file():
-                    continue
-                value = extract_first_token(candidate.read_text(encoding="utf-8-sig"))
-                if value is None:
-                    continue
-                self.max_bot_token = SecretStr(value)
-                break
-        if self.max_bot_token is None:
-            raise ValueError("MAX_BOT_TOKEN is not set and TOKEN.txt was not found")
-        return self
 
     def initial_admin_credentials(self) -> tuple[str, str, bool]:
         if self.database_url.startswith(("postgresql", "postgres")):
