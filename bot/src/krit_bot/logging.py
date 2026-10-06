@@ -6,6 +6,10 @@ import structlog
 
 def configure_logging(level: str) -> None:
     logging.basicConfig(stream=sys.stdout, level=level.upper(), format="%(message)s")
+    # httpx logs full request URLs, which may contain provider credentials in
+    # query parameters (for example VK access_token).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
