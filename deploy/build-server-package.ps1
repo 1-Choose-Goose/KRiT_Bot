@@ -19,6 +19,7 @@ $Entries = @(
     "deploy/krit-restore-rollback.service",
     "deploy/krit-restore-delete.service",
     "deploy/krit-restore.sudoers",
+    "deploy/krit_restore_dispatch.py",
     "deploy/krit_restore_helper.py",
     "deploy/nginx-krit.conf",
     ".env.example",

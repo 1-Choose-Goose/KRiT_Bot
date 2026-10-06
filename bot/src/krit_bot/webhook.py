@@ -287,15 +287,12 @@ def create_app(
         process = await asyncio.create_subprocess_exec(
             "sudo",
             "-n",
-            "/usr/bin/systemctl",
-            "start",
-            "--no-block",
-            f"krit-restore@{operation_id}.service",
-            stdin=asyncio.subprocess.DEVNULL,
+            "/usr/local/sbin/krit-restore-dispatch",
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        _stdout, _stderr = await process.communicate()
+        _stdout, _stderr = await process.communicate(operation_id.encode("ascii"))
         if process.returncode:
             raise RuntimeError("Privileged restore helper could not be started")
         return {"_async": True}

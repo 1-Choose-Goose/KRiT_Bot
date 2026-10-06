@@ -44,7 +44,9 @@ jobs:
       - name: Compile
         run: python -m compileall -q bot/src management/src
       - name: Validate deployment scripts
-        run: bash -n deploy/install-krit-server.sh
+        run: |
+          bash -n deploy/install-krit-server.sh
+          sudo visudo -cf deploy/krit-restore.sudoers
       - name: Migrate PostgreSQL test database
         run: krit-migrate
         env:

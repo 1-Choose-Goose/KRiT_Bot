@@ -84,6 +84,7 @@ install -o root -g root -m 0644 "${PACKAGE_ROOT}/deploy/krit-bot.service" /etc/s
 install -o root -g root -m 0644 "${PACKAGE_ROOT}/deploy/krit-restore@.service" /etc/systemd/system/krit-restore@.service
 install -o root -g root -m 0644 "${PACKAGE_ROOT}/deploy/krit-restore-rollback.service" /etc/systemd/system/krit-restore-rollback.service
 install -o root -g root -m 0644 "${PACKAGE_ROOT}/deploy/krit-restore-delete.service" /etc/systemd/system/krit-restore-delete.service
+install -o root -g root -m 0755 "${PACKAGE_ROOT}/deploy/krit_restore_dispatch.py" /usr/local/sbin/krit-restore-dispatch
 install -o root -g root -m 0440 "${PACKAGE_ROOT}/deploy/krit-restore.sudoers" /etc/sudoers.d/krit-restore
 visudo -cf /etc/sudoers.d/krit-restore
 

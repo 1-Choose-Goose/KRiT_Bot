@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,6 +16,7 @@ def test_systemd_and_nginx_assets_are_locked_down() -> None:
     delete_service = (DEPLOY / "krit-restore-delete.service").read_text(encoding="utf-8")
     nginx = (DEPLOY / "nginx-krit.conf").read_text(encoding="utf-8")
     sudoers = (DEPLOY / "krit-restore.sudoers").read_text(encoding="utf-8")
+    dispatcher = DEPLOY / "krit_restore_dispatch.py"
 
     assert "User=krit" in bot_service
     assert "Restart=always" in bot_service
@@ -25,8 +27,25 @@ def test_systemd_and_nginx_assets_are_locked_down() -> None:
     assert "--rollback" in rollback_service
     assert "--delete-safety" in delete_service
     assert "NOPASSWD:" in sudoers
-    assert "krit-restore@" in sudoers
+    assert "/usr/local/sbin/krit-restore-dispatch" in sudoers
+    assert "*" not in sudoers
     assert "ALL=(ALL) ALL" not in sudoers
+    assert dispatcher.is_file()
+
+    for asset in DEPLOY.iterdir():
+        if asset.is_file() and asset.suffix in {".sh", ".service", ".sudoers", ".conf"}:
+            blob_id = subprocess.run(
+                ["git", "hash-object", "--path", str(asset.relative_to(ROOT)), "--stdin"],
+                input=asset.read_bytes(),
+                check=True,
+                capture_output=True,
+            ).stdout.strip()
+            normalized = subprocess.run(
+                ["git", "cat-file", "blob", blob_id],
+                check=True,
+                capture_output=True,
+            ).stdout
+            assert b"\r\n" not in normalized, f"{asset.name} must be archived with LF"
 
 
 def test_installer_is_idempotent_generates_secrets_and_never_embeds_real_ones() -> None:
@@ -36,6 +55,7 @@ def test_installer_is_idempotent_generates_secrets_and_never_embeds_real_ones() 
     assert "IF NOT EXISTS" in installer
     assert "openssl rand" in installer
     assert "chmod 0640 /etc/krit-bot/krit-bot.env" in installer
+    assert "/usr/local/sbin/krit-restore-dispatch" in installer
     assert "systemctl enable --now krit-bot.service" in installer
     assert "curl --fail" in installer
     assert "/var/lib/krit/.installed" in installer
@@ -57,6 +77,7 @@ def test_server_package_builder_and_beginner_restore_guide_cover_required_assets
         "deploy/krit-restore-rollback.service",
         "deploy/krit-restore-delete.service",
         "deploy/krit-restore.sudoers",
+        "deploy/krit_restore_dispatch.py",
         "deploy/krit_restore_helper.py",
         "deploy/nginx-krit.conf",
         ".env.example",
