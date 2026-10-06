@@ -34,6 +34,10 @@ QFrame#workspaceHeader { background: transparent; border: 0; }
 QFrame#controlPanel {
     background: #f8faff; border: 1px solid #e1e7f0; border-radius: 9px;
 }
+QLabel#statusCard {
+    background: white; color: #27364d; border: 1px solid #dde5ef;
+    border-radius: 7px; padding: 9px 11px; min-height: 42px;
+}
 QFrame#accessDeniedCard {
     background: white; border: 1px solid #dfe6f0; border-radius: 14px;
 }
@@ -68,6 +72,17 @@ QTableWidget {
     background: white; alternate-background-color: #f8faff;
     border: 1px solid #e2e7ef; border-radius: 8px; outline: 0;
     selection-background-color: #e6efff; selection-color: #172033;
+}
+QScrollArea#administrationScroll, QWidget#administrationContent {
+    background: transparent; border: 0;
+}
+QTreeWidget#serverStatusDetails {
+    background: white; alternate-background-color: #f8faff;
+    border: 1px solid #e2e7ef; border-radius: 8px; outline: 0;
+    selection-background-color: #e6efff; selection-color: #172033;
+}
+QTreeWidget#serverStatusDetails::item {
+    min-height: 24px; padding: 3px 6px; border-bottom: 1px solid #edf0f5;
 }
 QListWidget {
     background: white; alternate-background-color: #f8faff;

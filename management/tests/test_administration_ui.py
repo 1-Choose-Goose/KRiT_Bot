@@ -40,11 +40,56 @@ class FakeAdministrationApi:
     def system_status(self) -> dict:
         self.status_calls += 1
         return {
-            "server": {"hostname": "krit-server"},
-            "database": {"available": True},
-            "bot": {"running": True},
-            "queues": {"pending": 0, "failed": 0},
-            "backups": {"last_backup_at": None},
+            "collected_at": "2026-10-06T18:00:00+00:00",
+            "server": {
+                "hostname": "krit-server",
+                "os": "Linux",
+                "kernel": "6.17.0",
+                "python_version": "3.14.4",
+                "krit_version": "0.4.0",
+                "system_uptime_seconds": 90061,
+                "process_uptime_seconds": 3661,
+            },
+            "resources": {
+                "logical_cpus": 4,
+                "load_average": [0.1, 0.2, 0.3],
+                "memory": {
+                    "total_bytes": 8 * 1024**3,
+                    "used_bytes": 3 * 1024**3,
+                    "available_bytes": 5 * 1024**3,
+                    "used_percent": 37.5,
+                },
+                "disk": {
+                    "total_bytes": 100 * 1024**3,
+                    "used_bytes": 40 * 1024**3,
+                    "free_bytes": 60 * 1024**3,
+                    "used_percent": 40.0,
+                },
+            },
+            "api": {"available": True, "uptime_seconds": 3661},
+            "database": {
+                "available": True,
+                "version": "PostgreSQL 18.6",
+                "revision": "20261004_administration_v7",
+                "active_connections": 3,
+                "databases": [{"name": "krit_bot", "size_bytes": 13_383_359}],
+            },
+            "bot": {
+                "available": True,
+                "running": True,
+                "mode": "webhook",
+                "last_success_at": "2026-10-06T17:59:57+00:00",
+                "last_error": None,
+            },
+            "queues": {"pending": 0, "processing": 1, "failed": 0},
+            "backups": {
+                "last_backup_at": None,
+                "last_result": "not_started",
+                "trusted_count": 0,
+                "suspicious_count": 0,
+                "safety_set_pending": False,
+                "free_bytes": 60 * 1024**3,
+            },
         }
 
     def administration_users(self) -> list:
@@ -88,6 +133,33 @@ def test_navigation_respects_roles_and_admin_status_runs_only_while_visible(
     window.main_nav.setCurrentRow(0)
     assert not window.administration_page.status_timer.isActive()
     window.close()
+    app.processEvents()
+
+
+def test_administration_renders_complete_server_information() -> None:
+    app = QApplication.instance() or QApplication([])
+    api = FakeAdministrationApi("superadmin")
+    page = AdministrationPage(api)  # type: ignore[arg-type]
+
+    page._render_status(api.system_status())
+
+    rendered: dict[str, str] = {}
+    for group_index in range(page.status_details.topLevelItemCount()):
+        group = page.status_details.topLevelItem(group_index)
+        for child_index in range(group.childCount()):
+            child = group.child(child_index)
+            rendered[f"{group.text(0)}/{child.text(0)}"] = child.text(1)
+
+    assert rendered["Сервер/Версия КРиТ"] == "0.4.0"
+    assert rendered["Сервер/Время работы ОС"] == "1 д 01:01:01"
+    assert rendered["Ресурсы/Оперативная память"] == "3,0 ГБ из 8,0 ГБ (37,5 %)"
+    assert rendered["Ресурсы/Диск"] == "40,0 ГБ из 100,0 ГБ (40,0 %)"
+    assert rendered["PostgreSQL/Схема базы"] == "20261004_administration_v7"
+    assert rendered["PostgreSQL/База krit_bot"] == "12,8 МБ"
+    assert rendered["MAX-бот/Режим"] == "Webhook"
+    assert "CPU: 4" in page.status_labels["resources"].text()
+
+    page.shutdown()
     app.processEvents()
 
 

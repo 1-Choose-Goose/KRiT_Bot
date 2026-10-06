@@ -10,14 +10,18 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -208,7 +212,18 @@ class AdministrationPage(QWidget):
         self.status_timer.setInterval(15_000)
         self.status_timer.timeout.connect(self.refresh_status)
 
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setObjectName("administrationScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        content.setObjectName("administrationContent")
+        scroll.setWidget(content)
+        outer_layout.addWidget(scroll)
+
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
@@ -218,10 +233,12 @@ class AdministrationPage(QWidget):
         status_title = QLabel("Состояние сервера")
         status_title.setObjectName("sectionTitle")
         status_layout.addWidget(status_title)
-        status_row = QHBoxLayout()
+        status_grid = QGridLayout()
+        status_grid.setSpacing(8)
         self.status_labels: dict[str, QLabel] = {}
         for key, title in (
             ("server", "Сервер"),
+            ("resources", "Ресурсы"),
             ("database", "PostgreSQL"),
             ("bot", "MAX-бот"),
             ("queues", "Очереди"),
@@ -232,8 +249,27 @@ class AdministrationPage(QWidget):
             label.setMinimumWidth(130)
             label.setWordWrap(True)
             self.status_labels[key] = label
-            status_row.addWidget(label, 1)
-        status_layout.addLayout(status_row)
+            index = len(self.status_labels) - 1
+            status_grid.addWidget(label, index // 3, index % 3)
+        status_layout.addLayout(status_grid)
+
+        details_title = QLabel("Подробная информация")
+        details_title.setObjectName("controlGroupLabel")
+        status_layout.addWidget(details_title)
+        self.status_details = QTreeWidget()
+        self.status_details.setObjectName("serverStatusDetails")
+        self.status_details.setColumnCount(2)
+        self.status_details.setHeaderLabels(["Показатель", "Значение"])
+        self.status_details.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.status_details.header().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        self.status_details.setAlternatingRowColors(True)
+        self.status_details.setRootIsDecorated(True)
+        self.status_details.setMaximumHeight(235)
+        status_layout.addWidget(self.status_details)
         layout.addWidget(status_card)
 
         users_card = QFrame()
@@ -398,24 +434,60 @@ class AdministrationPage(QWidget):
 
     def _render_status(self, payload: dict[str, Any]) -> None:
         server = payload.get("server") or {}
+        resources = payload.get("resources") or {}
+        memory = resources.get("memory") or {}
+        disk = resources.get("disk") or {}
+        api = payload.get("api") or {}
         database = payload.get("database") or {}
         bot = payload.get("bot") or {}
         queues = payload.get("queues") or {}
         backups = payload.get("backups") or {}
         self.status_labels["server"].setText(
-            f"Сервер\n{server.get('hostname', 'Недоступно')}"
+            f"Сервер\n{server.get('hostname', 'Недоступно')} · "
+            f"КРиТ {server.get('krit_version', '—')}"
+        )
+        self.status_labels["resources"].setText(
+            "Ресурсы\n"
+            f"CPU: {resources.get('logical_cpus', '—')} · "
+            f"RAM: {self._format_percent(memory.get('used_percent'))} · "
+            f"Диск: {self._format_percent(disk.get('used_percent'))}"
         )
         self.status_labels["database"].setText(
-            "PostgreSQL\nРаботает" if database.get("available") else "PostgreSQL\nНедоступно"
+            "PostgreSQL\n"
+            + (
+                f"Работает · подключений: {database.get('active_connections', '—')}"
+                if database.get("available")
+                else "Недоступно"
+            )
         )
         self.status_labels["bot"].setText(
-            "MAX-бот\nРаботает" if bot.get("running") else "MAX-бот\nОстановлен"
+            "MAX-бот\n"
+            + (
+                f"Работает · {self._bot_mode(bot.get('mode'))}"
+                if bot.get("running")
+                else "Остановлен"
+            )
         )
         self.status_labels["queues"].setText(
-            f"Очереди\nОжидают: {queues.get('pending', 0)} · Ошибки: {queues.get('failed', 0)}"
+            f"Очереди\nОжидают: {queues.get('pending', 0)} · "
+            f"В работе: {queues.get('processing', 0)} · Ошибки: {queues.get('failed', 0)}"
         )
         self.status_labels["backups"].setText(
-            f"Резервные копии\nПоследняя: {backups.get('last_backup_at') or 'ещё нет'}"
+            "Резервные копии\n"
+            f"Доверенных: {backups.get('trusted_count', 0)} · "
+            f"Последняя: {self._format_timestamp(backups.get('last_backup_at'))}"
+        )
+        self._render_status_details(
+            payload=payload,
+            server=server,
+            resources=resources,
+            memory=memory,
+            disk=disk,
+            api=api,
+            database=database,
+            bot=bot,
+            queues=queues,
+            backups=backups,
         )
         safety_pending = bool(backups.get("safety_set_pending"))
         self.safety_label.setText(
@@ -425,6 +497,172 @@ class AdministrationPage(QWidget):
         )
         self.rollback_safety_button.setEnabled(safety_pending)
         self.delete_safety_button.setEnabled(safety_pending)
+
+    @staticmethod
+    def _format_bytes(value: object) -> str:
+        if not isinstance(value, (int, float)):
+            return "Недоступно"
+        size = float(value)
+        for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+            if abs(size) < 1024 or unit == "ТБ":
+                decimals = 0 if unit == "Б" else 1
+                return f"{size:.{decimals}f}".replace(".", ",") + f" {unit}"
+            size /= 1024
+        return "Недоступно"
+
+    @staticmethod
+    def _format_percent(value: object) -> str:
+        if not isinstance(value, (int, float)):
+            return "—"
+        return f"{float(value):.1f}".replace(".", ",") + " %"
+
+    @staticmethod
+    def _format_duration(value: object) -> str:
+        if not isinstance(value, (int, float)):
+            return "Недоступно"
+        seconds = max(0, int(value))
+        days, remainder = divmod(seconds, 86_400)
+        hours, remainder = divmod(remainder, 3_600)
+        minutes, seconds = divmod(remainder, 60)
+        time_part = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"{days} д {time_part}" if days else time_part
+
+    @staticmethod
+    def _format_timestamp(value: object) -> str:
+        if not value:
+            return "ещё нет"
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed.astimezone().strftime("%d.%m.%Y %H:%M:%S")
+        except ValueError:
+            return str(value)
+
+    @staticmethod
+    def _bot_mode(value: object) -> str:
+        return {"webhook": "Webhook", "polling": "Polling"}.get(str(value), "—")
+
+    @staticmethod
+    def _availability(value: object) -> str:
+        return "Работает" if value else "Недоступно"
+
+    def _add_status_group(
+        self, title: str, values: list[tuple[str, object]]
+    ) -> None:
+        group = QTreeWidgetItem([title, ""])
+        font = group.font(0)
+        font.setBold(True)
+        group.setFont(0, font)
+        for name, value in values:
+            QTreeWidgetItem(group, [name, str(value)])
+        self.status_details.addTopLevelItem(group)
+        group.setExpanded(True)
+
+    def _render_status_details(
+        self,
+        *,
+        payload: dict[str, Any],
+        server: dict[str, Any],
+        resources: dict[str, Any],
+        memory: dict[str, Any],
+        disk: dict[str, Any],
+        api: dict[str, Any],
+        database: dict[str, Any],
+        bot: dict[str, Any],
+        queues: dict[str, Any],
+        backups: dict[str, Any],
+    ) -> None:
+        self.status_details.clear()
+        load_average = resources.get("load_average")
+        load_text = (
+            " / ".join(str(value).replace(".", ",") for value in load_average)
+            if isinstance(load_average, list)
+            else "Недоступно"
+        )
+        self._add_status_group(
+            "Сервер",
+            [
+                ("Имя", server.get("hostname", "Недоступно")),
+                ("Операционная система", server.get("os", "Недоступно")),
+                ("Ядро", server.get("kernel", "Недоступно")),
+                ("Python", server.get("python_version", "Недоступно")),
+                ("Версия КРиТ", server.get("krit_version", "Недоступно")),
+                ("Время работы ОС", self._format_duration(server.get("system_uptime_seconds"))),
+                ("Время работы КРиТ", self._format_duration(server.get("process_uptime_seconds"))),
+                ("Данные получены", self._format_timestamp(payload.get("collected_at"))),
+            ],
+        )
+        self._add_status_group(
+            "Ресурсы",
+            [
+                ("Логические процессоры", resources.get("logical_cpus", "Недоступно")),
+                ("Средняя нагрузка (1 / 5 / 15 мин)", load_text),
+                (
+                    "Оперативная память",
+                    f"{self._format_bytes(memory.get('used_bytes'))} из "
+                    f"{self._format_bytes(memory.get('total_bytes'))} "
+                    f"({self._format_percent(memory.get('used_percent'))})",
+                ),
+                ("Свободная оперативная память", self._format_bytes(memory.get("available_bytes"))),
+                (
+                    "Диск",
+                    f"{self._format_bytes(disk.get('used_bytes'))} из "
+                    f"{self._format_bytes(disk.get('total_bytes'))} "
+                    f"({self._format_percent(disk.get('used_percent'))})",
+                ),
+                ("Свободно на диске", self._format_bytes(disk.get("free_bytes"))),
+            ],
+        )
+        database_values: list[tuple[str, object]] = [
+            ("Состояние", self._availability(database.get("available"))),
+            ("Версия", database.get("version", "Недоступно")),
+            ("Схема базы", database.get("revision", "Недоступно")),
+            ("Активные подключения", database.get("active_connections", "Недоступно")),
+        ]
+        for item in database.get("databases") or []:
+            if isinstance(item, dict):
+                database_values.append(
+                    (
+                        f"База {item.get('name', 'без имени')}",
+                        self._format_bytes(item.get("size_bytes")),
+                    )
+                )
+        self._add_status_group("PostgreSQL", database_values)
+        self._add_status_group(
+            "API",
+            [
+                ("Состояние", self._availability(api.get("available"))),
+                ("Время работы", self._format_duration(api.get("uptime_seconds"))),
+            ],
+        )
+        self._add_status_group(
+            "MAX-бот",
+            [
+                ("Состояние", "Работает" if bot.get("running") else "Остановлен"),
+                ("Доступность", self._availability(bot.get("available"))),
+                ("Режим", self._bot_mode(bot.get("mode"))),
+                ("Последняя успешная операция", self._format_timestamp(bot.get("last_success_at"))),
+                ("Последняя ошибка", bot.get("last_error") or "Нет"),
+            ],
+        )
+        self._add_status_group(
+            "Очереди",
+            [
+                ("Ожидают", queues.get("pending", 0)),
+                ("В обработке", queues.get("processing", 0)),
+                ("С ошибкой", queues.get("failed", 0)),
+            ],
+        )
+        self._add_status_group(
+            "Резервные копии",
+            [
+                ("Последняя копия", self._format_timestamp(backups.get("last_backup_at"))),
+                ("Последний результат", backups.get("last_result", "Недоступно")),
+                ("Доверенные комплекты", backups.get("trusted_count", 0)),
+                ("Подозрительные комплекты", backups.get("suspicious_count", 0)),
+                ("Ожидает решения", "Да" if backups.get("safety_set_pending") else "Нет"),
+                ("Свободно в хранилище", self._format_bytes(backups.get("free_bytes"))),
+            ],
+        )
 
     def refresh_users(self) -> None:
         self._run(self.api.administration_users, self._render_users)
