@@ -74,6 +74,13 @@ def _callback_message_without_keyboard(callback: IncomingCallback) -> dict[str, 
     return message
 
 
+def _positive_callback_id(value: str) -> int | None:
+    if not value.isdecimal():
+        return None
+    parsed = int(value)
+    return parsed if parsed > 0 else None
+
+
 def parse_message_created(update: dict[str, Any]) -> IncomingMessage | None:
     if update.get("update_type") != "message_created":
         return None
@@ -348,15 +355,18 @@ class EchoHandler:
 
     async def _handle_callback(self, callback: IncomingCallback) -> None:
         parts = callback.payload.split(":")
+        request_id = _positive_callback_id(parts[1]) if len(parts) > 1 else None
         if parts == ["registration", "check"]:
             await self._handle_registration_callback(callback)
             return
         if len(parts) == 3 and parts[0] == "reason" and parts[2] in {"write", "skip"}:
-            await self._handle_reason_callback(callback, int(parts[1]), parts[2])
-            return
+            if request_id is not None:
+                await self._handle_reason_callback(callback, request_id, parts[2])
+                return
         if len(parts) == 3 and parts[0] == "interaction" and parts[2] == "partial":
-            await self._handle_partial_choice(callback, int(parts[1]))
-            return
+            if request_id is not None:
+                await self._handle_partial_choice(callback, request_id)
+                return
         lesson_answer = (
             len(parts) == 5
             and parts[0] == "interaction"
@@ -368,7 +378,12 @@ class EchoHandler:
             and parts[0] == "interaction"
             and parts[2] in {"yes", "no"}
         )
-        if not lesson_answer and not whole_answer:
+        lesson_id = _positive_callback_id(parts[3]) if lesson_answer else None
+        if (
+            (not lesson_answer and not whole_answer)
+            or request_id is None
+            or (lesson_answer and lesson_id is None)
+        ):
             await self._api.answer_callback(
                 callback_id=callback.callback_id,
                 notification="Кнопка больше не поддерживается",
@@ -386,7 +401,7 @@ class EchoHandler:
                     notification="Доступ к боту отключён. Обратитесь к администратору.",
                 )
                 return
-            request = await session.get(InteractionRequest, int(parts[1]))
+            request = await session.get(InteractionRequest, request_id)
             if request is None or request.recipient_person_id != person_id:
                 await session.commit()
                 await self._api.answer_callback(
@@ -398,7 +413,6 @@ class EchoHandler:
                 answer = parts[4] if lesson_answer else parts[2]
                 lesson_answers: dict[str, str] | None = None
                 if lesson_answer:
-                    lesson_id = int(parts[3])
                     current_response = await session.scalar(
                         select(InteractionResponse).where(
                             InteractionResponse.request_id == request.id,

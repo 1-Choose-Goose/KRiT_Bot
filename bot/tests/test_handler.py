@@ -316,6 +316,35 @@ async def test_poll_button_with_root_user_saves_answer_and_acknowledges_callback
     await engine.dispose()
 
 
+async def test_malformed_and_stale_callbacks_are_harmless() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    api = FakeApi()
+    handler = EchoHandler(sessions=sessions, api=api)  # type: ignore[arg-type]
+
+    malformed = (
+        ("reason:not-a-number:skip", "bad-reason"),
+        ("interaction:not-a-number:partial", "bad-partial"),
+        ("interaction:not-a-number:yes", "bad-whole"),
+        ("interaction:1:lesson:not-a-number:yes", "bad-lesson"),
+    )
+    for payload, callback_id in malformed:
+        await handler.handle(callback_update_with_root_user(42, payload, callback_id))
+
+    await handler.handle(
+        callback_update_with_root_user(42, "interaction:999999:yes", "stale")
+    )
+
+    assert api.callback_answers[:4] == [
+        (callback_id, "Кнопка больше не поддерживается", None)
+        for _payload, callback_id in malformed
+    ]
+    assert api.callback_answers[-1][0] == "stale"
+    await engine.dispose()
+
+
 async def test_disabled_person_cannot_answer_old_callback() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
