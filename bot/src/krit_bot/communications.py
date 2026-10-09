@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import delete, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1077,15 +1077,27 @@ async def cleanup_communication_history(
 ) -> int:
     """Delete only disposable chat history, never business confirmations/audit."""
     cutoff = now - timedelta(days=30)
+    active_request = exists().where(
+        InteractionRequest.id == CommunicationMessage.interaction_request_id,
+        InteractionRequest.status.in_(["draft", "active"]),
+    )
+    active_job = exists().where(
+        NotificationJob.id == CommunicationMessage.outbox_job_id,
+        NotificationJob.status.in_(["pending", "processing", "retry"]),
+    )
+    active_campaign = exists().where(
+        CommunicationCampaign.id == CommunicationMessage.campaign_id,
+        CommunicationCampaign.status.in_(["draft", "scheduled", "sending"]),
+    )
     rows = list(
         (
             await session.execute(
                 select(CommunicationMessage.id, CommunicationMessage.person_id)
                 .where(
-                    or_(
-                        CommunicationMessage.created_at < cutoff,
-                        CommunicationMessage.delivery_status.in_(["failed", "unavailable"]),
-                    )
+                    CommunicationMessage.created_at < cutoff,
+                    ~active_request,
+                    ~active_job,
+                    ~active_campaign,
                 )
                 .order_by(CommunicationMessage.id)
                 .limit(limit)

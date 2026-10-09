@@ -1259,20 +1259,22 @@ async def test_history_cleanup_removes_undelivered_messages_and_repairs_threads(
             delivery_status="sent",
         )
         delivered.created_at = now - timedelta(minutes=2)
-        await record_message(
+        failed = await record_message(
             session,
             person_id=delivered_person.id,
             direction="outbound",
             text="Не доставлено",
             delivery_status="failed",
         )
-        await record_message(
+        failed.created_at = now - timedelta(days=31)
+        unavailable = await record_message(
             session,
             person_id=unavailable_person.id,
             direction="outbound",
             text="MAX недоступен",
             delivery_status="unavailable",
         )
+        unavailable.created_at = now - timedelta(days=31)
         await record_message(
             session,
             person_id=command_person.id,
@@ -1281,13 +1283,14 @@ async def test_history_cleanup_removes_undelivered_messages_and_repairs_threads(
             delivery_status="received",
             message_type="command",
         )
-        await record_message(
+        unavailable_after_command = await record_message(
             session,
             person_id=command_person.id,
             direction="outbound",
             text="MAX недоступен после команды",
             delivery_status="unavailable",
         )
+        unavailable_after_command.created_at = now - timedelta(days=31)
         await session.flush()
 
         assert await cleanup_communication_history(session, now=now) == 3
@@ -1307,6 +1310,77 @@ async def test_history_cleanup_removes_undelivered_messages_and_repairs_threads(
         command_thread = await session.get(CommunicationThread, command_person.id)
         assert command_thread is not None
         assert command_thread.last_message_at is None
+    await engine.dispose()
+
+
+async def test_history_cleanup_keeps_recent_failures_and_active_process_references(
+    tmp_path,
+) -> None:
+    engine, sessions = await _database(tmp_path)
+    now = utcnow()
+    async with sessions() as session:
+        person = Person(full_name="Получатель Очереди", phone="+79000000066")
+        session.add(person)
+        await session.flush()
+        request = InteractionRequest(
+            request_type="yes_no",
+            question="Активный вопрос",
+            recipient_person_id=person.id,
+            recipient_context="student",
+            subject_person_id=person.id,
+            status="active",
+        )
+        job = NotificationJob(
+            dedupe_key="cleanup:active-job",
+            event_type="test",
+            recipient_person_id=person.id,
+            scheduled_at=now,
+            status="retry",
+            payload={"text": "Активная доставка"},
+        )
+        session.add_all([request, job])
+        await session.flush()
+        recent_failed = await record_message(
+            session,
+            person_id=person.id,
+            direction="outbound",
+            text="Недавняя ошибка",
+            delivery_status="failed",
+        )
+        active_job = await record_message(
+            session,
+            person_id=person.id,
+            direction="outbound",
+            text="Старая активная доставка",
+            delivery_status="failed",
+            outbox_job_id=job.id,
+        )
+        active_request = await record_message(
+            session,
+            person_id=person.id,
+            direction="outbound",
+            text="Старый активный опрос",
+            delivery_status="sent",
+            interaction_request_id=request.id,
+        )
+        disposable = await record_message(
+            session,
+            person_id=person.id,
+            direction="outbound",
+            text="Старая завершённая запись",
+            delivery_status="unavailable",
+        )
+        for message in (active_job, active_request, disposable):
+            message.created_at = now - timedelta(days=31)
+        await session.flush()
+
+        assert await cleanup_communication_history(session, now=now) == 1
+        remaining = set(await session.scalars(select(CommunicationMessage.text)))
+        assert remaining == {
+            recent_failed.text,
+            active_job.text,
+            active_request.text,
+        }
     await engine.dispose()
 
 
