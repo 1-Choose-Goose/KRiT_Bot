@@ -8,10 +8,11 @@ import uuid
 import zipfile
 from collections.abc import Awaitable, Callable
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.engine import make_url
@@ -22,6 +23,7 @@ from .db import EXPECTED_ALEMBIC_REVISION
 SubprocessRunner = Callable[[list[str], dict[str, str]], Awaitable[None]]
 MetadataCollector = Callable[[str], Awaitable[dict[str, Any]]]
 ConflictChecker = Callable[[], bool]
+log = structlog.get_logger()
 
 
 class BackupBusyError(RuntimeError):
@@ -106,7 +108,14 @@ class BackupService:
             {"PGPASSWORD": str(url.password or "")},
         )
 
-    async def create(self) -> dict[str, Any]:
+    async def create(
+        self,
+        *,
+        kind: str = "manual",
+        created_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        if kind not in {"manual", "automatic"}:
+            raise ValueError("Invalid backup kind")
         if self.lock.locked() or self.conflict_checker():
             raise BackupBusyError
         async with self.lock:
@@ -114,58 +123,64 @@ class BackupService:
                 raise BackupBusyError
             self.root.mkdir(parents=True, exist_ok=True)
             backup_id = uuid.uuid4().hex
-            created_at = datetime.now(UTC)
+            created_at = created_at or datetime.now(UTC)
             final = self.root / f"{backup_id}.backup"
             partial = final.with_suffix(".backup.part")
             url = make_url(self.database_url)
-            with tempfile.TemporaryDirectory(dir=self.root) as temporary:
-                staging = Path(temporary)
-                database_files: list[tuple[Path, str]] = []
-                if url.drivername.startswith("sqlite"):
-                    source = Path(str(url.database))
-                    destination = staging / "krit_bot.sqlite"
-                    await self._sqlite_dump(source, destination)
-                    database_files.append((destination, "krit_bot"))
-                else:
-                    for database_name in self.database_names:
-                        destination = staging / f"{database_name}.dump"
-                        await self._postgres_dump(database_name, destination)
-                        database_files.append((destination, database_name))
-                databases = []
-                for path, database_name in database_files:
-                    collected = (
-                        await self.metadata_collector(database_name)
-                        if self.metadata_collector is not None
-                        else {}
-                    )
-                    databases.append({
-                        "name": database_name,
-                        "filename": path.name,
-                        "size": path.stat().st_size,
-                        "sha256": _sha256(path),
-                        "critical_counts": collected.get("critical_counts", {}),
-                        "audit_watermark": collected.get("audit_watermark"),
-                    })
-                manifest = {
-                    "format": 1,
-                    "id": backup_id,
-                    "created_at": created_at.isoformat(),
-                    "schema_version": EXPECTED_ALEMBIC_REVISION,
-                    "archive_sha256": None,
-                    "databases": databases,
-                }
-                with zipfile.ZipFile(
-                    partial, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
-                ) as archive:
-                    archive.writestr(
-                        "manifest.json",
-                        json.dumps(manifest, ensure_ascii=False, sort_keys=True),
-                    )
-                    for path, _database_name in database_files:
-                        archive.write(path, path.name)
-            os.replace(partial, final)
+            try:
+                with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+                    staging = Path(temporary)
+                    database_files: list[tuple[Path, str]] = []
+                    if url.drivername.startswith("sqlite"):
+                        source = Path(str(url.database))
+                        destination = staging / "krit_bot.sqlite"
+                        await self._sqlite_dump(source, destination)
+                        database_files.append((destination, "krit_bot"))
+                    else:
+                        for database_name in self.database_names:
+                            destination = staging / f"{database_name}.dump"
+                            await self._postgres_dump(database_name, destination)
+                            database_files.append((destination, database_name))
+                    databases = []
+                    for path, database_name in database_files:
+                        collected = (
+                            await self.metadata_collector(database_name)
+                            if self.metadata_collector is not None
+                            else {}
+                        )
+                        databases.append({
+                            "name": database_name,
+                            "filename": path.name,
+                            "size": path.stat().st_size,
+                            "sha256": _sha256(path),
+                            "critical_counts": collected.get("critical_counts", {}),
+                            "audit_watermark": collected.get("audit_watermark"),
+                        })
+                    manifest = {
+                        "format": 1,
+                        "id": backup_id,
+                        "kind": kind,
+                        "created_at": created_at.isoformat(),
+                        "schema_version": EXPECTED_ALEMBIC_REVISION,
+                        "archive_sha256": None,
+                        "databases": databases,
+                    }
+                    with zipfile.ZipFile(
+                        partial, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
+                    ) as archive:
+                        archive.writestr(
+                            "manifest.json",
+                            json.dumps(manifest, ensure_ascii=False, sort_keys=True),
+                        )
+                        for path, _database_name in database_files:
+                            archive.write(path, path.name)
+                os.replace(partial, final)
+            except BaseException:
+                partial.unlink(missing_ok=True)
+                raise
             info = {
                 "id": backup_id,
+                "kind": kind,
                 "size": final.stat().st_size,
                 "sha256": _sha256(final),
                 "schema_version": EXPECTED_ALEMBIC_REVISION,
@@ -189,6 +204,131 @@ class BackupService:
         if not archive.is_file() or not metadata.is_file():
             return None
         return json.loads(metadata.read_text(encoding="utf-8")), archive
+
+    def verify(self, backup_id: str) -> bool:
+        found = self.get(backup_id)
+        if found is None:
+            return False
+        metadata, archive_path = found
+        try:
+            if _sha256(archive_path) != metadata["sha256"]:
+                return False
+            with zipfile.ZipFile(archive_path) as archive:
+                if archive.testzip() is not None:
+                    return False
+                manifest = json.loads(archive.read("manifest.json"))
+                if manifest.get("id") != backup_id:
+                    return False
+                for database in metadata.get("databases", []):
+                    content = archive.read(str(database["filename"]))
+                    if hashlib.sha256(content).hexdigest() != database["sha256"]:
+                        return False
+        except (KeyError, OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError):
+            return False
+        return True
+
+    def automatic_backups(self) -> list[dict[str, Any]]:
+        backups: list[dict[str, Any]] = []
+        if not self.root.exists():
+            return backups
+        for metadata_path in self.root.glob("*.json"):
+            try:
+                data = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if data.get("kind") != "automatic" or self.get(metadata_path.stem) is None:
+                    continue
+                data["_created_at"] = datetime.fromisoformat(data["created_at"])
+                backups.append(data)
+            except (KeyError, OSError, ValueError, json.JSONDecodeError):
+                continue
+        return sorted(backups, key=lambda item: item["_created_at"], reverse=True)
+
+    def rotate_automatic(
+        self,
+        *,
+        daily_retention: int = 7,
+        weekly_retention: int = 4,
+    ) -> list[str]:
+        backups = self.automatic_backups()
+        if not backups:
+            return []
+        keep: set[str] = {str(backups[0]["id"])}
+        daily_seen: set[object] = set()
+        weekly_seen: set[tuple[int, int]] = set()
+        for item in backups:
+            created_at = item["_created_at"]
+            day = created_at.date()
+            if len(daily_seen) < daily_retention and day not in daily_seen:
+                daily_seen.add(day)
+                keep.add(str(item["id"]))
+            iso = created_at.isocalendar()
+            week = (iso.year, iso.week)
+            if len(weekly_seen) < weekly_retention and week not in weekly_seen:
+                weekly_seen.add(week)
+                keep.add(str(item["id"]))
+        removed: list[str] = []
+        for item in backups:
+            backup_id = str(item["id"])
+            if backup_id in keep:
+                continue
+            archive = self.root / f"{backup_id}.backup"
+            metadata = self.root / f"{backup_id}.json"
+            archive.unlink(missing_ok=True)
+            metadata.unlink(missing_ok=True)
+            removed.append(backup_id)
+        return removed
+
+
+class BackupScheduler:
+    def __init__(
+        self,
+        service: BackupService,
+        *,
+        interval_seconds: float = 24 * 60 * 60,
+        initial_delay_seconds: float = 5 * 60,
+        daily_retention: int = 7,
+        weekly_retention: int = 4,
+    ) -> None:
+        self.service = service
+        self.interval_seconds = interval_seconds
+        self.initial_delay_seconds = initial_delay_seconds
+        self.daily_retention = daily_retention
+        self.weekly_retention = weekly_retention
+
+    def seconds_until_due(self, now: datetime) -> float:
+        backups = self.service.automatic_backups()
+        if not backups:
+            return self.initial_delay_seconds
+        last_created = backups[0]["_created_at"]
+        due_at = last_created + timedelta(seconds=self.interval_seconds)
+        return max(0.0, (due_at - now).total_seconds())
+
+    async def run_once_if_due(self, *, now: datetime | None = None) -> bool:
+        current = now or datetime.now(UTC)
+        if self.seconds_until_due(current) > 0:
+            return False
+        info = await self.service.create(kind="automatic", created_at=current)
+        if not self.service.verify(str(info["id"])):
+            raise RuntimeError("Automatic backup integrity verification failed")
+        self.service.rotate_automatic(
+            daily_retention=self.daily_retention,
+            weekly_retention=self.weekly_retention,
+        )
+        return True
+
+    async def run(self) -> None:
+        while True:
+            delay = self.seconds_until_due(datetime.now(UTC))
+            if delay > 0:
+                await asyncio.sleep(delay)
+            try:
+                await self.run_once_if_due()
+            except asyncio.CancelledError:
+                raise
+            except BackupBusyError:
+                await asyncio.sleep(60)
+            except Exception:
+                log.exception("automatic_backup_failed")
+                await asyncio.sleep(5 * 60)
 
 
 def create_backup_router(

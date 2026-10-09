@@ -22,7 +22,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .administration import create_administration_router
 from .auth import AdminPrincipal, decode_access_token, issue_access_token, normalize_admin_username
-from .backups import BackupService, create_backup_router
+from .backups import BackupScheduler, BackupService, create_backup_router
 from .communication_models import CommunicationMessage
 from .communications import create_communications_router, run_communications_maintenance
 from .config import Settings
@@ -282,6 +282,13 @@ def create_app(
         root=settings.backup_root,
         metadata_collector=collect_backup_metadata,
     )
+    backup_scheduler = BackupScheduler(
+        backup_service,
+        interval_seconds=settings.backup_interval_seconds,
+        initial_delay_seconds=settings.backup_initial_delay_seconds,
+        daily_retention=settings.backup_daily_retention,
+        weekly_retention=settings.backup_weekly_retention,
+    )
 
     async def systemd_restore_dispatcher(operation_id: str) -> dict[str, Any]:
         process = await asyncio.create_subprocess_exec(
@@ -349,6 +356,7 @@ def create_app(
     vk_long_poll_task: asyncio.Task[None] | None = None
     learning_notifications_task: asyncio.Task[None] | None = None
     communications_task: asyncio.Task[None] | None = None
+    automatic_backup_task: asyncio.Task[None] | None = None
     syndication_worker: SyndicationWorker | None = None
     invalid_password_hash = password_hash.hash("invalid-password")
 
@@ -606,9 +614,13 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         nonlocal polling_task, syndication_task, vk_long_poll_task, syndication_worker
-        nonlocal learning_notifications_task, communications_task
+        nonlocal learning_notifications_task, communications_task, automatic_backup_task
         await ensure_schema(engine)
         await ensure_bootstrap_admin()
+        if settings.automatic_backups_enabled:
+            automatic_backup_task = asyncio.create_task(
+                backup_scheduler.run(), name="automatic-backups"
+            )
         await start_max_workers()
         if settings.vk_syndication_enabled:
             required = {
@@ -671,6 +683,10 @@ def create_app(
             await asyncio.gather(syndication_task, return_exceptions=True)
         if syndication_worker is not None:
             await syndication_worker.close()
+        if automatic_backup_task is not None:
+            automatic_backup_task.cancel()
+            await asyncio.gather(automatic_backup_task, return_exceptions=True)
+            automatic_backup_task = None
         await stop_max_workers()
         await api.close()
         await engine.dispose()

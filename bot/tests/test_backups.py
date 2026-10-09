@@ -2,13 +2,14 @@ import asyncio
 import io
 import json
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
 import pytest
 from pydantic import SecretStr
 
-from krit_bot.backups import BackupBusyError, BackupService
+from krit_bot.backups import BackupBusyError, BackupScheduler, BackupService
 from krit_bot.config import Settings
 from krit_bot.webhook import create_app
 
@@ -95,3 +96,73 @@ async def test_backup_refuses_to_start_while_restore_is_active(tmp_path) -> None
 
     with pytest.raises(BackupBusyError):
         await service.create()
+
+
+@pytest.mark.asyncio
+async def test_automatic_backup_is_verified_and_rotation_keeps_daily_weekly_and_manual(
+    tmp_path,
+) -> None:
+    database = tmp_path / "krit.db"
+    database.touch()
+    root = tmp_path / "backups"
+    service = BackupService(
+        database_url=f"sqlite+aiosqlite:///{database.as_posix()}",
+        database_names=("krit_bot",),
+        root=root,
+    )
+    now = datetime(2026, 10, 9, 4, tzinfo=UTC)
+    automatic_ids: list[str] = []
+    for days_ago in range(35):
+        info = await service.create(kind="automatic", created_at=now - timedelta(days=days_ago))
+        automatic_ids.append(info["id"])
+    manual = await service.create(kind="manual", created_at=now - timedelta(days=40))
+
+    assert service.verify(automatic_ids[0]) is True
+    removed = service.rotate_automatic(daily_retention=7, weekly_retention=4)
+    remaining = {
+        path.stem for path in root.glob("*.json") if service.get(path.stem) is not None
+    }
+
+    assert automatic_ids[0] in remaining
+    assert set(automatic_ids[:7]).issubset(remaining)
+    assert manual["id"] in remaining
+    assert removed
+    assert not any(root.glob("*.part"))
+
+
+@pytest.mark.asyncio
+async def test_scheduler_uses_persisted_last_backup_after_restart(tmp_path) -> None:
+    database = tmp_path / "krit.db"
+    database.touch()
+    service = BackupService(
+        database_url=f"sqlite+aiosqlite:///{database.as_posix()}",
+        database_names=("krit_bot",),
+        root=tmp_path / "backups",
+    )
+    now = datetime(2026, 10, 9, 10, tzinfo=UTC)
+    await service.create(kind="automatic", created_at=now - timedelta(hours=2))
+    scheduler = BackupScheduler(
+        service,
+        interval_seconds=24 * 60 * 60,
+        initial_delay_seconds=0,
+    )
+
+    assert await scheduler.run_once_if_due(now=now) is False
+    assert await scheduler.run_once_if_due(now=now + timedelta(days=1)) is True
+
+
+@pytest.mark.asyncio
+async def test_failed_backup_removes_partial_archive(tmp_path) -> None:
+    async def failing_runner(_argv: list[str], _env: dict[str, str]) -> None:
+        raise RuntimeError("dump failed")
+
+    service = BackupService(
+        database_url="postgresql+asyncpg://krit:secret@localhost/krit_bot",
+        database_names=("krit_bot",),
+        root=tmp_path,
+        subprocess_runner=failing_runner,
+    )
+
+    with pytest.raises(RuntimeError, match="dump failed"):
+        await service.create()
+    assert not any(tmp_path.glob("*.part"))

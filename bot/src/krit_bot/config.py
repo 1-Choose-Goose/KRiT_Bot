@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     krit_database_names: Annotated[tuple[str, ...], NoDecode] = ("krit_bot",)
     backup_root: Path = Path("./data/backups")
     restore_root: Path = Path("./data/restore")
+    automatic_backups_enabled: bool = True
+    backup_interval_seconds: int = Field(default=24 * 60 * 60, ge=300)
+    backup_initial_delay_seconds: int = Field(default=5 * 60, ge=0)
+    backup_daily_retention: int = Field(default=7, ge=1, le=31)
+    backup_weekly_retention: int = Field(default=4, ge=1, le=52)
 
     @field_validator("krit_database_names", mode="before")
     @classmethod
