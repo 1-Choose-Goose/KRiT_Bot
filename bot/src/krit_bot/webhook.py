@@ -838,13 +838,6 @@ def create_app(
     async def login(payload: LoginPayload, request: Request) -> TokenView:
         username = normalize_admin_username(payload.username)
         address = request.client.host if request.client is not None else "unknown"
-        retry_after = login_rate_limiter.retry_after(username, address)
-        if retry_after is not None:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Слишком много попыток входа. Повторите позже.",
-                headers={"Retry-After": str(retry_after)},
-            )
         async with sessions() as session:
             admin = await session.scalar(
                 select(AdminUser).where(
@@ -853,14 +846,24 @@ def create_app(
             )
         comparison_hash = admin.password_hash if admin is not None else invalid_password_hash
         password_valid = password_hash.verify(payload.password, comparison_hash)
-        if admin is None or not admin.active or not password_valid:
+        if admin is not None and admin.active and password_valid:
+            login_rate_limiter.record_success(username, address)
+            return issue_token(admin)
+
+        retry_after = login_rate_limiter.retry_after(username, address)
+        if retry_after is None:
             login_rate_limiter.record_failure(username, address)
+            retry_after = login_rate_limiter.retry_after(username, address)
+        if retry_after is not None:
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Неверный логин или пароль",
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Слишком много попыток входа. Повторите позже.",
+                headers={"Retry-After": str(retry_after)},
             )
-        login_rate_limiter.record_success(username, address)
-        return issue_token(admin)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Неверный логин или пароль",
+        )
 
     @app.get("/api/v1/auth/me")
     async def auth_me(

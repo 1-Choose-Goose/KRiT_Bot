@@ -93,11 +93,16 @@ async def test_login_returns_generic_401_then_clear_429_without_global_lockout(
                 )
             limited = await client.post(
                 "/api/v1/auth/login",
-                json={"username": "admin", "password": "admin"},
+                json={"username": "admin", "password": "wrong"},
             )
             assert limited.status_code == 429
             assert int(limited.headers["Retry-After"]) > 0
             assert "попыт" in limited.json()["detail"].lower()
+            correct = await client.post(
+                "/api/v1/auth/login",
+                json={"username": "admin", "password": "admin"},
+            )
+            assert correct.status_code == 200
 
         second_transport = httpx.ASGITransport(app=app, client=("10.0.0.2", 1234))
         async with httpx.AsyncClient(
