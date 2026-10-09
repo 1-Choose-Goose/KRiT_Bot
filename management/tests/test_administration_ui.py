@@ -281,6 +281,85 @@ def test_server_role_overrides_legacy_admin_username() -> None:
     app.processEvents()
 
 
+def test_main_snapshot_skips_unchanged_render_and_preserves_selected_person() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeAdministrationApi("administrator"))  # type: ignore[arg-type]
+    window.pool.waitForDone(5_000)
+    app.processEvents()
+    renders = {"people": 0, "attempts": 0, "archive": 0}
+    original_people = window._render_people
+    original_attempts = window._render_attempts
+    original_archive = window._render_archive
+
+    def render_people() -> None:
+        renders["people"] += 1
+        original_people()
+
+    def render_attempts() -> None:
+        renders["attempts"] += 1
+        original_attempts()
+
+    def render_archive() -> None:
+        renders["archive"] += 1
+        original_archive()
+
+    window._render_people = render_people  # type: ignore[method-assign]
+    window._render_attempts = render_attempts  # type: ignore[method-assign]
+    window._render_archive = render_archive  # type: ignore[method-assign]
+    first = {
+        "status": "ok",
+        "people": [
+            {"id": 1, "full_name": "Первый Клиент", "roles": ["student"]},
+            {"id": 2, "full_name": "Выбранный Клиент", "roles": ["student"]},
+        ],
+        "archived_people": [],
+        "access_attempts": [],
+    }
+    window._last_snapshot_payload = None
+    window._loaded(first)
+    all_table = window.people_tables["all"]
+    all_table.setCurrentCell(1, 0)
+
+    window._loaded(dict(first))
+    assert renders == {"people": 1, "attempts": 1, "archive": 1}
+
+    changed = dict(first)
+    changed["people"] = [
+        {"id": 3, "full_name": "Новый Клиент", "roles": ["student"]},
+        *first["people"],
+    ]
+    window._loaded(changed)
+    assert window.visible_people["all"][all_table.currentRow()]["id"] == 2
+    window.close()
+    app.processEvents()
+
+
+def test_stale_main_snapshot_generation_is_ignored() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeAdministrationApi("administrator"))  # type: ignore[arg-type]
+    window.pool.waitForDone(5_000)
+    app.processEvents()
+    window.people = []
+    window._refresh_generation = 2
+    window._refresh_running = True
+
+    window._refresh_finished(
+        None,  # type: ignore[arg-type]
+        {
+            "status": "ok",
+            "people": [{"id": 99, "full_name": "Устаревший", "roles": ["student"]}],
+            "archived_people": [],
+            "access_attempts": [],
+        },
+        generation=1,
+    )
+
+    assert window.people == []
+    assert window._refresh_running is False
+    window.close()
+    app.processEvents()
+
+
 def test_initial_password_dialog_requires_matching_seven_character_password() -> None:
     app = QApplication.instance() or QApplication([])
     dialog = ChangePasswordDialog()

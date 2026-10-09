@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import webbrowser
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,8 @@ class MainWindow(QMainWindow):
         self._workers: set[Worker] = set()
         self._closing = False
         self._refresh_running = False
+        self._refresh_generation = 0
+        self._last_snapshot_payload: dict[str, Any] | None = None
         self._background_jobs = 0
         self._update_progress: QProgressDialog | None = None
         self._seen_notification_ids: set[int] = set()
@@ -638,34 +641,56 @@ class MainWindow(QMainWindow):
         if not silent:
             self._set_connection("Обновление…", "loading")
         worker = Worker(self.api.snapshot)
+        generation = self._refresh_generation
         self._workers.add(worker)
         worker.signals.finished.connect(
-            lambda result, current=worker: self._refresh_finished(current, result)
+            lambda result, current=worker, token=generation: self._refresh_finished(
+                current, result, generation=token
+            )
         )
         worker.signals.failed.connect(
-            lambda message, current=worker: self._refresh_worker_failed(current, message, silent)
+            lambda message, current=worker, token=generation: self._refresh_worker_failed(
+                current, message, silent, generation=token
+            )
         )
         self.pool.start(worker)
 
-    def _refresh_finished(self, worker: Worker, result: object) -> None:
+    def _refresh_finished(
+        self, worker: Worker, result: object, *, generation: int
+    ) -> None:
         self._workers.discard(worker)
+        if generation != self._refresh_generation:
+            self._refresh_running = False
+            return
         if not self._closing:
             self._loaded(result)
 
-    def _refresh_worker_failed(self, worker: Worker, message: str, silent: bool) -> None:
+    def _refresh_worker_failed(
+        self, worker: Worker, message: str, silent: bool, *, generation: int
+    ) -> None:
         self._workers.discard(worker)
+        if generation != self._refresh_generation:
+            self._refresh_running = False
+            return
         if not self._closing:
             self._refresh_failed(message, silent)
 
     def _loaded(self, result: object) -> None:
         self._refresh_running = False
         status_data = result  # type: ignore[assignment]
-        self.people = status_data.get("people", [])
-        self.archived_people = status_data.get("archived_people", [])
-        self.attempts = status_data.get("access_attempts", [])
-        self._render_people()
-        self._render_attempts()
-        self._render_archive()
+        snapshot_payload = {
+            "people": status_data.get("people", []),
+            "archived_people": status_data.get("archived_people", []),
+            "access_attempts": status_data.get("access_attempts", []),
+        }
+        if snapshot_payload != self._last_snapshot_payload:
+            self.people = snapshot_payload["people"]
+            self.archived_people = snapshot_payload["archived_people"]
+            self.attempts = snapshot_payload["access_attempts"]
+            self._render_people()
+            self._render_attempts()
+            self._render_archive()
+            self._last_snapshot_payload = deepcopy(snapshot_payload)
         text = "Бот активен" if status_data.get("status") == "ok" else "Сервер активен"
         self._set_connection(text, "online")
 
@@ -692,6 +717,12 @@ class MainWindow(QMainWindow):
         query = self.people_search.text().casefold().strip()
         query_digits = "".join(character for character in query if character.isdigit())
         status = self.people_status.currentData()
+        selected_ids: dict[str, int] = {}
+        for role_filter, table in self.people_tables.items():
+            row = table.currentRow()
+            current = self.visible_people.get(role_filter, [])
+            if 0 <= row < len(current) and current[row].get("id") is not None:
+                selected_ids[role_filter] = int(current[row]["id"])
         for role_filter, table in self.people_tables.items():
             visible = []
             for person in self.people:
@@ -745,6 +776,18 @@ class MainWindow(QMainWindow):
                         ]
                     ),
                 )
+            selected_id = selected_ids.get(role_filter)
+            if selected_id is not None:
+                selected_row = next(
+                    (
+                        index
+                        for index, person in enumerate(visible)
+                        if int(person.get("id", -1)) == selected_id
+                    ),
+                    -1,
+                )
+                if selected_row >= 0:
+                    table.setCurrentCell(selected_row, 0)
 
     def open_person_notifications(self, person: dict[str, Any]) -> None:
         self._change_section(2)
@@ -1126,6 +1169,7 @@ class MainWindow(QMainWindow):
         self.close()
 
     def _run(self, function, on_success, on_failure=None) -> None:
+        self._refresh_generation += 1
         self._background_jobs += 1
         worker = Worker(function)
         self._workers.add(worker)
@@ -1156,6 +1200,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._closing = True
+        self._refresh_generation += 1
         self.refresh_timer.stop()
         self.notification_timer.stop()
         self.learning_page.shutdown()
