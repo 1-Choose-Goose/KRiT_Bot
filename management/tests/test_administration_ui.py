@@ -312,13 +312,21 @@ def test_main_snapshot_skips_unchanged_render_and_preserves_selected_person() ->
             {"id": 1, "full_name": "Первый Клиент", "roles": ["student"]},
             {"id": 2, "full_name": "Выбранный Клиент", "roles": ["student"]},
         ],
-        "archived_people": [],
-        "access_attempts": [],
+        "archived_people": [
+            {"id": 10, "full_name": "Архив Первый", "roles": ["student"]},
+            {"id": 11, "full_name": "Архив Выбранный", "roles": ["student"]},
+        ],
+        "access_attempts": [
+            {"max_user_id": 100, "display_name": "Запрос Первый"},
+            {"max_user_id": 200, "display_name": "Запрос Выбранный"},
+        ],
     }
     window._last_snapshot_payload = None
     window._loaded(first)
     all_table = window.people_tables["all"]
     all_table.setCurrentCell(1, 0)
+    window.archive_table.setCurrentCell(1, 0)
+    window.attempts_table.setCurrentCell(1, 0)
 
     window._loaded(dict(first))
     assert renders == {"people": 1, "attempts": 1, "archive": 1}
@@ -328,8 +336,21 @@ def test_main_snapshot_skips_unchanged_render_and_preserves_selected_person() ->
         {"id": 3, "full_name": "Новый Клиент", "roles": ["student"]},
         *first["people"],
     ]
+    changed["archived_people"] = [
+        {"id": 12, "full_name": "Архив Новый", "roles": ["student"]},
+        *first["archived_people"],
+    ]
+    changed["access_attempts"] = [
+        {"max_user_id": 300, "display_name": "Запрос Новый"},
+        *first["access_attempts"],
+    ]
     window._loaded(changed)
     assert window.visible_people["all"][all_table.currentRow()]["id"] == 2
+    assert changed["archived_people"][window.archive_table.currentRow()]["id"] == 11
+    assert (
+        changed["access_attempts"][window.attempts_table.currentRow()]["max_user_id"]
+        == 200
+    )
     window.close()
     app.processEvents()
 

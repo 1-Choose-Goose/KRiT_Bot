@@ -70,6 +70,7 @@ def test_installer_checks_python_313_before_server_mutations_and_preserves_env()
     assert "PYTHON_BIN" in installer
     assert "EXISTING_ENV=/etc/krit-bot/krit-bot.env" in installer
     assert "if [[ -f ${EXISTING_ENV} ]]" in installer
+    assert "${MAX_WEBHOOK_URL:-}" in installer
     assert "DB_PASSWORD=${DB_PASSWORD:-$(openssl rand -hex 24)}" in installer
     assert "JWT_SECRET=${JWT_SECRET:-$(openssl rand -hex 32)}" in installer
     assert "WEBHOOK_SECRET=${MAX_WEBHOOK_SECRET:-$(openssl rand -hex 32)}" in installer
@@ -80,11 +81,13 @@ def test_nginx_limits_large_uploads_to_restore_content_route() -> None:
     nginx = (DEPLOY / "nginx-krit.conf").read_text(encoding="utf-8")
 
     assert "client_max_body_size 2m;" in nginx
-    assert "location ~ ^/krit-api/api/v1/administration/restores/" in nginx
+    assert 'location ~ "^/krit-api/(api/v1/administration/restores/' in nginx
     restore_location = nginx.split(
-        "location ~ ^/krit-api/api/v1/administration/restores/", 1
+        'location ~ "^/krit-api/(api/v1/administration/restores/', 1
     )[1].split("location /krit-api/", 1)[0]
     assert "client_max_body_size 20g;" in restore_location
+    assert "rewrite ^/krit-api/(.*)$ /$1 break;" in restore_location
+    assert "proxy_pass http://127.0.0.1:8080;" in restore_location
     assert "proxy_request_buffering off;" in restore_location
 
 

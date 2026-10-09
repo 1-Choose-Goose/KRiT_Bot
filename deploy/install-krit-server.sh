@@ -38,8 +38,10 @@ if [[ -f ${EXISTING_ENV} ]]; then
   # shellcheck disable=SC1090
   . "${EXISTING_ENV}"
   set +a
-  KRIT_HOSTNAME=${MAX_WEBHOOK_URL#https://}
+  KRIT_HOSTNAME=${MAX_WEBHOOK_URL:-}
+  KRIT_HOSTNAME=${KRIT_HOSTNAME#https://}
   KRIT_HOSTNAME=${KRIT_HOSTNAME%%/*}
+  MAX_BOT_TOKEN=${MAX_BOT_TOKEN:-}
 else
   KRIT_HOSTNAME=
   MAX_BOT_TOKEN=

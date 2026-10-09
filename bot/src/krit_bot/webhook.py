@@ -137,6 +137,7 @@ class LoginRateLimiter:
 
     def record_success(self, username: str, address: str) -> None:
         self._buckets.pop(("identity", address, username), None)
+        self._buckets.pop(("address", address), None)
 
 
 async def ensure_max_webhook_subscription(

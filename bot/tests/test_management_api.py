@@ -49,6 +49,18 @@ def test_login_limiter_is_scoped_resettable_and_bounded() -> None:
     limiter.record_success("admin", "10.0.0.1")
     assert limiter.retry_after("admin", "10.0.0.1", now=3.0) is None
 
+    shared_address = LoginRateLimiter(
+        window_seconds=60,
+        per_identity_limit=10,
+        per_address_limit=3,
+        max_buckets=20,
+    )
+    for index in range(3):
+        shared_address.record_failure(f"wrong-{index}", "10.0.0.5", now=float(index))
+    assert shared_address.retry_after("admin", "10.0.0.5", now=3.0) is not None
+    shared_address.record_success("admin", "10.0.0.5")
+    assert shared_address.retry_after("admin", "10.0.0.5", now=3.0) is None
+
     for index in range(30):
         limiter.record_failure(f"user-{index}", f"10.0.1.{index}", now=10.0)
     assert limiter.bucket_count <= 8

@@ -152,6 +152,22 @@ async def test_scheduler_uses_persisted_last_backup_after_restart(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_scheduler_creates_first_backup_after_initial_delay(tmp_path) -> None:
+    database = tmp_path / "krit.db"
+    database.touch()
+    service = BackupService(
+        database_url=f"sqlite+aiosqlite:///{database.as_posix()}",
+        database_names=("krit_bot",),
+        root=tmp_path / "backups",
+    )
+    scheduler = BackupScheduler(service, initial_delay_seconds=30)
+    started_at = datetime(2026, 10, 9, 10, tzinfo=UTC)
+
+    assert await scheduler.run_once_if_due(now=started_at) is False
+    assert await scheduler.run_once_if_due(now=started_at + timedelta(seconds=31)) is True
+
+
+@pytest.mark.asyncio
 async def test_failed_backup_removes_partial_archive(tmp_path) -> None:
     async def failing_runner(_argv: list[str], _env: dict[str, str]) -> None:
         raise RuntimeError("dump failed")

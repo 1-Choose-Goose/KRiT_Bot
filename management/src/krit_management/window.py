@@ -684,12 +684,40 @@ class MainWindow(QMainWindow):
             "access_attempts": status_data.get("access_attempts", []),
         }
         if snapshot_payload != self._last_snapshot_payload:
+            archive_row = self.archive_table.currentRow()
+            selected_archive_id = (
+                self.archived_people[archive_row].get("id")
+                if 0 <= archive_row < len(self.archived_people)
+                else None
+            )
+            attempt_row = self.attempts_table.currentRow()
+            selected_attempt_id = (
+                self.attempts[attempt_row].get("max_user_id")
+                if 0 <= attempt_row < len(self.attempts)
+                else None
+            )
             self.people = snapshot_payload["people"]
             self.archived_people = snapshot_payload["archived_people"]
             self.attempts = snapshot_payload["access_attempts"]
             self._render_people()
             self._render_attempts()
             self._render_archive()
+            for table, items, key, selected in (
+                (self.archive_table, self.archived_people, "id", selected_archive_id),
+                (self.attempts_table, self.attempts, "max_user_id", selected_attempt_id),
+            ):
+                if selected is None:
+                    continue
+                selected_row = next(
+                    (
+                        index
+                        for index, item in enumerate(items)
+                        if item.get(key) == selected
+                    ),
+                    -1,
+                )
+                if selected_row >= 0:
+                    table.setCurrentCell(selected_row, 0)
             self._last_snapshot_payload = deepcopy(snapshot_payload)
         text = "Бот активен" if status_data.get("status") == "ok" else "Сервер активен"
         self._set_connection(text, "online")

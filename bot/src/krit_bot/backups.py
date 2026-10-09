@@ -293,11 +293,14 @@ class BackupScheduler:
         self.initial_delay_seconds = initial_delay_seconds
         self.daily_retention = daily_retention
         self.weekly_retention = weekly_retention
+        self._first_due_at: datetime | None = None
 
     def seconds_until_due(self, now: datetime) -> float:
         backups = self.service.automatic_backups()
         if not backups:
-            return self.initial_delay_seconds
+            if self._first_due_at is None:
+                self._first_due_at = now + timedelta(seconds=self.initial_delay_seconds)
+            return max(0.0, (self._first_due_at - now).total_seconds())
         last_created = backups[0]["_created_at"]
         due_at = last_created + timedelta(seconds=self.interval_seconds)
         return max(0.0, (due_at - now).total_seconds())
