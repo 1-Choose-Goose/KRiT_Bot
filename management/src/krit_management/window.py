@@ -82,12 +82,7 @@ class MainWindow(QMainWindow):
         self._last_toast_person_id: int | None = None
         self._conversation_unread_counts: dict[int, int] | None = None
         self.profile = dict(getattr(api, "profile", {}) or {})
-        username = str(self.profile.get("username") or "").strip().lower()
-        self.role = (
-            "superadmin"
-            if username == "admin"
-            else str(self.profile.get("role") or "administrator")
-        )
+        self.role = str(self.profile.get("role") or "administrator")
         self.section_names = [
             "Клиенты",
             "Учебный процесс",

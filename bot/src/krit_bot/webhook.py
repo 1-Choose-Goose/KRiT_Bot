@@ -4,6 +4,8 @@ import os
 import secrets
 import shutil
 import signal
+import time
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -68,6 +70,73 @@ log = structlog.get_logger()
 bearer = HTTPBearer(auto_error=False)
 ROLES = {"student", "parent", "teacher"}
 password_hash = PasswordHash.recommended()
+
+
+class LoginRateLimiter:
+    def __init__(
+        self,
+        *,
+        window_seconds: float = 5 * 60,
+        per_identity_limit: int = 5,
+        per_address_limit: int = 30,
+        max_buckets: int = 4096,
+    ) -> None:
+        self.window_seconds = window_seconds
+        self.per_identity_limit = per_identity_limit
+        self.per_address_limit = per_address_limit
+        self.max_buckets = max_buckets
+        self._buckets: OrderedDict[tuple[str, ...], deque[float]] = OrderedDict()
+
+    @property
+    def bucket_count(self) -> int:
+        return len(self._buckets)
+
+    def _events(self, key: tuple[str, ...], now: float) -> deque[float]:
+        events = self._buckets.pop(key, deque())
+        cutoff = now - self.window_seconds
+        while events and events[0] <= cutoff:
+            events.popleft()
+        if events:
+            self._buckets[key] = events
+        return events
+
+    def _append(self, key: tuple[str, ...], now: float) -> None:
+        events = self._events(key, now)
+        events.append(now)
+        self._buckets[key] = events
+        while len(self._buckets) > self.max_buckets:
+            self._buckets.popitem(last=False)
+
+    def retry_after(
+        self,
+        username: str,
+        address: str,
+        *,
+        now: float | None = None,
+    ) -> int | None:
+        checked_at = time.monotonic() if now is None else now
+        identity = self._events(("identity", address, username), checked_at)
+        source = self._events(("address", address), checked_at)
+        waits: list[float] = []
+        if len(identity) >= self.per_identity_limit:
+            waits.append(self.window_seconds - (checked_at - identity[0]))
+        if len(source) >= self.per_address_limit:
+            waits.append(self.window_seconds - (checked_at - source[0]))
+        return max(1, int(max(waits) + 0.999)) if waits else None
+
+    def record_failure(
+        self,
+        username: str,
+        address: str,
+        *,
+        now: float | None = None,
+    ) -> None:
+        recorded_at = time.monotonic() if now is None else now
+        self._append(("identity", address, username), recorded_at)
+        self._append(("address", address), recorded_at)
+
+    def record_success(self, username: str, address: str) -> None:
+        self._buckets.pop(("identity", address, username), None)
 
 
 async def ensure_max_webhook_subscription(
@@ -359,6 +428,7 @@ def create_app(
     automatic_backup_task: asyncio.Task[None] | None = None
     syndication_worker: SyndicationWorker | None = None
     invalid_password_hash = password_hash.hash("invalid-password")
+    login_rate_limiter = LoginRateLimiter()
 
     async def require_admin(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
@@ -730,17 +800,31 @@ def create_app(
         return {"status": "ok"}
 
     @app.post("/api/v1/auth/login", response_model=TokenView)
-    async def login(payload: LoginPayload) -> TokenView:
+    async def login(payload: LoginPayload, request: Request) -> TokenView:
+        username = normalize_admin_username(payload.username)
+        address = request.client.host if request.client is not None else "unknown"
+        retry_after = login_rate_limiter.retry_after(username, address)
+        if retry_after is not None:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Слишком много попыток входа. Повторите позже.",
+                headers={"Retry-After": str(retry_after)},
+            )
         async with sessions() as session:
             admin = await session.scalar(
                 select(AdminUser).where(
-                    AdminUser.username == normalize_admin_username(payload.username)
+                    AdminUser.username == username
                 )
             )
         comparison_hash = admin.password_hash if admin is not None else invalid_password_hash
         password_valid = password_hash.verify(payload.password, comparison_hash)
         if admin is None or not admin.active or not password_valid:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+            login_rate_limiter.record_failure(username, address)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Неверный логин или пароль",
+            )
+        login_rate_limiter.record_success(username, address)
         return issue_token(admin)
 
     @app.get("/api/v1/auth/me")

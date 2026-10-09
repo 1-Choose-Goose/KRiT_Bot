@@ -11,7 +11,7 @@ from sqlalchemy import select
 from krit_bot.config import Settings
 from krit_bot.db import AdminUser, build_engine, build_session_factory
 from krit_bot.learning_models import AuditEvent, PersonMaxIdentity
-from krit_bot.webhook import create_app
+from krit_bot.webhook import LoginRateLimiter, create_app
 
 password_hash = PasswordHash.recommended()
 
@@ -32,6 +32,71 @@ async def _login(client: httpx.AsyncClient, username: str, password: str) -> dic
     )
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_login_limiter_is_scoped_resettable_and_bounded() -> None:
+    limiter = LoginRateLimiter(
+        window_seconds=60,
+        per_identity_limit=3,
+        per_address_limit=20,
+        max_buckets=8,
+    )
+    for second in range(3):
+        limiter.record_failure("admin", "10.0.0.1", now=float(second))
+
+    assert limiter.retry_after("admin", "10.0.0.1", now=3.0) > 0
+    assert limiter.retry_after("admin", "10.0.0.2", now=3.0) is None
+    limiter.record_success("admin", "10.0.0.1")
+    assert limiter.retry_after("admin", "10.0.0.1", now=3.0) is None
+
+    for index in range(30):
+        limiter.record_failure(f"user-{index}", f"10.0.1.{index}", now=10.0)
+    assert limiter.bucket_count <= 8
+
+
+@pytest.mark.asyncio
+async def test_login_returns_generic_401_then_clear_429_without_global_lockout(
+    tmp_path,
+) -> None:
+    app = create_app(_settings((tmp_path / "rate-limit.db").as_posix()))
+    async with app.router.lifespan_context(app):
+        first_transport = httpx.ASGITransport(app=app, client=("10.0.0.1", 1234))
+        async with httpx.AsyncClient(
+            transport=first_transport, base_url="http://test"
+        ) as client:
+            unknown = await client.post(
+                "/api/v1/auth/login",
+                json={"username": "unknown", "password": "wrong"},
+            )
+            wrong = await client.post(
+                "/api/v1/auth/login",
+                json={"username": "admin", "password": "wrong"},
+            )
+            assert unknown.status_code == wrong.status_code == 401
+            assert unknown.json() == wrong.json()
+            for _ in range(4):
+                await client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "admin", "password": "wrong"},
+                )
+            limited = await client.post(
+                "/api/v1/auth/login",
+                json={"username": "admin", "password": "admin"},
+            )
+            assert limited.status_code == 429
+            assert int(limited.headers["Retry-After"]) > 0
+            assert "попыт" in limited.json()["detail"].lower()
+
+        second_transport = httpx.ASGITransport(app=app, client=("10.0.0.2", 1234))
+        async with httpx.AsyncClient(
+            transport=second_transport, base_url="http://test"
+        ) as client:
+            assert (
+                await client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "admin", "password": "admin"},
+                )
+            ).status_code == 200
 
 
 def test_initial_admin_credentials_are_environment_specific() -> None:

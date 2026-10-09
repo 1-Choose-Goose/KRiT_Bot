@@ -267,13 +267,16 @@ def test_restricted_sections_stay_visible_and_show_role_requirements() -> None:
     app.processEvents()
 
 
-def test_legacy_admin_account_keeps_superadmin_access() -> None:
+def test_server_role_overrides_legacy_admin_username() -> None:
     app = QApplication.instance() or QApplication([])
-    window = MainWindow(FakeAdministrationApi(None, username="admin"))  # type: ignore[arg-type]
-    assert window.role == "superadmin"
-    assert window.administration_page is not None
+    window = MainWindow(
+        FakeAdministrationApi("administrator", username="admin")  # type: ignore[arg-type]
+    )
+    assert window.role == "administrator"
+    assert window.administration_page is None
     window.main_nav.setCurrentRow(4)
-    assert window.pages.currentWidget() is window.administration_page
+    denied = window.pages.currentWidget().findChild(QLabel, "accessDeniedMessage")
+    assert denied is not None
     window.close()
     app.processEvents()
 
