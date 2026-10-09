@@ -17,11 +17,39 @@ if [[ ${ID:-} != "ubuntu" && ${ID:-} != "debian" ]]; then
   exit 1
 fi
 
+PYTHON_BIN=${PYTHON_BIN:-}
+if [[ -z ${PYTHON_BIN} ]]; then
+  if command -v python3.13 >/dev/null 2>&1; then
+    PYTHON_BIN=$(command -v python3.13)
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN=$(command -v python3)
+  fi
+fi
+if [[ -z ${PYTHON_BIN} ]] || ! "${PYTHON_BIN}" -c \
+  'import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)'; then
+  echo "Для КРиТ требуется Python 3.13 или новее. Установка не изменяла службы сервера."
+  exit 1
+fi
+
 PACKAGE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+EXISTING_ENV=/etc/krit-bot/krit-bot.env
+if [[ -f ${EXISTING_ENV} ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "${EXISTING_ENV}"
+  set +a
+  KRIT_HOSTNAME=${MAX_WEBHOOK_URL#https://}
+  KRIT_HOSTNAME=${KRIT_HOSTNAME%%/*}
+else
+  KRIT_HOSTNAME=
+  MAX_BOT_TOKEN=
+fi
 echo "Установка серверной части КРиТ"
-read -r -p "Домен сервера без https:// (пример: krit.example.ru): " KRIT_HOSTNAME
-read -r -s -p "Токен MAX-бота: " MAX_BOT_TOKEN
-echo
+if [[ -z ${KRIT_HOSTNAME} || -z ${MAX_BOT_TOKEN} ]]; then
+  read -r -p "Домен сервера без https:// (пример: krit.example.ru): " KRIT_HOSTNAME
+  read -r -s -p "Токен MAX-бота: " MAX_BOT_TOKEN
+  echo
+fi
 if [[ -z ${KRIT_HOSTNAME} || -z ${MAX_BOT_TOKEN} ]]; then
   echo "Домен и токен MAX обязательны."
   exit 1
@@ -39,15 +67,16 @@ install -d -o root -g root -m 0755 /opt/krit-bot
 
 rsync -a --delete "${PACKAGE_ROOT}/bot/" /opt/krit-bot/bot/
 rsync -a --delete "${PACKAGE_ROOT}/deploy/" /opt/krit-bot/deploy/
-python3 -m venv /opt/krit-bot/venv
+"${PYTHON_BIN}" -m venv /opt/krit-bot/venv
 /opt/krit-bot/venv/bin/python -m pip install --upgrade pip
 /opt/krit-bot/venv/bin/python -m pip install -e /opt/krit-bot/bot
 chown -R root:krit /opt/krit-bot/venv
 chmod -R u=rwX,g=rX,o= /opt/krit-bot/venv
 
-DB_PASSWORD=$(openssl rand -hex 24)
-JWT_SECRET=$(openssl rand -hex 32)
-WEBHOOK_SECRET=$(openssl rand -hex 32)
+DB_PASSWORD=${KRIT_PGPASSWORD:-}
+DB_PASSWORD=${DB_PASSWORD:-$(openssl rand -hex 24)}
+JWT_SECRET=${JWT_SECRET:-$(openssl rand -hex 32)}
+WEBHOOK_SECRET=${MAX_WEBHOOK_SECRET:-$(openssl rand -hex 32)}
 
 sudo -u postgres psql --set=ON_ERROR_STOP=1 --set=db_password="${DB_PASSWORD}" <<'SQL'
 DO $$
@@ -62,7 +91,8 @@ SELECT 'CREATE DATABASE krit_bot OWNER krit'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'krit_bot')\gexec
 SQL
 
-cat >/etc/krit-bot/krit-bot.env <<EOF
+if [[ ! -f ${EXISTING_ENV} ]]; then
+  cat >"${EXISTING_ENV}" <<EOF
 DATABASE_URL=postgresql+asyncpg://krit:${DB_PASSWORD}@127.0.0.1:5432/krit_bot
 KRIT_DATABASE_NAMES=krit_bot
 KRIT_PGHOST=127.0.0.1
@@ -79,6 +109,7 @@ JWT_SECRET=${JWT_SECRET}
 BOT_MODE=webhook
 CENTER_TIMEZONE=Asia/Yekaterinburg
 EOF
+fi
 chown root:krit /etc/krit-bot/krit-bot.env
 chmod 0640 /etc/krit-bot/krit-bot.env
 
