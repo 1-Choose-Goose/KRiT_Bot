@@ -16,7 +16,10 @@ from krit_bot.db import Base, Person, PersonRole, build_session_factory
 from krit_bot.handler import EchoHandler, parse_message_callback, parse_message_created
 from krit_bot.learning_models import PersonMaxIdentity
 from krit_bot.max_api import WEBHOOK_UPDATE_TYPES
-from krit_bot.webhook import ensure_max_webhook_subscription
+from krit_bot.webhook import (
+    ensure_max_webhook_subscription,
+    run_max_webhook_subscription,
+)
 
 
 class FakeApi:
@@ -156,6 +159,31 @@ async def test_webhook_startup_subscribes_to_button_callbacks() -> None:
         }
     ]
     assert "message_callback" in api.calls[0]["update_types"]
+
+
+async def test_webhook_subscription_retries_in_one_bounded_background_loop() -> None:
+    class FlakySubscriptionApi:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def subscribe_webhook(self, **_kwargs) -> dict:
+            self.calls += 1
+            if self.calls < 3:
+                raise OSError("temporary network failure")
+            return {"success": True}
+
+    api = FlakySubscriptionApi()
+    settings = Settings(
+        max_bot_token=SecretStr("test-token"),
+        max_webhook_secret=SecretStr("test-secret"),
+        max_webhook_url="https://example.test/webhooks/max",
+        bot_mode="webhook",
+    )
+
+    assert await run_max_webhook_subscription(
+        api, settings, max_attempts=3, base_delay_seconds=0
+    )
+    assert api.calls == 3
 
 
 async def test_only_authorized_message_is_stored_for_the_admin() -> None:

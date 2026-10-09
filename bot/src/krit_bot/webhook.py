@@ -159,6 +159,39 @@ async def ensure_max_webhook_subscription(
     return True
 
 
+async def run_max_webhook_subscription(
+    api: MaxApiClient,
+    settings: Settings,
+    *,
+    max_attempts: int = 5,
+    base_delay_seconds: float = 5.0,
+) -> bool:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            subscribed = await ensure_max_webhook_subscription(api, settings)
+            if subscribed:
+                log.info(
+                    "max_webhook_subscription_verified",
+                    url=settings.max_webhook_url,
+                    update_types=WEBHOOK_UPDATE_TYPES,
+                )
+            return subscribed
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning(
+                "max_webhook_subscription_failed",
+                attempt=attempt,
+                max_attempts=max_attempts,
+                error_type=type(exc).__name__,
+            )
+            if attempt == max_attempts:
+                return False
+            delay = min(5 * 60, base_delay_seconds * (2 ** (attempt - 1)))
+            await asyncio.sleep(delay)
+    return False
+
+
 class LoginPayload(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     password: str = Field(min_length=1, max_length=256)
@@ -426,6 +459,7 @@ def create_app(
     learning_notifications_task: asyncio.Task[None] | None = None
     communications_task: asyncio.Task[None] | None = None
     automatic_backup_task: asyncio.Task[None] | None = None
+    max_subscription_task: asyncio.Task[bool] | None = None
     syndication_worker: SyndicationWorker | None = None
     invalid_password_hash = password_hash.hash("invalid-password")
     login_rate_limiter = LoginRateLimiter()
@@ -504,12 +538,14 @@ def create_app(
 
     async def stop_max_workers() -> None:
         nonlocal polling_task, learning_notifications_task, communications_task
+        nonlocal max_subscription_task
         tasks = [
             task
             for task in (
                 polling_task,
                 learning_notifications_task,
                 communications_task,
+                max_subscription_task,
             )
             if task is not None
         ]
@@ -520,20 +556,18 @@ def create_app(
         polling_task = None
         learning_notifications_task = None
         communications_task = None
+        max_subscription_task = None
 
     async def start_max_workers() -> None:
         nonlocal polling_task, learning_notifications_task, communications_task
-        try:
-            if await ensure_max_webhook_subscription(api, settings):
-                log.info(
-                    "max_webhook_subscription_verified",
-                    url=settings.max_webhook_url,
-                    update_types=WEBHOOK_UPDATE_TYPES,
-                )
-        except Exception as exc:
-            # A temporary MAX subscription failure must not stop the API or
-            # the notification queues. The next restart retries registration.
-            log.warning("max_webhook_subscription_failed", error=str(exc))
+        nonlocal max_subscription_task
+        if settings.bot_mode == "webhook" and (
+            max_subscription_task is None or max_subscription_task.done()
+        ):
+            max_subscription_task = asyncio.create_task(
+                run_max_webhook_subscription(api, settings),
+                name="max-webhook-subscription",
+            )
         learning_notifications_task = asyncio.create_task(
             LearningNotificationWorker(sessions=sessions, api=api).run(),
             name="learning-notifications",

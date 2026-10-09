@@ -250,6 +250,25 @@ async def test_notification_worker_survives_unexpected_iteration_error() -> None
 
 
 @pytest.mark.asyncio
+async def test_notification_worker_repeats_stale_recovery_while_running() -> None:
+    worker = LearningNotificationWorker(
+        sessions=None,  # type: ignore[arg-type]
+        api=None,  # type: ignore[arg-type]
+        poll_seconds=0,
+        recovery_interval_seconds=0,
+    )
+    worker.recover_interrupted = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    worker.process_one = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[False, asyncio.CancelledError()]
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker.run()
+
+    assert worker.recover_interrupted.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_two_max_failures_for_one_lesson_are_recorded_separately(tmp_path) -> None:
     engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'two-failures.db'}")
     await ensure_schema(engine)

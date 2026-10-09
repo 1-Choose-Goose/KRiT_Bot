@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import timedelta
 
 import httpx
@@ -28,20 +29,26 @@ class LearningNotificationWorker:
         api: MaxApiClient,
         poll_seconds: float = 5.0,
         max_attempts: int = 5,
+        recovery_interval_seconds: float = 60.0,
     ) -> None:
         self.sessions = sessions
         self.api = api
         self.poll_seconds = poll_seconds
         self.max_attempts = max_attempts
+        self.recovery_interval_seconds = recovery_interval_seconds
 
     async def run(self) -> None:
-        try:
-            await self.recover_interrupted()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("learning_notification_recovery_failed")
+        next_recovery_at = 0.0
         while True:
+            now = time.monotonic()
+            if now >= next_recovery_at:
+                try:
+                    await self.recover_interrupted()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("learning_notification_recovery_failed")
+                next_recovery_at = now + self.recovery_interval_seconds
             try:
                 handled = await self.process_one()
             except asyncio.CancelledError:
