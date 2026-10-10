@@ -23,6 +23,8 @@ $Entries = @(
     "deploy/krit_restore_dispatch.py",
     "deploy/krit_restore_helper.py",
     "deploy/nginx-krit.conf",
+    "deploy/nginx-krit-api.conf",
+    "deploy/krit_nginx_configure.py",
     ".env.example",
     "README.md",
     "RESTORE_DATABASES.txt"

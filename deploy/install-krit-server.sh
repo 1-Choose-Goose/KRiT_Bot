@@ -120,12 +120,17 @@ install -o root -g root -m 0644 "${PACKAGE_ROOT}/deploy/krit-restore@.service" /
 install -o root -g root -m 0644 "${PACKAGE_ROOT}/deploy/krit-restore-rollback.service" /etc/systemd/system/krit-restore-rollback.service
 install -o root -g root -m 0644 "${PACKAGE_ROOT}/deploy/krit-restore-delete.service" /etc/systemd/system/krit-restore-delete.service
 install -o root -g root -m 0755 "${PACKAGE_ROOT}/deploy/krit_restore_dispatch.py" /usr/local/sbin/krit-restore-dispatch
+install -o root -g root -m 0755 "${PACKAGE_ROOT}/deploy/krit_nginx_configure.py" /usr/local/sbin/krit-configure-nginx
 install -o root -g root -m 0440 "${PACKAGE_ROOT}/deploy/krit-restore.sudoers" /etc/sudoers.d/krit-restore
 visudo -cf /etc/sudoers.d/krit-restore
 
+install -o root -g root -m 0644 "${PACKAGE_ROOT}/deploy/nginx-krit-api.conf" /etc/nginx/snippets/krit-api.conf
 sed "s/__KRIT_HOSTNAME__/${KRIT_HOSTNAME}/g" "${PACKAGE_ROOT}/deploy/nginx-krit.conf" \
   >/etc/nginx/sites-available/krit
 ln -sfn /etc/nginx/sites-available/krit /etc/nginx/sites-enabled/krit
+if /usr/local/sbin/krit-configure-nginx "${KRIT_HOSTNAME}"; then
+  echo "KRiT API подключён к существующему HTTPS-сайту."
+fi
 nginx -t
 systemctl reload nginx
 
@@ -142,8 +147,22 @@ if ! certbot --nginx --non-interactive --agree-tos --register-unsafely-without-e
   exit 1
 fi
 
+/usr/local/sbin/krit-configure-nginx "${KRIT_HOSTNAME}"
+nginx -t
+systemctl reload nginx
 systemctl restart krit-bot.service
-curl --fail --silent --show-error "https://${KRIT_HOSTNAME}/krit-api/health" >/dev/null
+ready=0
+for attempt in {1..30}; do
+  if curl --fail --silent --show-error "https://${KRIT_HOSTNAME}/krit-api/health" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 2
+done
+if [[ ${ready} -ne 1 ]]; then
+  echo "KRiT не прошёл HTTPS-проверку готовности за 60 секунд."
+  exit 1
+fi
 touch /var/lib/krit/.installed
 chown krit:krit /var/lib/krit/.installed
 echo

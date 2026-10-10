@@ -4,9 +4,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.pytest-temp*/
-.pytest-baseline-*/
-.pytest-final*/
+.pytest-*/
 .verification-*/
 .tmp-*/
 .audit-*/

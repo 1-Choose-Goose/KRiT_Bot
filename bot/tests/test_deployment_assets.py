@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 from pathlib import Path
 
@@ -15,13 +16,15 @@ def test_systemd_and_nginx_assets_are_locked_down() -> None:
     )
     delete_service = (DEPLOY / "krit-restore-delete.service").read_text(encoding="utf-8")
     nginx = (DEPLOY / "nginx-krit.conf").read_text(encoding="utf-8")
+    nginx_api = (DEPLOY / "nginx-krit-api.conf").read_text(encoding="utf-8")
     sudoers = (DEPLOY / "krit-restore.sudoers").read_text(encoding="utf-8")
     dispatcher = DEPLOY / "krit_restore_dispatch.py"
 
     assert "User=krit" in bot_service
     assert "Restart=always" in bot_service
-    assert "127.0.0.1:8080" in nginx
-    assert "proxy_request_buffering off" in nginx
+    assert "include /etc/nginx/snippets/krit-api.conf;" in nginx
+    assert "127.0.0.1:8080" in nginx_api
+    assert "proxy_request_buffering off" in nginx_api
     assert "User=root" in restore_service
     assert "ExecStopPost=/usr/bin/systemctl start krit-bot.service" in restore_service
     assert "--rollback" in rollback_service
@@ -57,6 +60,9 @@ def test_installer_is_idempotent_generates_secrets_and_never_embeds_real_ones() 
     assert "systemctl enable --now krit-bot.service" in installer
     assert "curl --fail" in installer
     assert "/var/lib/krit/.installed" in installer
+    assert "krit-configure-nginx" in installer
+    assert "for attempt in {1..30}" in installer
+    assert "sleep 2" in installer
     assert "178.217.99.218" not in installer
     assert "MAX_BOT_TOKEN=replace_me" not in installer
 
@@ -78,7 +84,7 @@ def test_installer_checks_python_313_before_server_mutations_and_preserves_env()
 
 
 def test_nginx_limits_large_uploads_to_restore_content_route() -> None:
-    nginx = (DEPLOY / "nginx-krit.conf").read_text(encoding="utf-8")
+    nginx = (DEPLOY / "nginx-krit-api.conf").read_text(encoding="utf-8")
 
     assert "client_max_body_size 2m;" in nginx
     assert 'location ~ "^/krit-api/(api/v1/administration/restores/' in nginx
@@ -108,6 +114,8 @@ def test_server_package_builder_and_beginner_restore_guide_cover_required_assets
         "deploy/krit_restore_dispatch.py",
         "deploy/krit_restore_helper.py",
         "deploy/nginx-krit.conf",
+        "deploy/nginx-krit-api.conf",
+        "deploy/krit_nginx_configure.py",
         ".env.example",
         "README.md",
         "RESTORE_DATABASES.txt",
@@ -127,3 +135,39 @@ def test_server_package_builder_and_beginner_restore_guide_cover_required_assets
         "pg_restore",
     ):
         assert instruction in guide
+
+
+def test_nginx_configurator_preserves_existing_https_site(tmp_path) -> None:
+    module_path = DEPLOY / "krit_nginx_configure.py"
+    spec = importlib.util.spec_from_file_location("krit_nginx_configure", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    default_site = tmp_path / "default"
+    default_site.write_text(
+        """server {
+    listen 443 ssl;
+    server_name krit.example.test;
+    root /var/www/existing-site;
+}
+""",
+        encoding="utf-8",
+    )
+
+    configured = module.configure_nginx_site(
+        "krit.example.test",
+        sites=[default_site],
+        include_path="/etc/nginx/snippets/krit-api.conf",
+    )
+
+    assert configured == default_site
+    updated = default_site.read_text(encoding="utf-8")
+    assert "root /var/www/existing-site;" in updated
+    assert "include /etc/nginx/snippets/krit-api.conf;" in updated
+    module.configure_nginx_site(
+        "krit.example.test",
+        sites=[default_site],
+        include_path="/etc/nginx/snippets/krit-api.conf",
+    )
+    assert default_site.read_text(encoding="utf-8").count("krit-api.conf") == 1
