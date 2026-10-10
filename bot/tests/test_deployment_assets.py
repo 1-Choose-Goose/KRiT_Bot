@@ -150,6 +150,13 @@ def test_nginx_configurator_preserves_existing_https_site(tmp_path) -> None:
     listen 443 ssl;
     server_name krit.example.test;
     root /var/www/existing-site;
+    location /krit-api/ {
+        proxy_pass http://127.0.0.1:8080/;
+        client_max_body_size 1m;
+    }
+    location / {
+        try_files $uri $uri/ =404;
+    }
 }
 """,
         encoding="utf-8",
@@ -164,6 +171,8 @@ def test_nginx_configurator_preserves_existing_https_site(tmp_path) -> None:
     assert configured == default_site
     updated = default_site.read_text(encoding="utf-8")
     assert "root /var/www/existing-site;" in updated
+    assert "client_max_body_size 1m;" not in updated
+    assert "try_files $uri $uri/ =404;" in updated
     assert "include /etc/nginx/snippets/krit-api.conf;" in updated
     module.configure_nginx_site(
         "krit.example.test",
