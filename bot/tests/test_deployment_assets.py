@@ -114,6 +114,9 @@ def test_server_package_builder_and_beginner_restore_guide_cover_required_assets
     ):
         assert f'"{entry}"' in builder
     assert "Get-FileHash -Algorithm SHA256" in builder
+    assert "Normalize-LinuxTextFiles" in builder
+    assert '".sh", ".service", ".sudoers", ".conf"' in builder
+    assert "`r`n?" in builder
     for instruction in (
         "ssh root@SERVER_IP",
         "scp KRiTServer.tar.gz",
