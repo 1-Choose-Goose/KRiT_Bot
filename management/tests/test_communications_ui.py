@@ -381,3 +381,33 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
     poll_dialog.close()
     page.shutdown()
     page.close()
+
+
+def test_opening_dialog_scrolls_to_latest_message_after_layout() -> None:
+    app = QApplication.instance() or QApplication([])
+    page = CommunicationsPage(FakeApi())  # type: ignore[arg-type]
+    page.resize(900, 300)
+    page.tabs.blockSignals(True)
+    page.tabs.setCurrentIndex(1)
+    page.tabs.blockSignals(False)
+    page.show()
+    page.current_person_id = 7
+    messages = [
+        {
+            "direction": "inbound",
+            "created_at": f"2026-10-11T12:{index % 60:02d}:00+05:00",
+            "delivery_status": "received",
+            "text": f"Сообщение {index}\nдополнительная строка",
+        }
+        for index in range(6)
+    ]
+
+    page._messages_loaded_for(7, messages, force_bottom=True)
+    app.processEvents()
+    app.processEvents()
+
+    scrollbar = page.chat_history.verticalScrollBar()
+    assert scrollbar.maximum() > 0
+    assert scrollbar.value() == scrollbar.maximum()
+    page.shutdown()
+    page.close()

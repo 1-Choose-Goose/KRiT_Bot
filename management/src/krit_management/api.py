@@ -205,6 +205,10 @@ class ManagementApi:
     def for_server(cls, base_url: str) -> ManagementApi:
         return cls(base_url.rstrip("/") + "/krit-api/api/v1")
 
+    def server_url(self) -> str:
+        suffix = "/krit-api/api/v1"
+        return self.base_url[: -len(suffix)] if self.base_url.endswith(suffix) else self.base_url
+
     def login(self, username: str, password: str) -> dict[str, Any]:
         data = self._request(
             "POST",

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
@@ -119,30 +120,52 @@ class AdminUserDialog(QDialog):
 
 
 class RestoreServerDialog(QDialog):
-    def __init__(self, backup_description: str, parent=None) -> None:
+    def __init__(
+        self,
+        backup_description: str,
+        parent=None,
+        *,
+        current_server_url: str = "",
+        current_username: str = "",
+    ) -> None:
         super().__init__(parent)
+        self._current_server_url = current_server_url.strip().rstrip("/")
         self.setWindowTitle("Восстановление баз КРиТ")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(590)
         layout = QVBoxLayout(self)
         warning = QLabel(
-            "Будет использована последняя доверенная копия:\n"
+            "Будет использована последняя доверенная локальная копия:\n"
             f"{backup_description}\n\n"
-            "Данные целевого сервера могут быть полностью заменены."
+            "Перед заменой сервер автоматически создаст страховочный комплект "
+            "текущих баз."
         )
         warning.setWordWrap(True)
         layout.addWidget(warning)
+
+        self.instructions = QLabel(
+            "Для восстановления на этом же сервере оставьте выбранным "
+            "«Текущий сервер», введите пароль SuperAdmin и контрольную фразу "
+            "ВОССТАНОВИТЬ."
+        )
+        self.instructions.setWordWrap(True)
+        self.instructions.setObjectName("restoreInstructions")
+        layout.addWidget(self.instructions)
+
         form = QFormLayout()
         configure_form_layout(form)
-        self.address = QLineEdit("https://")
+        self.target_mode = QComboBox()
+        self.target_mode.addItem("Текущий сервер", "current")
+        self.target_mode.addItem("Другой сервер", "other")
+        self.address = QLineEdit(self._current_server_url or "https://")
         self.port = QLineEdit()
         self.port.setPlaceholderText("443")
-        self.username = QLineEdit("Choose_Goose")
+        self.username = QLineEdit(current_username or "Choose_Goose")
         self.password = QLineEdit()
         self.repeat_password = QLineEdit()
         self.new_password = QLineEdit()
         self.new_password_repeat = QLineEdit()
         self.confirmation_phrase = QLineEdit()
-        self.confirmation_phrase.setPlaceholderText("ВОССТАНОВИТЬ — для действующего сервера")
+        self.confirmation_phrase.setPlaceholderText("ВОССТАНОВИТЬ — если на сервере уже есть данные")
         for field in (
             self.password,
             self.repeat_password,
@@ -150,6 +173,7 @@ class RestoreServerDialog(QDialog):
             self.new_password_repeat,
         ):
             field.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Куда восстановить", self.target_mode)
         form.addRow("Адрес сервера", self.address)
         form.addRow("Порт", self.port)
         form.addRow("Логин SuperAdmin", self.username)
@@ -173,6 +197,27 @@ class RestoreServerDialog(QDialog):
         buttons.accepted.connect(self._accept_if_valid)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.target_mode.currentIndexChanged.connect(self._target_changed)
+        self._target_changed()
+
+    def _target_changed(self) -> None:
+        current = self.target_mode.currentData() == "current"
+        if current and self._current_server_url:
+            self.address.setText(self._current_server_url)
+            self.port.clear()
+        self.address.setEnabled(not current)
+        self.port.setEnabled(not current)
+        self.instructions.setText(
+            (
+                "Будут восстановлены базы на текущем сервере. Введите пароль "
+                "SuperAdmin и контрольную фразу ВОССТАНОВИТЬ."
+            )
+            if current
+            else (
+                "Укажите публичный HTTPS-адрес нового или другого сервера, "
+                "где серверная часть КРиТ уже установлена и запущена."
+            )
+        )
 
     def _accept_if_valid(self) -> None:
         address = self.address.text().strip().rstrip("/")
@@ -221,6 +266,10 @@ class AdministrationPage(QWidget):
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.admin_tabs = QTabWidget()
+        self.admin_tabs.setObjectName("administrationTabs")
+        outer_layout.addWidget(self.admin_tabs)
+
         scroll = QScrollArea()
         scroll.setObjectName("administrationScroll")
         scroll.setWidgetResizable(True)
@@ -228,7 +277,13 @@ class AdministrationPage(QWidget):
         content = QWidget()
         content.setObjectName("administrationContent")
         scroll.setWidget(content)
-        outer_layout.addWidget(scroll)
+        self.admin_tabs.addTab(scroll, "Управление")
+
+        server_info_page = QWidget()
+        server_info_page.setObjectName("serverInformationPage")
+        server_info_layout = QVBoxLayout(server_info_page)
+        server_info_layout.setContentsMargins(0, 0, 0, 0)
+        self.admin_tabs.addTab(server_info_page, "Информация о сервере")
 
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -275,9 +330,8 @@ class AdministrationPage(QWidget):
         )
         self.status_details.setAlternatingRowColors(True)
         self.status_details.setRootIsDecorated(True)
-        self.status_details.setMaximumHeight(235)
         status_layout.addWidget(self.status_details)
-        layout.addWidget(status_card)
+        server_info_layout.addWidget(status_card, 1)
 
         users_card = QFrame()
         users_card.setObjectName("controlPanel")
@@ -925,7 +979,12 @@ class AdministrationPage(QWidget):
             f"{latest.created_at.astimezone().strftime('%d.%m.%Y %H:%M')} · "
             f"{latest.archive.stat().st_size / (1024 * 1024):.1f} МБ"
         )
-        dialog = RestoreServerDialog(description, self)
+        dialog = RestoreServerDialog(
+            description,
+            self,
+            current_server_url=self.api.server_url(),
+            current_username=str(self.api.profile.get("username") or "Choose_Goose"),
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         credentials = {

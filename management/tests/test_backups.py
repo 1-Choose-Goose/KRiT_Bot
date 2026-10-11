@@ -355,3 +355,11 @@ def test_backup_controller_rejects_parallel_start(tmp_path) -> None:
     assert controller.start(manual=True) is False
     _wait_for_backup(controller)
     controller.shutdown()
+
+
+def test_management_api_exposes_current_server_address() -> None:
+    api = ManagementApi("https://krit.example/krit-api/api/v1")
+    try:
+        assert api.server_url() == "https://krit.example"
+    finally:
+        api.close()

@@ -8,7 +8,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
-from krit_management.administration_page import AdministrationPage
+import krit_management.administration_page as administration_module
+from krit_management.administration_page import AdministrationPage, RestoreServerDialog
 from krit_management.dialogs import ChangePasswordDialog
 from krit_management.window import MainWindow
 
@@ -19,6 +20,7 @@ class FakeAdministrationApi:
         if role is not None:
             self.profile["role"] = role
         self.status_calls = 0
+        self.restarts: list[str] = []
 
     def snapshot(self) -> dict:
         return {
@@ -95,12 +97,145 @@ class FakeAdministrationApi:
     def administration_users(self) -> list:
         return []
 
+    def restart_service(self, service: str) -> dict:
+        self.restarts.append(service)
+        return {"status": "restarting"}
+
     def close(self) -> None:
         pass
 
 
 def _labels(window: MainWindow) -> list[str]:
     return [window.main_nav.item(index).text() for index in range(window.main_nav.count())]
+
+
+def test_restore_dialog_defaults_to_current_server_and_explains_same_server() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = RestoreServerDialog(
+        "11.10.2026 20:04 · 0.1 МБ",
+        current_server_url="https://krit.example",
+        current_username="admin",
+    )
+
+    assert dialog.target_mode.currentData() == "current"
+    assert dialog.server_url() == "https://krit.example"
+    assert dialog.address.isEnabled() is False
+    assert dialog.port.isEnabled() is False
+    assert dialog.username.text() == "admin"
+    assert "текущ" in dialog.instructions.text().lower()
+
+    dialog.target_mode.setCurrentIndex(1)
+    app.processEvents()
+    assert dialog.target_mode.currentData() == "other"
+    assert dialog.address.isEnabled() is True
+    assert dialog.port.isEnabled() is True
+    dialog.close()
+
+
+def test_administration_control_buttons_call_expected_actions() -> None:
+    app = QApplication.instance() or QApplication([])
+    api = FakeAdministrationApi("superadmin")
+    page = AdministrationPage(api)  # type: ignore[arg-type]
+    manual_backup: list[bool] = []
+    page._run_action = lambda function: function()  # type: ignore[method-assign]
+    page.backup_controller.start = (  # type: ignore[method-assign]
+        lambda *, manual=False: manual_backup.append(manual) or True
+    )
+
+    page.restart_bot_button.click()
+    page.restart_server_button.click()
+    page.backup_button.click()
+
+    assert api.restarts == ["bot", "server"]
+    assert manual_backup == [True]
+    page.shutdown()
+    app.processEvents()
+
+
+def test_restore_to_current_server_uses_local_copy_and_current_address(
+    monkeypatch, tmp_path
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    archive = tmp_path / "trusted.backup"
+    archive.write_bytes(b"local backup")
+    latest = SimpleNamespace(
+        archive=archive,
+        created_at=datetime(2026, 10, 11, 20, 4, tzinfo=UTC),
+        info={"id": "trusted", "databases": [{"name": "krit_bot"}]},
+    )
+
+    class Store:
+        def latest_trusted(self):
+            return latest
+
+    class Field:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def text(self) -> str:
+            return self.value
+
+    dialog_arguments: dict[str, str] = {}
+
+    class Dialog:
+        def __init__(self, _description, _parent, **kwargs) -> None:
+            dialog_arguments.update(kwargs)
+            self.username = Field("admin")
+            self.password = Field("secret-password")
+            self.new_password = Field("")
+            self.confirmation_phrase = Field("ВОССТАНОВИТЬ")
+
+        def exec(self):
+            return administration_module.QDialog.DialogCode.Accepted
+
+        def server_url(self) -> str:
+            return "https://current.example"
+
+    calls: list[tuple] = []
+
+    class Target:
+        def login(self, username: str, password: str) -> dict:
+            calls.append(("login", username, password))
+            return {"must_change_password": False}
+
+        def create_restore(self, info: dict) -> dict:
+            calls.append(("create", info))
+            return {"id": "restore-1", "target_has_business_data": True}
+
+        def upload_restore(self, restore_id: str, path) -> None:
+            calls.append(("upload", restore_id, path))
+
+        def apply_restore(self, restore_id: str, **kwargs) -> dict:
+            calls.append(("apply", restore_id, kwargs["confirmation_phrase"]))
+            return {"status": "accepted"}
+
+        def close(self) -> None:
+            calls.append(("close",))
+
+    target_urls: list[str] = []
+    monkeypatch.setattr(administration_module, "RestoreServerDialog", Dialog)
+    monkeypatch.setattr(
+        administration_module.ManagementApi,
+        "for_server",
+        lambda url: target_urls.append(url) or Target(),
+    )
+    monkeypatch.setattr(QMessageBox, "information", lambda *_args, **_kwargs: None)
+    api = FakeAdministrationApi("superadmin", username="admin")
+    api.server_url = lambda: "https://current.example"  # type: ignore[attr-defined]
+    page = AdministrationPage(api)  # type: ignore[arg-type]
+    page.backup_store = Store()  # type: ignore[assignment]
+    page._run = (  # type: ignore[method-assign]
+        lambda function, success=None, failure=None: success(function())
+    )
+
+    page._restore_databases()
+
+    assert dialog_arguments["current_server_url"] == "https://current.example"
+    assert target_urls == ["https://current.example"]
+    assert ("upload", "restore-1", archive) in calls
+    assert ("apply", "restore-1", "ВОССТАНОВИТЬ") in calls
+    page.shutdown()
+    app.processEvents()
 
 
 def test_every_role_has_local_backup_controller() -> None:
@@ -155,6 +290,11 @@ def test_administration_renders_complete_server_information() -> None:
     app = QApplication.instance() or QApplication([])
     api = FakeAdministrationApi("superadmin")
     page = AdministrationPage(api)  # type: ignore[arg-type]
+
+    assert page.admin_tabs.count() == 2
+    assert page.admin_tabs.tabText(0) == "Управление"
+    assert page.admin_tabs.tabText(1) == "Информация о сервере"
+    assert page.status_details.maximumHeight() > 1_000
 
     page._render_status(api.system_status())
 

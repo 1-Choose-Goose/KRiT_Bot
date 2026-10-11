@@ -1504,14 +1504,22 @@ class CommunicationsPage(QWidget):
         person_id = self.current_person_id
         self._run(
             lambda: self.api.communication_messages(person_id),
-            lambda value: self._messages_loaded_for(person_id, value),
+            lambda value: self._messages_loaded_for(
+                person_id, value, force_bottom=True
+            ),
         )
         self._run(lambda: self.api.communication_mark_read(person_id))
 
     def _messages_loaded(self, value: object) -> None:
         self._messages_loaded_for(self.current_person_id, value)
 
-    def _messages_loaded_for(self, person_id: int | None, value: object) -> None:
+    def _messages_loaded_for(
+        self,
+        person_id: int | None,
+        value: object,
+        *,
+        force_bottom: bool = False,
+    ) -> None:
         if person_id is not None and person_id != self.current_person_id:
             return
         rows = list(value) if isinstance(value, list) else []
@@ -1534,9 +1542,12 @@ class CommunicationsPage(QWidget):
             else:
                 self.pending_replies.pop(person_id, None)
         self.chat_messages = [*rows, *remaining]
-        self._render_chat_messages()
+        self._render_chat_messages(force_bottom=force_bottom)
 
-    def _render_chat_messages(self) -> None:
+    def _render_chat_messages(self, *, force_bottom: bool = False) -> None:
+        scrollbar = self.chat_history.verticalScrollBar()
+        previous_value = scrollbar.value()
+        was_at_bottom = scrollbar.maximum() - previous_value <= 8
         lines = [
             "<style>body{font-family:'Segoe UI';font-size:10pt;color:#0f2347;}"
             ".bubble{margin:4px 0;padding:9px 11px;border:1px solid #d8e0ea;}"
@@ -1568,9 +1579,16 @@ class CommunicationsPage(QWidget):
                 f"<div class='meta'>{meta}</div></td></tr></table></td></tr></table>"
             )
         self.chat_history.setHtml("".join(lines))
-        self.chat_history.verticalScrollBar().setValue(
-            self.chat_history.verticalScrollBar().maximum()
-        )
+
+        def finish_scroll() -> None:
+            current = self.chat_history.verticalScrollBar()
+            current.setValue(
+                current.maximum()
+                if force_bottom or was_at_bottom
+                else min(previous_value, current.maximum())
+            )
+
+        QTimer.singleShot(0, finish_scroll)
 
     def send_reply(self) -> None:
         text = self.reply_text.text().strip()
@@ -1593,7 +1611,7 @@ class CommunicationsPage(QWidget):
         self.pending_replies.setdefault(person_id, []).append(pending)
         if self.current_person_id == person_id:
             self.chat_messages.append(pending)
-            self._render_chat_messages()
+            self._render_chat_messages(force_bottom=True)
 
     def load_confirmations(self) -> None:
         self._run(self.api.communication_campaigns, self._confirmations_loaded)
