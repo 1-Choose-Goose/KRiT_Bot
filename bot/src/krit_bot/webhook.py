@@ -8,7 +8,7 @@ import time
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -32,6 +32,7 @@ from .db import (
     EXPECTED_ALEMBIC_REVISION,
     AccessAttempt,
     AdminUser,
+    BackupExportReceipt,
     BotState,
     Person,
     PersonRole,
@@ -379,10 +380,46 @@ def create_app(
             watermark = await session.scalar(select(func.max(AuditEvent.id)))
         return {"critical_counts": counts, "audit_watermark": watermark}
 
+    async def store_backup_receipt(payload: dict[str, Any]) -> dict[str, Any]:
+        async with sessions() as session:
+            receipt = await session.scalar(
+                select(BackupExportReceipt).where(
+                    BackupExportReceipt.export_id == payload["export_id"]
+                )
+            )
+            if receipt is None:
+                receipt = BackupExportReceipt(
+                    export_id=payload["export_id"],
+                    installation_id=payload["installation_id"],
+                    principal_id=payload["principal_id"],
+                    status="pending",
+                    created_at=payload["created_at"],
+                )
+                session.add(receipt)
+            else:
+                if receipt.installation_id != payload["installation_id"]:
+                    raise ValueError("installation mismatch")
+                receipt.status = payload["status"]
+                receipt.size_bytes = int(payload.get("size") or 0)
+                receipt.sha256 = str(payload.get("sha256") or "") or None
+                receipt.error = str(payload.get("error") or "")[:500] or None
+                receipt.completed_at = payload.get("completed_at")
+            await session.commit()
+            return {
+                "export_id": receipt.export_id,
+                "installation_id": receipt.installation_id,
+                "status": receipt.status,
+                "size": receipt.size_bytes,
+                "sha256": receipt.sha256 or "",
+                "error": receipt.error,
+                "completed_at": receipt.completed_at,
+            }
+
     backup_export_service = BackupExportService(
         database_url=settings.database_url,
         database_names=settings.krit_database_names,
         metadata_collector=collect_backup_metadata,
+        receipt_writer=store_backup_receipt,
     )
 
     async def systemd_restore_dispatcher(operation_id: str) -> dict[str, Any]:
@@ -669,23 +706,48 @@ def create_app(
         return {"available": True, **counts}
 
     async def collect_backup_status() -> dict[str, Any]:
-        metadata_files = list(settings.backup_root.glob("*.json"))
-        latest = max(metadata_files, key=lambda item: item.stat().st_mtime, default=None)
-        latest_data = (
-            json.loads(latest.read_text(encoding="utf-8")) if latest is not None else None
-        )
+        local_status = await collect_local_backup_installation_status()
         try:
             free_bytes = shutil.disk_usage(settings.backup_root.parent).free
         except OSError:
             free_bytes = None
         return {
             "available": True,
-            "last_backup_at": latest_data.get("created_at") if latest_data else None,
-            "last_result": "success" if latest_data else "not_started",
-            "trusted_count": len(metadata_files),
+            "last_backup_at": local_status["last_success_at"],
+            "last_result": "success" if local_status["last_success_at"] else "not_started",
+            "trusted_count": 0,
             "suspicious_count": 0,
             "safety_set_pending": restore_service.pending_safety() is not None,
             "free_bytes": free_bytes,
+        }
+
+    async def collect_local_backup_installation_status() -> dict[str, Any]:
+        current_since = datetime.now(UTC) - timedelta(hours=36)
+        async with sessions() as session:
+            known = await session.scalar(
+                select(func.count(func.distinct(BackupExportReceipt.installation_id)))
+            )
+            current = await session.scalar(
+                select(func.count(func.distinct(BackupExportReceipt.installation_id))).where(
+                    BackupExportReceipt.status == "success",
+                    BackupExportReceipt.completed_at >= current_since,
+                )
+            )
+            last_success = await session.scalar(
+                select(func.max(BackupExportReceipt.completed_at)).where(
+                    BackupExportReceipt.status == "success"
+                )
+            )
+            last_failure = await session.scalar(
+                select(func.max(BackupExportReceipt.completed_at)).where(
+                    BackupExportReceipt.status == "failed"
+                )
+            )
+        return {
+            "current": int(current or 0),
+            "known": int(known or 0),
+            "last_success_at": last_success.isoformat() if last_success else None,
+            "last_failure_at": last_failure.isoformat() if last_failure else None,
         }
 
     async def target_has_business_data() -> bool:
@@ -705,7 +767,14 @@ def create_app(
         queue_collector=collect_queue_status,
         backup_collector=collect_backup_status,
     )
-    status_snapshot_callback = status_snapshot or status_provider.snapshot
+    base_status_snapshot = status_snapshot or status_provider.snapshot
+
+    async def status_snapshot_callback() -> dict[str, Any]:
+        payload = dict(await base_status_snapshot())
+        payload["local_backup_installations"] = (
+            await collect_local_backup_installation_status()
+        )
+        return payload
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):

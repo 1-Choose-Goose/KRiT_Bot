@@ -286,6 +286,7 @@ def test_backup_controller_runs_once_and_respects_24_hour_guard(tmp_path) -> Non
     class Api:
         def __init__(self) -> None:
             self.starts = 0
+            self.completions: list[dict] = []
 
         def begin_backup_export(self, installation_id: str) -> dict:
             self.starts += 1
@@ -313,6 +314,12 @@ def test_backup_controller_runs_once_and_respects_24_hour_guard(tmp_path) -> Non
                 "sha256": hashlib.sha256(body).hexdigest(),
             }
 
+        def complete_backup_export(
+            self, _export_id: str, _installation_id: str, **payload
+        ) -> dict:
+            self.completions.append(payload)
+            return payload
+
     api = Api()
     store = BackupStore(tmp_path / "Backups")
     controller = BackupController(
@@ -323,6 +330,9 @@ def test_backup_controller_runs_once_and_respects_24_hour_guard(tmp_path) -> Non
     _wait_for_backup(controller)
     assert api.starts == 1
     assert store.latest_trusted() is not None
+    assert api.completions[0]["status"] == "success"
+    assert api.completions[0]["size"] > 0
+    assert len(api.completions[0]["sha256"]) == 64
     assert controller.start_if_due() is False
     assert api.starts == 1
     controller.shutdown()
@@ -344,6 +354,9 @@ def test_backup_controller_rejects_parallel_start(tmp_path) -> None:
             time.sleep(0.1)
             destination = _args[2]
             destination.write_bytes(b"PGDMPcontent")
+            return {}
+
+        def complete_backup_export(self, *_args, **_kwargs) -> dict:
             return {}
 
     controller = BackupController(

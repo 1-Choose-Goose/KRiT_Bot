@@ -18,9 +18,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -165,7 +165,9 @@ class RestoreServerDialog(QDialog):
         self.new_password = QLineEdit()
         self.new_password_repeat = QLineEdit()
         self.confirmation_phrase = QLineEdit()
-        self.confirmation_phrase.setPlaceholderText("ВОССТАНОВИТЬ — если на сервере уже есть данные")
+        self.confirmation_phrase.setPlaceholderText(
+            "ВОССТАНОВИТЬ — если на сервере уже есть данные"
+        )
         for field in (
             self.password,
             self.repeat_password,
@@ -508,6 +510,7 @@ class AdministrationPage(QWidget):
         bot = payload.get("bot") or {}
         queues = payload.get("queues") or {}
         backups = payload.get("backups") or {}
+        local_backups = payload.get("local_backup_installations") or {}
         self.status_labels["server"].setText(
             f"Сервер\n{server.get('hostname', 'Недоступно')} · "
             f"КРиТ {server.get('krit_version', '—')}"
@@ -539,9 +542,10 @@ class AdministrationPage(QWidget):
             f"В работе: {queues.get('processing', 0)} · Ошибки: {queues.get('failed', 0)}"
         )
         self.status_labels["backups"].setText(
-            "Резервные копии\n"
-            f"Доверенных: {backups.get('trusted_count', 0)} · "
-            f"Последняя: {self._format_timestamp(backups.get('last_backup_at'))}"
+            "Локальные копии\n"
+            f"Актуальных компьютеров: {local_backups.get('current', 0)} из "
+            f"{local_backups.get('known', 0)} · Последняя: "
+            f"{self._format_timestamp(local_backups.get('last_success_at'))}"
         )
         self._render_status_details(
             payload=payload,
@@ -554,6 +558,7 @@ class AdministrationPage(QWidget):
             bot=bot,
             queues=queues,
             backups=backups,
+            local_backups=local_backups,
         )
         safety_pending = bool(backups.get("safety_set_pending"))
         self.safety_label.setText(
@@ -636,6 +641,7 @@ class AdministrationPage(QWidget):
         bot: dict[str, Any],
         queues: dict[str, Any],
         backups: dict[str, Any],
+        local_backups: dict[str, Any],
     ) -> None:
         self.status_details.clear()
         load_average = resources.get("load_average")
@@ -719,14 +725,24 @@ class AdministrationPage(QWidget):
             ],
         )
         self._add_status_group(
-            "Резервные копии",
+            "Локальные резервные копии",
             [
-                ("Последняя копия", self._format_timestamp(backups.get("last_backup_at"))),
-                ("Последний результат", backups.get("last_result", "Недоступно")),
-                ("Доверенные комплекты", backups.get("trusted_count", 0)),
-                ("Подозрительные комплекты", backups.get("suspicious_count", 0)),
-                ("Ожидает решения", "Да" if backups.get("safety_set_pending") else "Нет"),
-                ("Свободно в хранилище", self._format_bytes(backups.get("free_bytes"))),
+                ("Известные компьютеры", local_backups.get("known", 0)),
+                ("С актуальной копией", local_backups.get("current", 0)),
+                (
+                    "Последнее успешное сохранение",
+                    self._format_timestamp(local_backups.get("last_success_at")),
+                ),
+                (
+                    "Последняя ошибка сохранения",
+                    self._format_timestamp(local_backups.get("last_failure_at")),
+                ),
+                (
+                    "Страховочный комплект восстановления",
+                    "Ожидает решения"
+                    if backups.get("safety_set_pending")
+                    else "Не ожидает решения",
+                ),
             ],
         )
 

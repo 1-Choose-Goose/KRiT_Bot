@@ -107,6 +107,7 @@ class MainWindow(QMainWindow):
         self.tray.setToolTip("КРиТ · управление")
         self.tray.messageClicked.connect(self._open_last_toast)
         self.tray.show()
+        self.backup_controller.failed.connect(self._backup_failed)
         self.refresh()
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(2000)
@@ -122,6 +123,14 @@ class MainWindow(QMainWindow):
     def _run_daily_backup(self) -> None:
         if not self._closing:
             self.backup_controller.start_if_due()
+
+    def _backup_failed(self, message: str) -> None:
+        self.tray.showMessage(
+            "Резервная копия не создана",
+            f"Проверьте доступ к папке {self.backup_controller.store.root}.\n{message}",
+            QSystemTrayIcon.MessageIcon.Warning,
+            10_000,
+        )
 
     def _build_ui(self) -> None:
         root = QWidget()

@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 from PySide6.QtCore import QObject, QSettings, QThreadPool, Signal
 
 from .api import ManagementApi
 from .backup_store import BackupEntry, BackupStore
 from .workers import Worker
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class BackupController(QObject):
@@ -91,7 +99,32 @@ class BackupController(QObject):
                     export_id, database_name, destination
                 )
                 downloaded[database_name] = destination
-            return self.store.install_export(export, downloaded)
+            entry = self.store.install_export(export, downloaded)
+            digest = _sha256_file(entry.archive)
+            try:
+                self.api.complete_backup_export(
+                    export_id,
+                    self.installation_id,
+                    status="success",
+                    size=entry.archive.stat().st_size,
+                    sha256=digest,
+                )
+            except Exception:
+                # The verified local archive remains valid even if the lightweight
+                # server receipt cannot be delivered during a network interruption.
+                pass
+            return entry
+        except Exception as exc:
+            try:
+                self.api.complete_backup_export(
+                    export_id,
+                    self.installation_id,
+                    status="failed",
+                    error=str(exc),
+                )
+            except Exception:
+                pass
+            raise
         finally:
             for path in downloaded.values():
                 path.unlink(missing_ok=True)

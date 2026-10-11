@@ -33,7 +33,7 @@ def test_alembic_builds_empty_database(tmp_path, monkeypatch) -> None:
         assert "learning_lesson_teacher_segments" in tables
         assert "learning_subject_teachers" in tables
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20261004_administration_v7",
+            "20261011_backup_exports_v8",
         )
         admin_columns = {
             item[1]: item for item in connection.execute("PRAGMA table_info(admin_users)")
@@ -122,7 +122,7 @@ def test_alembic_adopts_known_legacy_database(tmp_path, monkeypatch) -> None:
             "SELECT person_id, max_user_id FROM person_max_identities WHERE person_id = 7"
         ).fetchone() == (7, 700000007)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20261004_administration_v7",
+            "20261011_backup_exports_v8",
         )
         assert connection.execute(
             "SELECT COUNT(*) FROM learning_admin_notifications "

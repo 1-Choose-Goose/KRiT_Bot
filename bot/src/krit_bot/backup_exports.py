@@ -22,6 +22,7 @@ MAGIC = b"KRITDB1\n"
 MetadataCollector = Callable[[str], Awaitable[dict[str, Any]]]
 StreamRunner = Callable[[str], AsyncIterator[bytes]]
 ConflictChecker = Callable[[], bool]
+ReceiptWriter = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 _INSTALLATION_ID = re.compile(r"^[A-Za-z0-9._-]{8,64}$")
 
 
@@ -33,6 +34,14 @@ class BackupExportRequest(BaseModel):
     installation_id: str
 
 
+class BackupExportCompletion(BaseModel):
+    installation_id: str
+    status: str
+    size: int = 0
+    sha256: str = ""
+    error: str | None = None
+
+
 class BackupExportService:
     def __init__(
         self,
@@ -42,6 +51,7 @@ class BackupExportService:
         metadata_collector: MetadataCollector,
         stream_runner: StreamRunner | None = None,
         conflict_checker: ConflictChecker | None = None,
+        receipt_writer: ReceiptWriter | None = None,
         max_concurrent: int = 2,
         lease_minutes: int = 15,
     ) -> None:
@@ -56,6 +66,7 @@ class BackupExportService:
         self.metadata_collector = metadata_collector
         self.stream_runner = stream_runner or self._postgres_chunks
         self.conflict_checker = conflict_checker or (lambda: False)
+        self.receipt_writer = receipt_writer
         self.max_concurrent = max_concurrent
         self.lease = timedelta(minutes=lease_minutes)
         self._exports: dict[str, dict[str, Any]] = {}
@@ -102,7 +113,66 @@ class BackupExportService:
             "databases": databases,
         }
         self._exports[export_id] = stored
+        if self.receipt_writer is not None:
+            try:
+                await self.receipt_writer(
+                    {
+                        "export_id": export_id,
+                        "installation_id": installation_id,
+                        "principal_id": principal_id,
+                        "status": "pending",
+                        "created_at": now,
+                    }
+                )
+            except Exception:
+                self._exports.pop(export_id, None)
+                raise
         return {key: value for key, value in stored.items() if key != "created_at_value"}
+
+    async def complete(
+        self,
+        export_id: str,
+        *,
+        principal_id: int,
+        installation_id: str,
+        status: str,
+        size: int = 0,
+        sha256: str = "",
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        export = self._exports.get(export_id)
+        if export is None:
+            raise FileNotFoundError(export_id)
+        if export["principal_id"] != principal_id:
+            raise PermissionError(export_id)
+        if export["installation_id"] != installation_id:
+            raise ValueError("installation mismatch")
+        if status not in {"success", "failed"}:
+            raise ValueError("invalid completion status")
+        if status == "success" and (size < 1 or not re.fullmatch(r"[0-9a-f]{64}", sha256)):
+            raise ValueError("invalid verified archive metadata")
+        completion = {
+            "export_id": export_id,
+            "installation_id": installation_id,
+            "principal_id": principal_id,
+            "status": status,
+            "size": size if status == "success" else 0,
+            "sha256": sha256 if status == "success" else "",
+            "error": (error or "")[:500] if status == "failed" else None,
+            "created_at": export["created_at_value"],
+            "completed_at": datetime.now(UTC),
+        }
+        previous = export.get("completion")
+        comparable = {key: completion[key] for key in ("status", "size", "sha256", "error")}
+        if previous is not None:
+            if comparable != {
+                key: previous[key] for key in ("status", "size", "sha256", "error")
+            }:
+                raise ValueError("completion conflict")
+            return previous
+        stored = await self.receipt_writer(completion) if self.receipt_writer else completion
+        export["completion"] = stored
+        return stored
 
     async def _postgres_chunks(self, database_name: str) -> AsyncIterator[bytes]:
         url = make_url(self.database_url)
@@ -189,7 +259,7 @@ def create_backup_export_router(
     router = APIRouter(prefix="/api/v1/backups/exports")
 
     async def require_program_user(
-        principal: AdminPrincipal = Depends(require_admin),
+        principal: AdminPrincipal = Depends(require_admin),  # noqa: B008
     ) -> AdminPrincipal:
         if principal.must_change_password or principal.role not in {
             "superadmin",
@@ -202,7 +272,7 @@ def create_backup_export_router(
     @router.post("", status_code=201)
     async def begin_export(
         payload: BackupExportRequest,
-        principal: AdminPrincipal = Depends(require_program_user),
+        principal: AdminPrincipal = Depends(require_program_user),  # noqa: B008
     ) -> dict[str, Any]:
         try:
             return await service.begin(
@@ -220,7 +290,7 @@ def create_backup_export_router(
     async def stream_database(
         export_id: str,
         database_name: str,
-        principal: AdminPrincipal = Depends(require_program_user),
+        principal: AdminPrincipal = Depends(require_program_user),  # noqa: B008
     ) -> StreamingResponse:
         export = service._exports.get(export_id)
         if export is None or database_name not in service.database_names:
@@ -233,5 +303,28 @@ def create_backup_export_router(
             service.stream_database(export_id, database_name, principal.id),
             media_type="application/x-krit-backup-stream",
         )
+
+    @router.post("/{export_id}/complete")
+    async def complete_export(
+        export_id: str,
+        payload: BackupExportCompletion,
+        principal: AdminPrincipal = Depends(require_program_user),  # noqa: B008
+    ) -> dict[str, Any]:
+        try:
+            return await service.complete(
+                export_id,
+                principal_id=principal.id,
+                installation_id=payload.installation_id,
+                status=payload.status,
+                size=payload.size,
+                sha256=payload.sha256,
+                error=payload.error,
+            )
+        except FileNotFoundError:
+            raise HTTPException(status_code=404) from None
+        except PermissionError:
+            raise HTTPException(status_code=403) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
 
     return router

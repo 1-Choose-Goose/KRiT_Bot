@@ -298,6 +298,29 @@ class ManagementApi:
         )
         return data if isinstance(data, dict) else {}
 
+    def complete_backup_export(
+        self,
+        export_id: str,
+        installation_id: str,
+        *,
+        status: str,
+        size: int = 0,
+        sha256: str = "",
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            f"/backups/exports/{export_id}/complete",
+            json={
+                "installation_id": installation_id,
+                "status": status,
+                "size": size,
+                "sha256": sha256,
+                "error": error,
+            },
+        )
+        return data if isinstance(data, dict) else {}
+
     def download_backup_database(
         self,
         export_id: str,

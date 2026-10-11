@@ -196,3 +196,59 @@ async def test_export_api_rejects_initial_password_account() -> None:
             "/api/v1/backups/exports", json={"installation_id": "computer-001"}
         )
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_export_completion_is_owned_idempotent_and_records_no_archive_bytes() -> None:
+    receipts: list[dict] = []
+
+    async def receipt_writer(payload: dict) -> dict:
+        receipts.append(dict(payload))
+        return dict(payload)
+
+    service = BackupExportService(
+        database_url="postgresql+asyncpg://krit:secret@db/postgres",
+        database_names=("krit_bot",),
+        metadata_collector=_metadata,
+        receipt_writer=receipt_writer,
+    )
+    export = await service.begin(principal_id=7, installation_id="computer-001")
+    digest = "a" * 64
+    result = await service.complete(
+        export["id"],
+        principal_id=7,
+        installation_id="computer-001",
+        status="success",
+        size=123,
+        sha256=digest,
+    )
+    repeated = await service.complete(
+        export["id"],
+        principal_id=7,
+        installation_id="computer-001",
+        status="success",
+        size=123,
+        sha256=digest,
+    )
+
+    assert result == repeated
+    assert [row["status"] for row in receipts] == ["pending", "success"]
+    assert all("archive" not in row and "content" not in row for row in receipts)
+    with pytest.raises(PermissionError):
+        await service.complete(
+            export["id"],
+            principal_id=8,
+            installation_id="computer-001",
+            status="success",
+            size=123,
+            sha256=digest,
+        )
+    with pytest.raises(ValueError, match="completion conflict"):
+        await service.complete(
+            export["id"],
+            principal_id=7,
+            installation_id="computer-001",
+            status="success",
+            size=124,
+            sha256=digest,
+        )

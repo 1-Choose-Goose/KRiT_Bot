@@ -92,6 +92,12 @@ class FakeAdministrationApi:
                 "safety_set_pending": False,
                 "free_bytes": 60 * 1024**3,
             },
+            "local_backup_installations": {
+                "current": 2,
+                "known": 3,
+                "last_success_at": "2026-10-06T17:58:00+00:00",
+                "last_failure_at": None,
+            },
         }
 
     def administration_users(self) -> list:
@@ -312,6 +318,8 @@ def test_administration_renders_complete_server_information() -> None:
     assert rendered["PostgreSQL/Схема базы"] == "20261004_administration_v7"
     assert rendered["PostgreSQL/База krit_bot"] == "12,8 МБ"
     assert rendered["MAX-бот/Режим"] == "Webhook"
+    assert rendered["Локальные резервные копии/Известные компьютеры"] == "3"
+    assert "Актуальных компьютеров: 2 из 3" in page.status_labels["backups"].text()
     assert "CPU: 4" in page.status_labels["resources"].text()
 
     page.shutdown()

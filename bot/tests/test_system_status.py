@@ -168,5 +168,35 @@ async def test_system_status_endpoint_is_superadmin_only(tmp_path) -> None:
                 "bot",
                 "queues",
                 "backups",
+                "local_backup_installations",
+            }
+            assert response.json()["local_backup_installations"] == {
+                "current": 0,
+                "known": 0,
+                "last_success_at": None,
+                "last_failure_at": None,
             }
             assert snapshots == 1
+
+            created_export = await client.post(
+                "/api/v1/backups/exports",
+                headers=admin_headers,
+                json={"installation_id": "computer-001"},
+            )
+            assert created_export.status_code == 201
+            completed = await client.post(
+                f"/api/v1/backups/exports/{created_export.json()['id']}/complete",
+                headers=admin_headers,
+                json={
+                    "installation_id": "computer-001",
+                    "status": "success",
+                    "size": 123,
+                    "sha256": "a" * 64,
+                },
+            )
+            assert completed.status_code == 200
+            refreshed = await client.get(
+                "/api/v1/administration/system-status", headers=admin_headers
+            )
+            assert refreshed.json()["local_backup_installations"]["current"] == 1
+            assert refreshed.json()["local_backup_installations"]["known"] == 1

@@ -47,7 +47,7 @@ class Base(DeclarativeBase):
     pass
 
 
-EXPECTED_ALEMBIC_REVISION = "20261004_administration_v7"
+EXPECTED_ALEMBIC_REVISION = "20261011_backup_exports_v8"
 ADMIN_ROLES = frozenset({"superadmin", "director", "administrator"})
 PROTECTED_ADMIN_USERNAME = "choose_goose"
 
@@ -173,6 +173,27 @@ class AdminUser(Base):
     is_protected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class BackupExportReceipt(Base):
+    __tablename__ = "backup_export_receipts"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','success','failed')",
+            name="ck_backup_export_receipts_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    export_id: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
+    installation_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    principal_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    error: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SchemaMigration(Base):
