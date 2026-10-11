@@ -152,16 +152,47 @@ def test_rotation_keeps_seven_daily_and_four_additional_weekly_sets(tmp_path) ->
     assert len(trusted) == 11
 
 
-def test_management_api_streams_backup_with_progress(tmp_path) -> None:
-    body = b"backup-body" * 100
+def _framed_database(body: bytes, *, footer_hash: str | None = None) -> bytes:
+    footer = json.dumps(
+        {
+            "complete": True,
+            "size": len(body),
+            "sha256": footer_hash or hashlib.sha256(body).hexdigest(),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return (
+        b"KRITDB1\n"
+        + len(body).to_bytes(4, "big")
+        + body
+        + (0).to_bytes(4, "big")
+        + len(footer).to_bytes(4, "big")
+        + footer
+    )
+
+
+def test_management_api_streams_verified_database_with_progress(tmp_path) -> None:
+    body = b"PGDMP" + b"backup-body" * 100
+    framed = _framed_database(body)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
-            return httpx.Response(201, json={"id": "backup-1"})
+            assert request.url.path.endswith("/backups/exports")
+            assert json.loads(request.content)["installation_id"] == "computer-001"
+            return httpx.Response(
+                201,
+                json={
+                    "id": "export-1",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "schema_version": "revision-7",
+                    "databases": [{"name": "krit_bot"}],
+                },
+            )
         return httpx.Response(
             200,
-            content=body,
-            headers={"content-length": str(len(body))},
+            content=framed,
+            headers={"content-length": str(len(framed))},
         )
 
     api = ManagementApi("https://example.test/api/v1")
@@ -170,15 +201,65 @@ def test_management_api_streams_backup_with_progress(tmp_path) -> None:
         base_url="https://example.test/api/v1",
         transport=httpx.MockTransport(handler),
     )
-    assert api.create_backup()["id"] == "backup-1"
+    assert api.begin_backup_export("computer-001")["id"] == "export-1"
     progress: list[tuple[int, int | None]] = []
-    destination = tmp_path / "download.backup"
-    assert (
-        api.download_backup(
-            "backup-1", destination, lambda current, total: progress.append((current, total))
-        )
-        == destination
+    destination = tmp_path / "krit_bot.dump"
+    footer = api.download_backup_database(
+        "export-1",
+        "krit_bot",
+        destination,
+        lambda current, total: progress.append((current, total)),
     )
     assert destination.read_bytes() == body
+    assert footer["sha256"] == hashlib.sha256(body).hexdigest()
     assert progress[-1] == (len(body), len(body))
     api.close()
+
+
+def test_database_stream_without_valid_footer_is_deleted(tmp_path) -> None:
+    body = b"PGDMPtruncated"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"KRITDB1\n" + len(body).to_bytes(4, "big") + body)
+
+    api = ManagementApi("https://example.test/api/v1")
+    api._client.close()
+    api._client = httpx.Client(
+        base_url="https://example.test/api/v1", transport=httpx.MockTransport(handler)
+    )
+    destination = tmp_path / "krit_bot.dump"
+
+    with pytest.raises(ValueError, match="incomplete backup stream"):
+        api.download_backup_database("export-1", "krit_bot", destination)
+
+    assert not destination.exists()
+    api.close()
+
+
+def test_install_export_builds_compatible_trusted_archive(tmp_path) -> None:
+    store = BackupStore(tmp_path / "Backups")
+    database = tmp_path / "krit_bot.dump"
+    database.write_bytes(b"PGDMPdatabase-content")
+    created_at = datetime(2026, 10, 11, 12, tzinfo=UTC)
+    export = {
+        "id": "a" * 32,
+        "created_at": created_at.isoformat(),
+        "schema_version": "revision-7",
+        "databases": [
+            {
+                "name": "krit_bot",
+                "critical_counts": {"persons": 3},
+                "audit_watermark": 12,
+            }
+        ],
+    }
+
+    entry = store.install_export(export, {"krit_bot": database})
+
+    assert entry.trust == "trusted"
+    assert entry.archive.parent == store.root
+    assert entry.archive.suffix == ".backup"
+    assert store.latest_trusted().archive == entry.archive
+    assert not list(store.root.glob("*.part"))
+    with zipfile.ZipFile(entry.archive) as archive:
+        assert set(archive.namelist()) == {"manifest.json", "krit_bot.dump"}

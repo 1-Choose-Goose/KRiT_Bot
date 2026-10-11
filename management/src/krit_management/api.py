@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -282,6 +285,104 @@ class ManagementApi:
     def create_backup(self) -> dict[str, Any]:
         data = self._request("POST", "/administration/backups")
         return data if isinstance(data, dict) else {}
+
+    def begin_backup_export(self, installation_id: str) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            "/backups/exports",
+            json={"installation_id": installation_id},
+        )
+        return data if isinstance(data, dict) else {}
+
+    def download_backup_database(
+        self,
+        export_id: str,
+        database_name: str,
+        destination: Path,
+        progress: Callable[[int, int | None], None] | None = None,
+    ) -> dict[str, Any]:
+        iterator = None
+        buffer = bytearray()
+
+        def read_exact(size: int) -> bytes:
+            while len(buffer) < size:
+                try:
+                    block = next(iterator)  # type: ignore[arg-type]
+                except StopIteration as exc:
+                    raise ValueError("incomplete backup stream") from exc
+                buffer.extend(block)
+            result = bytes(buffer[:size])
+            del buffer[:size]
+            return result
+
+        try:
+            with self._client.stream(
+                "GET", f"/backups/exports/{export_id}/databases/{database_name}"
+            ) as response:
+                if response.is_error:
+                    try:
+                        payload = response.json()
+                        detail = (
+                            payload.get("detail", payload)
+                            if isinstance(payload, dict)
+                            else payload
+                        )
+                    except ValueError:
+                        detail = response.text
+                    raise ApiError(
+                        _format_api_error(response.status_code, detail, str(response.url.path)),
+                        status_code=response.status_code,
+                        detail=detail,
+                        path=str(response.url.path),
+                    )
+                iterator = iter(response.iter_bytes())
+                if read_exact(8) != b"KRITDB1\n":
+                    raise ValueError("invalid backup stream header")
+                digest = hashlib.sha256()
+                downloaded = 0
+                with destination.open("wb") as stream:
+                    while True:
+                        frame_size = int.from_bytes(read_exact(4), "big")
+                        if frame_size == 0:
+                            break
+                        if frame_size > 8 * 1024 * 1024:
+                            raise ValueError("invalid backup stream frame")
+                        block = read_exact(frame_size)
+                        stream.write(block)
+                        digest.update(block)
+                        downloaded += len(block)
+                        if progress is not None:
+                            progress(downloaded, None)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                footer_size = int.from_bytes(read_exact(4), "big")
+                if footer_size <= 0 or footer_size > 64 * 1024:
+                    raise ValueError("invalid backup stream footer")
+                footer = json.loads(read_exact(footer_size).decode("utf-8"))
+                if buffer or any(iterator):
+                    raise ValueError("unexpected trailing backup data")
+                if not footer.get("complete"):
+                    raise ValueError("incomplete backup stream")
+                if downloaded != int(footer.get("size") or -1):
+                    raise ValueError("backup size mismatch")
+                if digest.hexdigest() != str(footer.get("sha256") or ""):
+                    raise ValueError("backup checksum mismatch")
+                if progress is not None:
+                    progress(downloaded, downloaded)
+                return footer
+        except httpx.HTTPError as exc:
+            destination.unlink(missing_ok=True)
+            raise ApiError(
+                "Не удалось скачать резервную копию. Проверьте подключение к сети."
+            ) from exc
+        except OSError as exc:
+            destination.unlink(missing_ok=True)
+            raise ApiError(
+                "Не удалось сохранить резервную копию. Проверьте свободное место на диске."
+            ) from exc
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            destination.unlink(missing_ok=True)
+            raise
 
     def download_backup(
         self,

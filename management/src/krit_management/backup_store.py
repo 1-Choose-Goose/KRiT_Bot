@@ -5,7 +5,7 @@ import json
 import os
 import sys
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -210,6 +210,78 @@ class BackupStore:
             if archive.is_file() and not metadata.is_file():
                 archive.unlink(missing_ok=True)
             raise
+
+    def install_export(
+        self, export: dict[str, Any], database_files: Mapping[str, Path]
+    ) -> BackupEntry:
+        self.root.mkdir(parents=True, exist_ok=True)
+        backup_id = str(export.get("id") or "")
+        if not backup_id or len(backup_id) > 64 or not backup_id.replace("-", "").isalnum():
+            raise ValueError("invalid backup id")
+        metadata_rows = list(export.get("databases") or [])
+        expected_names = [str(item.get("name") or "") for item in metadata_rows]
+        if not expected_names or set(expected_names) != set(database_files):
+            raise ValueError("backup database set mismatch")
+        manifest_databases: list[dict[str, Any]] = []
+        for row in metadata_rows:
+            name = str(row["name"])
+            source = database_files[name]
+            if not source.is_file():
+                raise ValueError("backup database file is missing")
+            with source.open("rb") as stream:
+                if stream.read(5) != b"PGDMP":
+                    raise ValueError("invalid pg_dump custom format")
+            manifest_databases.append(
+                {
+                    "name": name,
+                    "filename": f"{name}.dump",
+                    "size": source.stat().st_size,
+                    "sha256": self._sha256(source),
+                    "critical_counts": row.get("critical_counts", {}),
+                    "audit_watermark": row.get("audit_watermark"),
+                }
+            )
+        manifest = {
+            "format": 1,
+            "id": backup_id,
+            "created_at": str(export["created_at"]),
+            "schema_version": str(export["schema_version"]),
+            "archive_sha256": None,
+            "databases": manifest_databases,
+        }
+        assembly = self.root / f"assemble-{backup_id}.backup.part"
+        try:
+            with zipfile.ZipFile(
+                assembly, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
+            ) as archive:
+                archive.writestr(
+                    "manifest.json",
+                    json.dumps(manifest, ensure_ascii=False, sort_keys=True),
+                )
+                for item in manifest_databases:
+                    archive.write(
+                        database_files[str(item["name"])], str(item["filename"])
+                    )
+            info = {
+                "id": backup_id,
+                "created_at": str(export["created_at"]),
+                "schema_version": str(export["schema_version"]),
+                "size": assembly.stat().st_size,
+                "sha256": self._sha256(assembly),
+                "databases": manifest_databases,
+            }
+
+            def chunks() -> Iterable[bytes]:
+                with assembly.open("rb") as stream:
+                    while block := stream.read(1024 * 1024):
+                        yield block
+
+            entry = self.install_from_stream(info, chunks())
+            if entry.trust == "trusted":
+                self.rotate(daily=7, weekly=4)
+            return entry
+        finally:
+            assembly.unlink(missing_ok=True)
 
     def rotate(self, *, daily: int = 7, weekly: int = 4) -> None:
         trusted = sorted(
