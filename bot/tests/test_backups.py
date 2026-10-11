@@ -1,7 +1,5 @@
 import asyncio
-import io
 import json
-import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -15,7 +13,7 @@ from krit_bot.webhook import create_app
 
 
 @pytest.mark.asyncio
-async def test_sqlite_backup_api_creates_verified_complete_archive(tmp_path) -> None:
+async def test_app_does_not_expose_persistent_backup_api(tmp_path) -> None:
     database = tmp_path / "krit.db"
     settings = Settings(
         database_url=f"sqlite+aiosqlite:///{database.as_posix()}",
@@ -36,24 +34,9 @@ async def test_sqlite_backup_api_creates_verified_complete_archive(tmp_path) -> 
                 )
             ).json()["access_token"]
             headers = {"Authorization": f"Bearer {token}"}
-            created = await client.post("/api/v1/administration/backups", headers=headers)
-            assert created.status_code == 201, created.text
-            info = created.json()
-            assert info["size"] > 0
-            assert len(info["sha256"]) == 64
-            assert info["schema_version"]
-            assert [item["name"] for item in info["databases"]] == ["krit_bot"]
-
-            downloaded = await client.get(
-                f"/api/v1/administration/backups/{info['id']}", headers=headers
-            )
-            assert downloaded.status_code == 200
-            assert len(downloaded.content) == info["size"]
-            with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
-                assert set(archive.namelist()) == {"manifest.json", "krit_bot.sqlite"}
-                manifest = json.loads(archive.read("manifest.json"))
-                assert manifest["archive_sha256"] is None
-                assert manifest["databases"][0]["name"] == "krit_bot"
+            response = await client.post("/api/v1/administration/backups", headers=headers)
+            assert response.status_code == 404
+            assert not settings.backup_root.exists()
 
 
 @pytest.mark.asyncio

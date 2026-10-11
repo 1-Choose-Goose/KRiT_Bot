@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .administration import create_administration_router
 from .auth import AdminPrincipal, decode_access_token, issue_access_token, normalize_admin_username
-from .backups import BackupScheduler, BackupService, create_backup_router
+from .backup_exports import BackupExportService, create_backup_export_router
 from .communication_models import CommunicationMessage
 from .communications import create_communications_router, run_communications_maintenance
 from .config import Settings
@@ -379,18 +379,10 @@ def create_app(
             watermark = await session.scalar(select(func.max(AuditEvent.id)))
         return {"critical_counts": counts, "audit_watermark": watermark}
 
-    backup_service = BackupService(
+    backup_export_service = BackupExportService(
         database_url=settings.database_url,
         database_names=settings.krit_database_names,
-        root=settings.backup_root,
         metadata_collector=collect_backup_metadata,
-    )
-    backup_scheduler = BackupScheduler(
-        backup_service,
-        interval_seconds=settings.backup_interval_seconds,
-        initial_delay_seconds=settings.backup_initial_delay_seconds,
-        daily_retention=settings.backup_daily_retention,
-        weekly_retention=settings.backup_weekly_retention,
     )
 
     async def systemd_restore_dispatcher(operation_id: str) -> dict[str, Any]:
@@ -452,14 +444,13 @@ def create_app(
             else (None if restore_dispatcher is not None else systemd_safety_delete_dispatcher)
         ),
     )
-    backup_service.conflict_checker = restore_service.has_active_operation
-    restore_service.conflict_checker = lambda: backup_service.lock.locked()
+    backup_export_service.conflict_checker = restore_service.has_active_operation
+    restore_service.conflict_checker = lambda: backup_export_service.active
     polling_task: asyncio.Task[None] | None = None
     syndication_task: asyncio.Task[None] | None = None
     vk_long_poll_task: asyncio.Task[None] | None = None
     learning_notifications_task: asyncio.Task[None] | None = None
     communications_task: asyncio.Task[None] | None = None
-    automatic_backup_task: asyncio.Task[None] | None = None
     max_subscription_task: asyncio.Task[bool] | None = None
     syndication_worker: SyndicationWorker | None = None
     invalid_password_hash = password_hash.hash("invalid-password")
@@ -719,13 +710,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         nonlocal polling_task, syndication_task, vk_long_poll_task, syndication_worker
-        nonlocal learning_notifications_task, communications_task, automatic_backup_task
+        nonlocal learning_notifications_task, communications_task
         await ensure_schema(engine)
         await ensure_bootstrap_admin()
-        if settings.automatic_backups_enabled:
-            automatic_backup_task = asyncio.create_task(
-                backup_scheduler.run(), name="automatic-backups"
-            )
         await start_max_workers()
         if settings.vk_syndication_enabled:
             required = {
@@ -788,10 +775,6 @@ def create_app(
             await asyncio.gather(syndication_task, return_exceptions=True)
         if syndication_worker is not None:
             await syndication_worker.close()
-        if automatic_backup_task is not None:
-            automatic_backup_task.cancel()
-            await asyncio.gather(automatic_backup_task, return_exceptions=True)
-            automatic_backup_task = None
         await stop_max_workers()
         await api.close()
         await engine.dispose()
@@ -804,7 +787,7 @@ def create_app(
             center_timezone=settings.center_timezone,
         )
     )
-    app.include_router(create_backup_router(require_admin, backup_service))
+    app.include_router(create_backup_export_router(require_admin, backup_export_service))
     app.include_router(
         create_restore_router(
             sessions,
