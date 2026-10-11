@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from PySide6.QtCore import Qt, QThreadPool, QTimer
@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import ManagementApi
-from .backup_store import BackupStore
+from .backup_controller import BackupController
 from .dialogs import ChangePasswordDialog
 from .widgets import configure_form_layout
 from .workers import Worker
@@ -200,11 +200,18 @@ class RestoreServerDialog(QDialog):
 
 
 class AdministrationPage(QWidget):
-    def __init__(self, api: ManagementApi, parent=None) -> None:
+    def __init__(
+        self,
+        api: ManagementApi,
+        parent=None,
+        *,
+        backup_controller: BackupController | None = None,
+    ) -> None:
         super().__init__(parent)
         self.api = api
-        self.backup_store = BackupStore.default()
-        self._backup_running = False
+        self._owns_backup_controller = backup_controller is None
+        self.backup_controller = backup_controller or BackupController(api, parent=self)
+        self.backup_store = self.backup_controller.store
         self.pool = QThreadPool(self)
         self._workers: set[Worker] = set()
         self._status_running = False
@@ -392,6 +399,9 @@ class AdministrationPage(QWidget):
         )
         self.trust_backup_button.clicked.connect(self._trust_selected_backup)
         self.delete_backup_button.clicked.connect(self._delete_selected_backup)
+        self.backup_controller.completed.connect(self._backup_completed)
+        self.backup_controller.failed.connect(self._backup_failed)
+        self.backup_controller.state_changed.connect(self._backup_state_changed)
         self._selection_changed()
         self._render_backup_summary()
 
@@ -406,6 +416,8 @@ class AdministrationPage(QWidget):
 
     def shutdown(self) -> None:
         self.deactivate()
+        if self._owns_backup_controller:
+            self.backup_controller.shutdown()
         self.pool.clear()
         self.pool.waitForDone(16_000)
         self._workers.clear()
@@ -793,50 +805,21 @@ class AdministrationPage(QWidget):
         self._start_backup()
 
     def run_daily_backup(self) -> None:
-        latest = self.backup_store.latest_trusted()
-        if latest is not None and datetime.now(UTC) - latest.created_at < timedelta(hours=24):
-            self._render_backup_summary()
-            return
-        self._start_backup()
+        self.backup_controller.start_if_due()
 
     def _start_backup(self) -> None:
-        if self._backup_running:
-            return
-        self._backup_running = True
-        self.backup_button.setEnabled(False)
+        self.backup_controller.start(manual=True)
 
-        def create_and_store():
-            self.backup_store.root.mkdir(parents=True, exist_ok=True)
-            self.backup_store.discard_partial()
-            info = self.api.create_backup()
-            temporary = self.backup_store.root / f"download-{info['id']}.part"
-            try:
-                self.api.download_backup(str(info["id"]), temporary)
+    def _backup_state_changed(self) -> None:
+        self.backup_button.setEnabled(not self.backup_controller.running)
 
-                def chunks():
-                    with temporary.open("rb") as stream:
-                        while block := stream.read(1024 * 1024):
-                            yield block
+    def _backup_completed(self, _result: object) -> None:
+        self._render_backup_summary()
+        self.refresh_status()
 
-                entry = self.backup_store.install_from_stream(info, chunks())
-                self.backup_store.rotate(daily=7, weekly=4)
-                return entry
-            finally:
-                temporary.unlink(missing_ok=True)
-
-        def complete(_result: object) -> None:
-            self._backup_running = False
-            self.backup_button.setEnabled(True)
-            self._render_backup_summary()
-            self.refresh_status()
-
-        def failed(message: str) -> None:
-            self._backup_running = False
-            self.backup_button.setEnabled(True)
-            self._render_backup_summary()
-            QMessageBox.warning(self, "Резервная копия не создана", message)
-
-        self._run(create_and_store, complete, failed)
+    def _backup_failed(self, message: str) -> None:
+        self._render_backup_summary()
+        QMessageBox.warning(self, "Резервная копия не создана", message)
 
     def _render_backup_summary(self) -> None:
         entries = self.backup_store.entries()

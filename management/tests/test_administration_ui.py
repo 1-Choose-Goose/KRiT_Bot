@@ -103,6 +103,21 @@ def _labels(window: MainWindow) -> list[str]:
     return [window.main_nav.item(index).text() for index in range(window.main_nav.count())]
 
 
+def test_every_role_has_local_backup_controller() -> None:
+    app = QApplication.instance() or QApplication([])
+    for role in ("superadmin", "director", "administrator"):
+        window = MainWindow(FakeAdministrationApi(role))  # type: ignore[arg-type]
+        assert window.backup_controller is not None
+        if role == "superadmin":
+            assert window.administration_page is not None
+            assert (
+                window.administration_page.backup_controller
+                is window.backup_controller
+            )
+        window.close()
+        app.processEvents()
+
+
 def test_navigation_respects_roles_and_admin_status_runs_only_while_visible(
     monkeypatch, tmp_path
 ) -> None:

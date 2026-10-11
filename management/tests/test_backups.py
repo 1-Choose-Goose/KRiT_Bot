@@ -12,6 +12,7 @@ import pytest
 
 import krit_management.backup_store as backup_store_module
 from krit_management.api import ManagementApi
+from krit_management.backup_controller import BackupController
 from krit_management.backup_store import BackupStore, application_directory
 
 
@@ -263,3 +264,94 @@ def test_install_export_builds_compatible_trusted_archive(tmp_path) -> None:
     assert not list(store.root.glob("*.part"))
     with zipfile.ZipFile(entry.archive) as archive:
         assert set(archive.namelist()) == {"manifest.json", "krit_bot.dump"}
+
+
+def _wait_for_backup(controller: BackupController, timeout_ms: int = 3_000) -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    loop = QEventLoop()
+    controller.completed.connect(loop.quit)
+    controller.failed.connect(loop.quit)
+    QTimer.singleShot(timeout_ms, loop.quit)
+    loop.exec()
+    app.processEvents()
+    assert controller.running is False
+
+
+def test_backup_controller_runs_once_and_respects_24_hour_guard(tmp_path) -> None:
+    body = b"PGDMPdatabase-content"
+
+    class Api:
+        def __init__(self) -> None:
+            self.starts = 0
+
+        def begin_backup_export(self, installation_id: str) -> dict:
+            self.starts += 1
+            assert installation_id == "computer-001"
+            return {
+                "id": "b" * 32,
+                "created_at": datetime.now(UTC).isoformat(),
+                "schema_version": "revision-7",
+                "databases": [
+                    {
+                        "name": "krit_bot",
+                        "critical_counts": {"persons": 3},
+                        "audit_watermark": 12,
+                    }
+                ],
+            }
+
+        def download_backup_database(
+            self, _export_id: str, _name: str, destination, _progress=None
+        ) -> dict:
+            destination.write_bytes(body)
+            return {
+                "complete": True,
+                "size": len(body),
+                "sha256": hashlib.sha256(body).hexdigest(),
+            }
+
+    api = Api()
+    store = BackupStore(tmp_path / "Backups")
+    controller = BackupController(
+        api, store=store, installation_id="computer-001"  # type: ignore[arg-type]
+    )
+
+    assert controller.start_if_due() is True
+    _wait_for_backup(controller)
+    assert api.starts == 1
+    assert store.latest_trusted() is not None
+    assert controller.start_if_due() is False
+    assert api.starts == 1
+    controller.shutdown()
+
+
+def test_backup_controller_rejects_parallel_start(tmp_path) -> None:
+    class Api:
+        def begin_backup_export(self, _installation_id: str) -> dict:
+            return {
+                "id": "c" * 32,
+                "created_at": datetime.now(UTC).isoformat(),
+                "schema_version": "revision-7",
+                "databases": [{"name": "krit_bot"}],
+            }
+
+        def download_backup_database(self, *_args, **_kwargs) -> dict:
+            import time
+
+            time.sleep(0.1)
+            destination = _args[2]
+            destination.write_bytes(b"PGDMPcontent")
+            return {}
+
+    controller = BackupController(
+        Api(),  # type: ignore[arg-type]
+        store=BackupStore(tmp_path / "Backups"),
+        installation_id="computer-001",
+    )
+    assert controller.start(manual=True) is True
+    assert controller.start(manual=True) is False
+    _wait_for_backup(controller)
+    controller.shutdown()

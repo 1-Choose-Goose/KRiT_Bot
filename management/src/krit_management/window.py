@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from .administration_page import AdministrationPage, ReportsPage
 from .api import ManagementApi
+from .backup_controller import BackupController
 from .communications_page import CommunicationsPage
 from .dialogs import ROLE_LABELS, PersonDialog, person_roles
 from .learning_page import LearningPage
@@ -65,6 +66,7 @@ class MainWindow(QMainWindow):
     def __init__(self, api: ManagementApi) -> None:
         super().__init__()
         self.api = api
+        self.backup_controller = BackupController(api, parent=self)
         self.people: list[dict[str, Any]] = []
         self.archived_people: list[dict[str, Any]] = []
         self.attempts: list[dict[str, Any]] = []
@@ -114,13 +116,12 @@ class MainWindow(QMainWindow):
         self.notification_timer.setInterval(10_000)
         self.notification_timer.timeout.connect(self._poll_notifications)
         self.notification_timer.start()
-        if self.administration_page is not None:
-            QTimer.singleShot(5_000, self._run_daily_backup)
+        QTimer.singleShot(5_000, self._run_daily_backup)
         QTimer.singleShot(2500, self._check_updates_automatically)
 
     def _run_daily_backup(self) -> None:
-        if not self._closing and self.administration_page is not None:
-            self.administration_page.run_daily_backup()
+        if not self._closing:
+            self.backup_controller.start_if_due()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -151,7 +152,9 @@ class MainWindow(QMainWindow):
         )
         self.pages.addWidget(self.reports_page)
         if self.role == "superadmin":
-            self.administration_page = AdministrationPage(self.api)
+            self.administration_page = AdministrationPage(
+                self.api, backup_controller=self.backup_controller
+            )
             administration_widget: QWidget = self.administration_page
         else:
             administration_widget = self._access_denied_page(
@@ -1235,6 +1238,7 @@ class MainWindow(QMainWindow):
         self.communications_page.shutdown()
         if self.administration_page is not None:
             self.administration_page.shutdown()
+        self.backup_controller.shutdown()
         self.pool.clear()
         self.pool.waitForDone(16000)
         self._workers.clear()
