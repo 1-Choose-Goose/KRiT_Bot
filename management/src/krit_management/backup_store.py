@@ -3,12 +3,19 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+
+def application_directory() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,9 +36,7 @@ class BackupStore:
 
     @classmethod
     def default(cls) -> BackupStore:
-        local_appdata = os.environ.get("LOCALAPPDATA")
-        base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
-        return cls(base / "KRiT" / "Backups")
+        return cls(application_directory() / "Backups")
 
     @staticmethod
     def _sha256(path: Path) -> str:

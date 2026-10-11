@@ -5,12 +5,14 @@ import io
 import json
 import zipfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 import pytest
 
+import krit_management.backup_store as backup_store_module
 from krit_management.api import ManagementApi
-from krit_management.backup_store import BackupStore
+from krit_management.backup_store import BackupStore, application_directory
 
 
 def _archive(
@@ -54,9 +56,40 @@ def _archive(
     return info, body
 
 
-def test_default_store_uses_local_appdata(monkeypatch, tmp_path) -> None:
+def test_default_store_uses_directory_next_to_frozen_executable(
+    monkeypatch, tmp_path
+) -> None:
+    executable = tmp_path / "KRiTManagement.exe"
+    monkeypatch.setattr(backup_store_module.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(backup_store_module.sys, "executable", str(executable))
+
+    assert application_directory() == tmp_path
+    assert BackupStore.default().root == tmp_path / "Backups"
+
+
+def test_source_default_store_uses_management_directory(monkeypatch) -> None:
+    monkeypatch.delattr(backup_store_module.sys, "frozen", raising=False)
+    expected = Path(backup_store_module.__file__).resolve().parents[2]
+
+    assert application_directory() == expected
+    assert BackupStore.default().root == expected / "Backups"
+
+
+def test_default_store_never_falls_back_to_localappdata(monkeypatch, tmp_path) -> None:
+    monkeypatch.delattr(backup_store_module.sys, "frozen", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
-    assert BackupStore.default().root == tmp_path / "KRiT" / "Backups"
+
+    assert tmp_path not in BackupStore.default().root.parents
+
+
+def test_installer_preserves_writable_backup_directory() -> None:
+    installer = (
+        Path(__file__).resolve().parents[1] / "packaging" / "windows-installer.iss"
+    ).read_text(encoding="utf-8-sig")
+
+    assert '[Dirs]' in installer
+    assert 'Name: "{app}\\Backups"' in installer
+    assert "uninsneveruninstall" in installer
 
 
 def test_install_is_atomic_and_quarantines_unexplained_loss(tmp_path) -> None:

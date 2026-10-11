@@ -46,6 +46,9 @@ Name: "desktopicon"; Description: "Создать ярлык на рабочем
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[Dirs]
+Name: "{app}\Backups"; Permissions: users-modify; Flags: uninsneveruninstall
+
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\KRiTManagement.exe"; WorkingDir: "{app}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\KRiTManagement.exe"; WorkingDir: "{app}"; Tasks: desktopicon
