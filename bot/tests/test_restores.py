@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import time
 import zipfile
 from pathlib import Path
 
@@ -143,6 +145,48 @@ async def test_restore_refuses_to_start_while_backup_is_active(tmp_path) -> None
 
 
 @pytest.mark.asyncio
+async def test_cancel_abandoned_restore_allows_next_operation(tmp_path) -> None:
+    async def dispatch(_operation_id: str) -> dict:
+        return {"id": "safety"}
+
+    service = RestoreService(
+        root=tmp_path,
+        database_names=("krit_bot",),
+        dispatcher=dispatch,
+        free_space=lambda: 10_000_000,
+    )
+    info, _body = _backup_body()
+    operation = await service.create(info, target_has_business_data=True)
+
+    assert service.cancel(operation["id"]) == {"cancelled": True}
+    assert not (tmp_path / operation["id"]).exists()
+    assert (await service.create(info, target_has_business_data=True))["phase"] == "created"
+
+
+@pytest.mark.asyncio
+async def test_stale_unstarted_restore_does_not_block_new_operation(tmp_path) -> None:
+    async def dispatch(_operation_id: str) -> dict:
+        return {"id": "safety"}
+
+    service = RestoreService(
+        root=tmp_path,
+        database_names=("krit_bot",),
+        dispatcher=dispatch,
+        free_space=lambda: 10_000_000,
+    )
+    info, _body = _backup_body()
+    abandoned = await service.create(info, target_has_business_data=True)
+    state_path = tmp_path / abandoned["id"] / "state.json"
+    stale_time = time.time() - 2 * 60 * 60
+    os.utime(state_path, (stale_time, stale_time))
+
+    replacement = await service.create(info, target_has_business_data=True)
+
+    assert replacement["id"] != abandoned["id"]
+    assert not (tmp_path / abandoned["id"]).exists()
+
+
+@pytest.mark.asyncio
 async def test_restore_api_streams_archive_and_requires_safety_decision(tmp_path) -> None:
     dispatched: list[str] = []
     preserved_hashes: list[str] = []
@@ -179,6 +223,16 @@ async def test_restore_api_streams_archive_and_requires_safety_decision(tmp_path
                 )
             ).json()
             headers = {"Authorization": f"Bearer {login['access_token']}"}
+            created = await client.post(
+                "/api/v1/administration/restores", headers=headers, json=info
+            )
+            assert created.status_code == 201, created.text
+            operation_id = created.json()["id"]
+            cancelled = await client.delete(
+                f"/api/v1/administration/restores/{operation_id}", headers=headers
+            )
+            assert cancelled.status_code == 200
+            assert cancelled.json() == {"cancelled": True}
             created = await client.post(
                 "/api/v1/administration/restores", headers=headers, json=info
             )

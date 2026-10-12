@@ -244,6 +244,84 @@ def test_restore_to_current_server_uses_local_copy_and_current_address(
     app.processEvents()
 
 
+def test_restore_cancels_server_operation_when_confirmation_is_invalid(
+    monkeypatch, tmp_path
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    archive = tmp_path / "trusted.backup"
+    archive.write_bytes(b"local backup")
+    latest = SimpleNamespace(
+        archive=archive,
+        created_at=datetime(2026, 10, 12, 20, 4, tzinfo=UTC),
+        info={"id": "trusted", "databases": [{"name": "krit_bot"}]},
+    )
+
+    class Store:
+        def latest_trusted(self):
+            return latest
+
+    class Field:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def text(self) -> str:
+            return self.value
+
+    class Dialog:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.username = Field("admin")
+            self.password = Field("secret-password")
+            self.new_password = Field("")
+            self.confirmation_phrase = Field("НЕВЕРНО")
+
+        def exec(self):
+            return administration_module.QDialog.DialogCode.Accepted
+
+        def server_url(self) -> str:
+            return "https://current.example"
+
+    calls: list[tuple] = []
+
+    class Target:
+        def login(self, _username: str, _password: str) -> dict:
+            return {"must_change_password": False}
+
+        def create_restore(self, _info: dict) -> dict:
+            calls.append(("create",))
+            return {"id": "restore-1", "target_has_business_data": True}
+
+        def cancel_restore(self, restore_id: str) -> dict:
+            calls.append(("cancel", restore_id))
+            return {"cancelled": True}
+
+        def close(self) -> None:
+            calls.append(("close",))
+
+    monkeypatch.setattr(administration_module, "RestoreServerDialog", Dialog)
+    monkeypatch.setattr(
+        administration_module.ManagementApi, "for_server", lambda _url: Target()
+    )
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_args, **_kwargs: None)
+    api = FakeAdministrationApi("superadmin", username="admin")
+    api.server_url = lambda: "https://current.example"  # type: ignore[attr-defined]
+    page = AdministrationPage(api)  # type: ignore[arg-type]
+    page.backup_store = Store()  # type: ignore[assignment]
+
+    def run(function, _success=None, failure=None):
+        try:
+            function()
+        except Exception as exc:
+            failure(str(exc))
+
+    page._run = run  # type: ignore[method-assign]
+
+    page._restore_databases()
+
+    assert calls == [("create",), ("cancel", "restore-1"), ("close",)]
+    page.shutdown()
+    app.processEvents()
+
+
 def test_every_role_has_local_backup_controller() -> None:
     app = QApplication.instance() or QApplication([])
     for role in ("superadmin", "director", "administrator"):

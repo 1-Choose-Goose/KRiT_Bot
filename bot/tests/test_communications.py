@@ -21,6 +21,8 @@ from krit_bot.communication_models import (
     PersonNotificationOverride,
 )
 from krit_bot.communications import (
+    BundleLesson,
+    DailyBundle,
     EffectivePolicy,
     NotificationPolicyResolver,
     _campaign_delivery_counts_batch,
@@ -66,6 +68,64 @@ from krit_bot.learning_models import (
     Subject,
 )
 from krit_bot.webhook import create_app
+
+
+def _message_bundle(context: str, *, lessons_count: int = 1) -> DailyBundle:
+    lessons = tuple(
+        BundleLesson(
+            id=index + 1,
+            revision=1,
+            start_at=datetime(2026, 10, 12, 15 + index, 0),
+            end_at=datetime(2026, 10, 12, 16 + index, 0),
+            subject="Русский язык",
+            teacher="Рябова Галина Викторовна",
+            room="Кабинет №1",
+            students=("Пупкин Иван Пупкович",),
+        )
+        for index in range(lessons_count)
+    )
+    return DailyBundle(
+        local_date=date(2026, 10, 12),
+        subject_person_id=7,
+        recipient_person_id=7 if context == "student" else 8,
+        recipient_context=context,
+        subject_name="Пупкин Иван Пупкович",
+        lessons=lessons,
+    )
+
+
+def test_confirmation_messages_are_natural_for_every_recipient_context() -> None:
+    student = render_bundle(_message_bundle("student"), confirmation=True)
+    guardian = render_bundle(_message_bundle("guardian"), confirmation=True)
+    teacher = render_bundle(_message_bundle("teacher"), confirmation=True)
+
+    assert student.startswith("Вы записан(а) на занятие КРиТ\n12.10.2026")
+    assert student.endswith("Пожалуйста, подтвердите, сможете ли вы прийти.")
+    assert guardian.startswith(
+        "Пупкин Иван Пупкович записан(а) на занятие КРиТ\n12.10.2026"
+    )
+    assert guardian.endswith("Пожалуйста, подтвердите, сможет ли ребёнок прийти.")
+    assert teacher.startswith("Ваше занятие КРиТ\n12.10.2026")
+    assert teacher.endswith("Пожалуйста, подтвердите, сможете ли вы провести занятие.")
+
+
+def test_confirmation_messages_use_plural_for_multiple_lessons() -> None:
+    student = render_bundle(
+        _message_bundle("student", lessons_count=2), confirmation=True
+    )
+    guardian = render_bundle(
+        _message_bundle("guardian", lessons_count=2), confirmation=True
+    )
+    teacher = render_bundle(
+        _message_bundle("teacher", lessons_count=2), confirmation=True
+    )
+
+    assert student.startswith("Вы записан(а) на занятия КРиТ")
+    assert student.endswith("Пожалуйста, подтвердите, сможете ли вы прийти на занятия.")
+    assert guardian.startswith("Пупкин Иван Пупкович записан(а) на занятия КРиТ")
+    assert guardian.endswith("Пожалуйста, подтвердите посещение занятий ребёнком.")
+    assert teacher.startswith("Ваши занятия КРиТ")
+    assert teacher.endswith("Пожалуйста, подтвердите, сможете ли вы провести занятия.")
 
 
 async def test_schedule_publication_serializes_period_dates(tmp_path) -> None:

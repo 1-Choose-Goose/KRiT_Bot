@@ -503,6 +503,10 @@ class ManagementApi:
         )
         return data if isinstance(data, dict) else {}
 
+    def cancel_restore(self, operation_id: str) -> dict[str, Any]:
+        data = self._request("DELETE", f"/administration/restores/{operation_id}")
+        return data if isinstance(data, dict) else {}
+
     def apply_restore(
         self,
         operation_id: str,

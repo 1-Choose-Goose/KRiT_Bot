@@ -791,6 +791,211 @@ def test_lesson_editor_shows_participant_confirmation_and_resend_feedback() -> N
     app.processEvents()
 
 
+def test_lesson_editor_replaces_confirmation_widget_without_leaving_duplicates() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = LessonDialog(
+        {
+            "subjects": [],
+            "teachers": [],
+            "rooms": [],
+            "groups": [],
+            "students": [{"id": 7, "full_name": "Куц Олег Олегович"}],
+        },
+        {
+            "participants": [{"person_id": 7}],
+            "confirmation": {
+                "rows": [
+                    {
+                        "recipient_context": "student",
+                        "subject_person_id": 7,
+                        "answer": None,
+                        "max_available": True,
+                    }
+                ]
+            },
+        },
+    )
+
+    dialog._refresh_group_participants()
+    dialog._refresh_group_participants()
+    app.processEvents()
+
+    assert len(dialog.students.findChildren(QFrame, "confirmationMarker")) == 1
+    assert dialog.students.cellWidget(0, 0).findChild(QCheckBox) is not None
+    assert dialog.students.cellWidget(0, 2).findChild(QFrame, "confirmationMarker") is not None
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_calendar_ignores_an_outdated_filter_response(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    callbacks: list[object] = []
+    monkeypatch.setattr(
+        page,
+        "_run",
+        lambda _fn, *args, **kwargs: callbacks.append(kwargs["done"]),
+    )
+
+    page.load_calendar()
+    page.load_calendar()
+    lesson = {
+        "id": 17,
+        "start_at": "2026-10-12T15:00:00+05:00",
+        "subject_name_snapshot": "Русский язык",
+        "teacher_name_snapshot": "Рябова Галина Викторовна",
+        "room_name_snapshot": "Кабинет №1",
+        "participants": [],
+        "status": "planned",
+    }
+    callbacks[1]([lesson])
+    callbacks[0]([])
+
+    assert page.calendar_lessons == [lesson]
+    assert page.calendar_summary.text() == "Найдено занятий: 1"
+    page.shutdown()
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_calendar_filter_does_not_select_the_first_teacher_implicitly(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.references = {
+        "teachers": [
+            {"id": 42, "full_name": "Быков Валерий Андреевич"},
+            {"id": 43, "full_name": "Рябова Галина Викторовна"},
+        ]
+    }
+    calls: list[tuple[object, object]] = []
+    monkeypatch.setattr(
+        page,
+        "_run",
+        lambda fn, *args, **kwargs: calls.append((fn, kwargs.get("done"))),
+    )
+
+    page.calendar_filter_type.setCurrentIndex(
+        page.calendar_filter_type.findData("teacher_id")
+    )
+
+    assert page.calendar_filter_value.currentIndex() == -1
+    assert page.calendar_filter_value.currentData() is None
+    assert page.calendar_filter_value.currentText() == ""
+    page.shutdown()
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_calendar_builds_every_period_and_object_filter_correctly(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.references = {
+        "teachers": [{"id": 42, "full_name": "Рябова Галина Викторовна"}],
+        "students": [{"id": 7, "full_name": "Пупкин Иван Пупкович"}],
+        "groups": [{"id": 15, "name": "Группа №15"}],
+        "rooms": [{"id": 2, "name": "Кабинет №2"}],
+    }
+    requests: list[tuple[str, str, dict[str, int]]] = []
+
+    def record(date_from: str, date_to: str, **filters: int) -> list[object]:
+        requests.append((date_from, date_to, filters))
+        return []
+
+    monkeypatch.setattr(page.api, "learning_lessons", record)
+    monkeypatch.setattr(
+        page,
+        "_run",
+        lambda fn, *args, **kwargs: kwargs["done"](fn(*args)),
+    )
+
+    page.calendar_date.setDate(QDate(2026, 10, 12))
+    page._calendar_period_changed()
+    assert requests[-1][0].startswith("2026-10-12T00:00:00")
+    assert requests[-1][1].startswith("2026-10-13T00:00:00")
+
+    page.calendar_period.setCurrentIndex(page.calendar_period.findData(7))
+    assert requests[-1][1].startswith("2026-10-19T00:00:00")
+    assert page.calendar_end.date() == QDate(2026, 10, 18)
+
+    page.calendar_period.setCurrentIndex(page.calendar_period.findData(0))
+    page.calendar_end.setDate(QDate(2026, 10, 20))
+    assert requests[-1][1].startswith("2026-10-21T00:00:00")
+
+    for filter_name, item_id in (
+        ("teacher_id", 42),
+        ("student_id", 7),
+        ("group_id", 15),
+        ("room_id", 2),
+    ):
+        page.calendar_filter_type.setCurrentIndex(
+            page.calendar_filter_type.findData(filter_name)
+        )
+        page.calendar_filter_value.setCurrentIndex(
+            page.calendar_filter_value.findData(item_id)
+        )
+        assert requests[-1][2] == {filter_name: item_id}
+
+    page.calendar_filter_type.setCurrentIndex(0)
+    assert requests[-1][2] == {}
+    page.shutdown()
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_refusal_marker_opens_reason_without_adding_status_text(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        learning_page_module.QMessageBox,
+        "information",
+        lambda _parent, title, text: shown.append((title, text)),
+    )
+    dialog = LessonDialog(
+        {
+            "subjects": [],
+            "teachers": [],
+            "rooms": [],
+            "groups": [],
+            "students": [{"id": 7, "full_name": "Пупкин Иван Пупкович"}],
+        },
+        {
+            "participants": [{"person_id": 7}],
+            "confirmation": {
+                "rows": [
+                    {
+                        "recipient_context": "guardian",
+                        "recipient_name": "Куц Олег Олегович",
+                        "subject_person_id": 7,
+                        "answer": "no",
+                        "reason": "Ребёнок заболел",
+                        "max_available": True,
+                    }
+                ]
+            },
+        },
+    )
+
+    holder = dialog.students.cellWidget(0, 2)
+    reason_marker = holder.findChild(QPushButton, "confirmationReasonButton")
+    assert reason_marker is not None
+    assert dialog.students.item(0, 2).text() == ""
+    assert "причину" in reason_marker.toolTip().lower()
+
+    reason_marker.click()
+
+    assert shown == [
+        (
+            "Причина отказа",
+            "Куц Олег Олегович (родитель):\nРебёнок заболел",
+        )
+    ]
+    dialog.deleteLater()
+    app.processEvents()
+
+
 def test_selected_participant_without_confirmation_data_gets_yellow_marker() -> None:
     app = QApplication.instance() or QApplication([])
     dialog = LessonDialog(
@@ -1226,8 +1431,16 @@ def test_searchable_combo_matches_prefix_of_surname_or_name() -> None:
     data_combo = SearchableComboBox()
     data_combo.addItem("Не выбран", None)
     data_combo.addItem("Быков Валерий Андреевич", 42)
+    data_combo.addItem("Рябова Галина Викторовна", 43)
     data_combo.setEditText("Быков Валерий Андреевич")
     assert data_combo.currentData() == 42
+
+    data_combo.setEditText("Рябова")
+    data_combo._search("Рябова")
+    data_combo._commit_exact_match()
+
+    assert data_combo.currentData() == 43
+    assert data_combo.currentText() == "Рябова Галина Викторовна"
     data_combo.deleteLater()
     app.processEvents()
 

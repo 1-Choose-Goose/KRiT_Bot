@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 import uuid
 import zipfile
 from collections.abc import AsyncIterable, Awaitable, Callable, Iterable
@@ -35,6 +36,8 @@ password_hash = PasswordHash.recommended()
 
 
 class RestoreService:
+    STALE_OPERATION_SECONDS = 60 * 60
+
     def __init__(
         self,
         *,
@@ -88,6 +91,7 @@ class RestoreService:
     def _has_active_operation(self) -> bool:
         if not self.root.is_dir():
             return False
+        self._discard_stale_operations()
         for state_path in self.root.glob("*/state.json"):
             try:
                 phase = json.loads(state_path.read_text(encoding="utf-8")).get("phase")
@@ -96,6 +100,30 @@ class RestoreService:
             if phase in {"created", "uploading", "uploaded", "applying"}:
                 return True
         return False
+
+    def _discard_stale_operations(self) -> None:
+        cutoff = time.time() - self.STALE_OPERATION_SECONDS
+        for state_path in self.root.glob("*/state.json"):
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                phase = state.get("phase")
+                activity_path = (
+                    state_path.parent / "upload.backup.part"
+                    if phase == "uploading"
+                    else state_path
+                )
+                last_activity = activity_path.stat().st_mtime
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if phase in {"created", "uploading", "uploaded"} and last_activity < cutoff:
+                shutil.rmtree(state_path.parent)
+
+    def cancel(self, operation_id: str) -> dict[str, bool]:
+        state = self._read_state(operation_id)
+        if state.get("phase") in {"applying", "completed"}:
+            raise RestoreConflict("restore can no longer be cancelled")
+        shutil.rmtree(self._operation_dir(operation_id))
+        return {"cancelled": True}
 
     def has_active_operation(self) -> bool:
         return self._has_active_operation()
@@ -324,6 +352,16 @@ def create_restore_router(
     ) -> dict[str, Any]:
         try:
             return await service.upload(operation_id, request.stream())
+        except Exception as exc:
+            raise translate_restore_error(exc) from None
+
+    @router.delete("/{operation_id}")
+    async def cancel_restore(
+        operation_id: str,
+        _principal: Annotated[AdminPrincipal, Depends(require_superadmin)],
+    ) -> dict[str, bool]:
+        try:
+            return service.cancel(operation_id)
         except Exception as exc:
             raise translate_restore_error(exc) from None
 

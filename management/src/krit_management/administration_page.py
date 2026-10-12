@@ -1014,6 +1014,7 @@ class AdministrationPage(QWidget):
 
         def restore() -> dict[str, Any]:
             target = ManagementApi.for_server(str(credentials["url"]))
+            operation_id: str | None = None
             try:
                 profile = target.login(
                     str(credentials["username"]), str(credentials["password"])
@@ -1029,18 +1030,28 @@ class AdministrationPage(QWidget):
                     )
                     credentials["password"] = credentials["new_password"]
                 operation = target.create_restore(latest.info)
+                operation_id = str(operation["id"])
                 if operation.get("target_has_business_data") and (
                     credentials["confirmation"] != "ВОССТАНОВИТЬ"
                 ):
                     raise RuntimeError(
                         "Для действующего сервера введите контрольную фразу ВОССТАНОВИТЬ."
                     )
-                target.upload_restore(str(operation["id"]), latest.archive)
-                return target.apply_restore(
-                    str(operation["id"]),
+                target.upload_restore(operation_id, latest.archive)
+                result = target.apply_restore(
+                    operation_id,
                     password=str(credentials["password"]),
                     confirmation_phrase=str(credentials["confirmation"]),
                 )
+                operation_id = None
+                return result
+            except Exception:
+                if operation_id is not None:
+                    try:
+                        target.cancel_restore(operation_id)
+                    except Exception:
+                        pass
+                raise
             finally:
                 credentials["password"] = ""
                 credentials["new_password"] = ""

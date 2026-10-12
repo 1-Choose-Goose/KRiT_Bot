@@ -316,6 +316,64 @@ async def test_poll_button_with_root_user_saves_answer_and_acknowledges_callback
     await engine.dispose()
 
 
+async def test_written_absence_reason_is_saved_and_acknowledged() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(
+            full_name="Иван Иванов",
+            phone="+79990000000",
+            role_links=[PersonRole(role="student")],
+            active=True,
+        )
+        session.add(person)
+        await session.flush()
+        session.add(
+            PersonMaxIdentity(
+                person_id=person.id,
+                verified_phone=person.phone,
+                max_user_id=42,
+            )
+        )
+        request = InteractionRequest(
+            request_type="lesson_confirmation",
+            question="Вы придёте?",
+            recipient_person_id=person.id,
+            recipient_context="student",
+            subject_person_id=person.id,
+            status="answered",
+            expects_reason_from_person_id=person.id,
+        )
+        session.add(request)
+        await session.flush()
+        session.add(
+            InteractionResponse(
+                request_id=request.id,
+                respondent_person_id=person.id,
+                respondent_context="student",
+                answer="no",
+            )
+        )
+        await session.commit()
+        request_id = request.id
+    api = FakeApi()
+    handler = EchoHandler(sessions=sessions, api=api)  # type: ignore[arg-type]
+
+    await handler.handle(update(42, "Болит живот", mid="reason-1"))
+
+    async with sessions() as session:
+        request = await session.get(InteractionRequest, request_id)
+        response = await session.scalar(
+            select(InteractionResponse).where(InteractionResponse.request_id == request_id)
+        )
+        assert request is not None and request.expects_reason_from_person_id is None
+        assert response is not None and response.reason == "Болит живот"
+    assert api.sent == [(42, "Спасибо! Причина сохранена.")]
+    await engine.dispose()
+
+
 async def test_malformed_and_stale_callbacks_are_harmless() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:

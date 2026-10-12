@@ -122,6 +122,10 @@ class SearchableComboBox(SafeComboBox):
 
     def _commit_exact_match(self) -> None:
         index = self._exact_text_index(self.currentText())
+        if index < 0 and self.currentText().strip() and self._proxy.rowCount() == 1:
+            proxy_index = self._proxy.index(0, self.modelColumn())
+            source_index = self._proxy.mapToSource(proxy_index)
+            index = source_index.row()
         if index >= 0:
             self.setCurrentIndex(index)
 

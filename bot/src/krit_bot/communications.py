@@ -427,12 +427,36 @@ def apply_quiet_hours(
 
 
 def render_bundle(bundle: DailyBundle, *, confirmation: bool = False) -> str:
+    multiple_lessons = len(bundle.lessons) > 1
     if bundle.recipient_context == "teacher":
-        heading = "Ваши занятия"
+        heading = "Ваши занятия КРиТ" if multiple_lessons else "Ваше занятие КРиТ"
+        confirmation_text = (
+            "Пожалуйста, подтвердите, сможете ли вы провести занятия."
+            if multiple_lessons
+            else "Пожалуйста, подтвердите, сможете ли вы провести занятие."
+        )
     elif bundle.recipient_context == "guardian":
-        heading = f"Занятия {bundle.subject_name}"
+        heading = (
+            f"{bundle.subject_name} записан(а) на занятия КРиТ"
+            if multiple_lessons
+            else f"{bundle.subject_name} записан(а) на занятие КРиТ"
+        )
+        confirmation_text = (
+            "Пожалуйста, подтвердите посещение занятий ребёнком."
+            if multiple_lessons
+            else "Пожалуйста, подтвердите, сможет ли ребёнок прийти."
+        )
     else:
-        heading = "Ваши занятия КРиТ"
+        heading = (
+            "Вы записан(а) на занятия КРиТ"
+            if multiple_lessons
+            else "Вы записан(а) на занятие КРиТ"
+        )
+        confirmation_text = (
+            "Пожалуйста, подтвердите, сможете ли вы прийти на занятия."
+            if multiple_lessons
+            else "Пожалуйста, подтвердите, сможете ли вы прийти."
+        )
     day = bundle.local_date.strftime("%d.%m.%Y")
     blocks = []
     for lesson in bundle.lessons:
@@ -450,7 +474,7 @@ def render_bundle(bundle: DailyBundle, *, confirmation: bool = False) -> str:
                 else "Ученики пока не назначены"
             )
         blocks.append("\n".join(lines))
-    suffix = "\n\nПодтвердите присутствие." if confirmation else ""
+    suffix = f"\n\n{confirmation_text}" if confirmation else ""
     return f"{heading}\n{day}\n\n" + "\n\n".join(blocks) + suffix
 
 

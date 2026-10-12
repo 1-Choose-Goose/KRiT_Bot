@@ -181,6 +181,7 @@ class EchoHandler:
                         PersonMaxIdentity.max_user_id == incoming.user_id
                     )
                 )
+                reason_saved = False
                 if person_id is not None and incoming.text:
                     pending_reason = await session.scalar(
                         select(InteractionRequest)
@@ -220,7 +221,13 @@ class EchoHandler:
                             response.reason = incoming.text
                             response.updated_at = utcnow()
                             pending_reason.expects_reason_from_person_id = None
+                            reason_saved = True
                 await session.commit()
+                if reason_saved:
+                    await self._api.send_text(
+                        user_id=incoming.user_id,
+                        text="Спасибо! Причина сохранена.",
+                    )
                 return
 
             contact_is_valid = bool(

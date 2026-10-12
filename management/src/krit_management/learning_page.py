@@ -812,7 +812,13 @@ class LessonDialog(QDialog):
     def _render_participant_confirmation(
         self, row: int, person_id: int, selected: bool
     ) -> None:
+        previous_holder = self.students.cellWidget(row, 2)
+        if previous_holder is not None:
+            previous_holder.hide()
         self.students.removeCellWidget(row, 2)
+        if previous_holder is not None:
+            previous_holder.setParent(None)
+            previous_holder.deleteLater()
         cell = self.students.item(row, 2)
         if cell is None:
             cell = QTableWidgetItem()
@@ -860,10 +866,29 @@ class LessonDialog(QDialog):
         holder.setToolTip(label)
         bar = QHBoxLayout(holder)
         bar.setContentsMargins(4, 2, 4, 2)
-        marker = QFrame()
-        marker.setObjectName("confirmationMarker")
+        refusal_targets = [target for target in targets if target.get("answer") == "no"]
+        if refusal_targets:
+            context_labels = {"student": "ученик", "guardian": "родитель"}
+            refusal_text = "\n\n".join(
+                f"{target.get('recipient_name') or 'Получатель'} "
+                f"({context_labels.get(str(target.get('recipient_context')), 'получатель')}):\n"
+                f"{target.get('reason') or 'Причина не указана'}"
+                for target in refusal_targets
+            )
+            marker = QPushButton()
+            marker.setObjectName("confirmationReasonButton")
+            marker.setAccessibleName("Показать причину отказа")
+            marker.setToolTip("Показать причину отказа")
+            marker.clicked.connect(
+                lambda _checked=False, text=refusal_text: QMessageBox.information(
+                    self, "Причина отказа", text
+                )
+            )
+        else:
+            marker = QFrame()
+            marker.setObjectName("confirmationMarker")
+            marker.setToolTip(label)
         marker.setFixedSize(12, 12)
-        marker.setToolTip(label)
         marker.setStyleSheet(
             f"background-color: {marker_color}; "
             "border: 1px solid rgba(15, 35, 71, 0.20); border-radius: 1px;"
@@ -1820,6 +1845,7 @@ class LearningPage(QWidget):
         self.references: dict[str, Any] = {}
         self.today_data: dict[str, Any] = {}
         self.calendar_lessons: list[dict[str, Any]] = []
+        self._calendar_request_generation = 0
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.tabs = QTabWidget()
@@ -2381,13 +2407,25 @@ class LearningPage(QWidget):
             end = start + timedelta(days=days)
         filter_name = self.calendar_filter_type.currentData()
         filter_value = self.calendar_filter_value.currentData() if filter_name else None
+        self._calendar_request_generation += 1
+        generation = self._calendar_request_generation
+
+        def apply_if_current(data: object) -> None:
+            if generation == self._calendar_request_generation:
+                self._calendar_loaded(data)
+
+        def show_error_if_current(message: str) -> None:
+            if generation == self._calendar_request_generation:
+                QMessageBox.critical(self, "Ошибка", message)
+
         self._run(
             lambda: self.api.learning_lessons(
                 start.isoformat(),
                 end.isoformat(),
                 **({str(filter_name): int(filter_value)} if filter_value is not None else {}),
             ),
-            done=self._calendar_loaded,
+            done=apply_if_current,
+            on_error=show_error_if_current,
         )
 
     def _calendar_period_changed(self, *_args: object) -> None:
@@ -2395,7 +2433,9 @@ class LearningPage(QWidget):
         self.calendar_end.setEnabled(custom)
         if not custom:
             days = int(self.calendar_period.currentData() or 1)
+            self.calendar_end.blockSignals(True)
             self.calendar_end.setDate(self.calendar_date.date().addDays(days - 1))
+            self.calendar_end.blockSignals(False)
         self.load_calendar()
 
     def _calendar_filter_changed(self, *_args: object) -> None:
@@ -2411,6 +2451,8 @@ class LearningPage(QWidget):
         if source:
             for item in self.references.get(source[0], []):
                 self.calendar_filter_value.addItem(str(item.get(source[1], "")), item.get("id"))
+            self.calendar_filter_value.setCurrentIndex(-1)
+            self.calendar_filter_value.setEditText("")
         self.calendar_filter_value.setVisible(source is not None)
         self.calendar_filter_value.blockSignals(False)
         self.load_calendar()
