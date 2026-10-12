@@ -30,7 +30,7 @@ def test_systemd_and_nginx_assets_are_locked_down() -> None:
     assert "--rollback" in rollback_service
     assert "--delete-safety" in delete_service
     assert "NOPASSWD:" in sudoers
-    assert "/usr/local/sbin/krit-restore-dispatch" in sudoers
+    assert "/opt/krit-bot/deploy/krit_restore_dispatch.py" in sudoers
     assert "*" not in sudoers
     assert "ALL=(ALL) ALL" not in sudoers
     assert dispatcher.is_file()
@@ -56,13 +56,14 @@ def test_installer_is_idempotent_generates_secrets_and_never_embeds_real_ones() 
     assert "chmod 0640 /opt/krit-bot/config/krit-bot.env" in installer
     assert "chown -R root:krit /opt/krit-bot/venv" in installer
     assert "chmod -R u=rwX,g=rX,o= /opt/krit-bot/venv" in installer
-    assert "/usr/local/sbin/krit-restore-dispatch" in installer
+    assert "/usr/local/sbin/krit-restore-dispatch" not in installer
+    assert "/usr/local/sbin/krit-configure-nginx" not in installer
     assert "systemctl enable --now krit-bot.service" in installer
     assert "curl --fail" in installer
     assert "/opt/krit-bot/data/.installed" in installer
     assert "/var/lib/krit" not in installer
     assert "/etc/krit-bot" not in installer
-    assert "krit-configure-nginx" in installer
+    assert "/opt/krit-bot/deploy/krit_nginx_configure.py" in installer
     assert "for attempt in {1..30}" in installer
     assert "sleep 2" in installer
     assert "178.217.99.218" not in installer

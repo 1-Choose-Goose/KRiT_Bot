@@ -426,7 +426,7 @@ def create_app(
         process = await asyncio.create_subprocess_exec(
             "sudo",
             "-n",
-            "/usr/local/sbin/krit-restore-dispatch",
+            "/opt/krit-bot/deploy/krit_restore_dispatch.py",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
