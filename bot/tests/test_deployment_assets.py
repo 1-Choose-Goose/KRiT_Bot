@@ -22,6 +22,8 @@ def test_systemd_and_nginx_assets_are_locked_down() -> None:
 
     assert "User=krit" in bot_service
     assert "Restart=always" in bot_service
+    assert "NoNewPrivileges=false" in bot_service
+    assert "NoNewPrivileges=true" not in bot_service
     assert "include /etc/nginx/snippets/krit-api.conf;" in nginx
     assert "127.0.0.1:8080" in nginx_api
     assert "proxy_request_buffering off" in nginx_api

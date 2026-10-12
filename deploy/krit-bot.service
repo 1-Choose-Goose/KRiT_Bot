@@ -14,7 +14,9 @@ Restart=always
 RestartSec=5
 TimeoutStopSec=30
 UMask=0077
-NoNewPrivileges=true
+# The management API uses a strictly allowlisted sudo command to start the
+# isolated root restore unit. NoNewPrivileges would block that escalation.
+NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
