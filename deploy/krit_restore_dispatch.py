@@ -6,7 +6,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-RESTORE_ROOT = Path("/var/lib/krit/restore")
+RESTORE_ROOT = Path("/opt/krit-bot/data/restore")
 SYSTEMCTL = "/usr/bin/systemctl"
 
 

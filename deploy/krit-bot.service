@@ -8,7 +8,7 @@ Type=simple
 User=krit
 Group=krit
 WorkingDirectory=/opt/krit-bot
-EnvironmentFile=/etc/krit-bot/krit-bot.env
+EnvironmentFile=/opt/krit-bot/config/krit-bot.env
 ExecStart=/opt/krit-bot/venv/bin/krit-bot
 Restart=always
 RestartSec=5
@@ -18,7 +18,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/krit
+ReadWritePaths=/opt/krit-bot/data
 
 [Install]
 WantedBy=multi-user.target

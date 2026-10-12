@@ -32,7 +32,7 @@ if [[ -z ${PYTHON_BIN} ]] || ! "${PYTHON_BIN}" -c \
 fi
 
 PACKAGE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXISTING_ENV=/etc/krit-bot/krit-bot.env
+EXISTING_ENV=/opt/krit-bot/config/krit-bot.env
 if [[ -f ${EXISTING_ENV} ]]; then
   set -a
   # shellcheck disable=SC1090
@@ -62,16 +62,17 @@ apt-get update
 apt-get install -y nginx postgresql postgresql-client python3 python3-venv python3-pip \
   certbot python3-certbot-nginx ca-certificates openssl rsync sudo curl unzip
 
-id -u krit >/dev/null 2>&1 || useradd --system --home /var/lib/krit --shell /usr/sbin/nologin krit
-install -d -o krit -g krit -m 0700 /var/lib/krit /var/lib/krit/backups /var/lib/krit/restore
-install -d -o root -g krit -m 0750 /etc/krit-bot
+id -u krit >/dev/null 2>&1 || useradd --system --home /opt/krit-bot/data --shell /usr/sbin/nologin krit
+usermod --home /opt/krit-bot/data krit
 install -d -o root -g root -m 0755 /opt/krit-bot
+install -d -o root -g krit -m 0750 /opt/krit-bot/config
+install -d -o krit -g krit -m 0700 /opt/krit-bot/data /opt/krit-bot/data/restore
 
 rsync -a --delete "${PACKAGE_ROOT}/bot/" /opt/krit-bot/bot/
 rsync -a --delete "${PACKAGE_ROOT}/deploy/" /opt/krit-bot/deploy/
 "${PYTHON_BIN}" -m venv /opt/krit-bot/venv
-/opt/krit-bot/venv/bin/python -m pip install --upgrade pip
-/opt/krit-bot/venv/bin/python -m pip install -e /opt/krit-bot/bot
+/opt/krit-bot/venv/bin/python -m pip install --no-cache-dir --upgrade pip
+/opt/krit-bot/venv/bin/python -m pip install --no-cache-dir -e /opt/krit-bot/bot
 chown -R root:krit /opt/krit-bot/venv
 chmod -R u=rwX,g=rX,o= /opt/krit-bot/venv
 
@@ -101,8 +102,8 @@ KRIT_PGHOST=127.0.0.1
 KRIT_PGPORT=5432
 KRIT_PGUSER=krit
 KRIT_PGPASSWORD=${DB_PASSWORD}
-BACKUP_ROOT=/var/lib/krit/backups
-RESTORE_ROOT=/var/lib/krit/restore
+BACKUP_ROOT=/opt/krit-bot/data/backups
+RESTORE_ROOT=/opt/krit-bot/data/restore
 MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
 MAX_API_BASE_URL=https://platform-api2.max.ru
 MAX_WEBHOOK_SECRET=${WEBHOOK_SECRET}
@@ -112,8 +113,8 @@ BOT_MODE=webhook
 CENTER_TIMEZONE=Asia/Yekaterinburg
 EOF
 fi
-chown root:krit /etc/krit-bot/krit-bot.env
-chmod 0640 /etc/krit-bot/krit-bot.env
+chown root:krit /opt/krit-bot/config/krit-bot.env
+chmod 0640 /opt/krit-bot/config/krit-bot.env
 
 install -o root -g root -m 0644 "${PACKAGE_ROOT}/deploy/krit-bot.service" /etc/systemd/system/krit-bot.service
 install -o root -g root -m 0644 "${PACKAGE_ROOT}/deploy/krit-restore@.service" /etc/systemd/system/krit-restore@.service
@@ -135,7 +136,7 @@ nginx -t
 systemctl reload nginx
 
 set -a
-. /etc/krit-bot/krit-bot.env
+. /opt/krit-bot/config/krit-bot.env
 set +a
 /opt/krit-bot/venv/bin/krit-migrate
 systemctl daemon-reload
@@ -163,8 +164,8 @@ if [[ ${ready} -ne 1 ]]; then
   echo "KRiT не прошёл HTTPS-проверку готовности за 60 секунд."
   exit 1
 fi
-touch /var/lib/krit/.installed
-chown krit:krit /var/lib/krit/.installed
+touch /opt/krit-bot/data/.installed
+chown krit:krit /opt/krit-bot/data/.installed
 echo
 echo "КРиТ установлен и запущен."
 echo "Первый вход: Choose_Goose / 123"

@@ -14,6 +14,7 @@ from typing import Any
 
 DATABASE_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,62}$")
 ARGON2_HASH = re.compile(r"^\$argon2(?:id|i|d)\$[A-Za-z0-9$=,+./~-]{20,500}$")
+OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
 CommandRunner = Callable[[list[str], dict[str, str]], None]
 
 
@@ -268,16 +269,31 @@ def rollback_pending_safety(
         dump.unlink()
     safety_root.rmdir()
     pending_path.unlink()
+    remove_operation_workspace(root, pending)
+
+
+def remove_operation_workspace(root: Path, pending: dict[str, Any]) -> None:
+    operation_id = str(pending.get("id", ""))
+    if not OPERATION_ID.fullmatch(operation_id):
+        raise ValueError("Invalid restore operation id")
+    resolved_root = root.resolve()
+    operation_dir = (resolved_root / operation_id).resolve()
+    if operation_dir.parent != resolved_root:
+        raise ValueError("Unsafe restore operation path")
+    if operation_dir.is_dir():
+        shutil.rmtree(operation_dir)
 
 
 def delete_pending_safety(root: Path) -> None:
     pending_path = root / "pending-safety.json"
     if not pending_path.is_file():
         raise FileNotFoundError(pending_path)
+    pending = json.loads(pending_path.read_text(encoding="utf-8"))
     safety_root = root / "safety-pending"
     if safety_root.is_dir():
         shutil.rmtree(safety_root)
     pending_path.unlink()
+    remove_operation_workspace(root, pending)
 
 
 def main() -> int:
@@ -287,7 +303,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    root = Path("/var/lib/krit/restore")
+    root = Path("/opt/krit-bot/data/restore")
     if sys.argv[1] == "--rollback":
         rollback_pending_safety(root)
     elif sys.argv[1] == "--delete-safety":

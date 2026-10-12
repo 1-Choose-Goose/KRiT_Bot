@@ -115,7 +115,7 @@ class RestoreService:
                 last_activity = activity_path.stat().st_mtime
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
-            if phase in {"created", "uploading", "uploaded"} and last_activity < cutoff:
+            if phase in {"created", "uploading", "uploaded", "failed"} and last_activity < cutoff:
                 shutil.rmtree(state_path.parent)
 
     def cancel(self, operation_id: str) -> dict[str, bool]:

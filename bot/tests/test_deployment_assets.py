@@ -53,13 +53,15 @@ def test_installer_is_idempotent_generates_secrets_and_never_embeds_real_ones() 
     assert "id -u krit" in installer
     assert "IF NOT EXISTS" in installer
     assert "openssl rand" in installer
-    assert "chmod 0640 /etc/krit-bot/krit-bot.env" in installer
+    assert "chmod 0640 /opt/krit-bot/config/krit-bot.env" in installer
     assert "chown -R root:krit /opt/krit-bot/venv" in installer
     assert "chmod -R u=rwX,g=rX,o= /opt/krit-bot/venv" in installer
     assert "/usr/local/sbin/krit-restore-dispatch" in installer
     assert "systemctl enable --now krit-bot.service" in installer
     assert "curl --fail" in installer
-    assert "/var/lib/krit/.installed" in installer
+    assert "/opt/krit-bot/data/.installed" in installer
+    assert "/var/lib/krit" not in installer
+    assert "/etc/krit-bot" not in installer
     assert "krit-configure-nginx" in installer
     assert "for attempt in {1..30}" in installer
     assert "sleep 2" in installer
@@ -74,13 +76,37 @@ def test_installer_checks_python_313_before_server_mutations_and_preserves_env()
     first_server_mutation = installer.index("useradd --system")
     assert version_check < first_server_mutation
     assert "PYTHON_BIN" in installer
-    assert "EXISTING_ENV=/etc/krit-bot/krit-bot.env" in installer
+    assert "EXISTING_ENV=/opt/krit-bot/config/krit-bot.env" in installer
     assert "if [[ -f ${EXISTING_ENV} ]]" in installer
     assert "${MAX_WEBHOOK_URL:-}" in installer
     assert "DB_PASSWORD=${DB_PASSWORD:-$(openssl rand -hex 24)}" in installer
     assert "JWT_SECRET=${JWT_SECRET:-$(openssl rand -hex 32)}" in installer
     assert "WEBHOOK_SECRET=${MAX_WEBHOOK_SECRET:-$(openssl rand -hex 32)}" in installer
     assert "MAX_BOT_TOKEN=${MAX_BOT_TOKEN}" in installer
+
+
+def test_runtime_assets_keep_all_krit_state_under_application_root() -> None:
+    runtime_assets = [
+        DEPLOY / "krit-bot.service",
+        DEPLOY / "krit-restore@.service",
+        DEPLOY / "krit-restore-rollback.service",
+        DEPLOY / "krit-restore-delete.service",
+        DEPLOY / "krit_restore_dispatch.py",
+        DEPLOY / "krit_restore_helper.py",
+    ]
+
+    for asset in runtime_assets:
+        content = asset.read_text(encoding="utf-8")
+        assert "/var/lib/krit" not in content
+        assert "/etc/krit-bot" not in content
+    assert (
+        "EnvironmentFile=/opt/krit-bot/config/krit-bot.env"
+        in (DEPLOY / "krit-bot.service").read_text(encoding="utf-8")
+    )
+    assert (
+        'RESTORE_ROOT = Path("/opt/krit-bot/data/restore")'
+        in (DEPLOY / "krit_restore_dispatch.py").read_text(encoding="utf-8")
+    )
 
 
 def test_nginx_limits_large_uploads_to_restore_content_route() -> None:

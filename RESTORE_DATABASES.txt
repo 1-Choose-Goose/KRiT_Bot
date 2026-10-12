@@ -127,18 +127,18 @@ KRiT-latest-trusted.json — указатель на последнюю дове
 ---------------------------------------
 
 Временный закрытый каталог восстановления:
-/var/lib/krit/restore
+/opt/krit-bot/data/restore
 
 Файлы после переноса:
-/var/lib/krit/restore/KRiT-latest.backup
-/var/lib/krit/restore/KRiT-latest.json
+/opt/krit-bot/data/restore/KRiT-latest.backup
+/opt/krit-bot/data/restore/KRiT-latest.json
 
 Рекомендуемые права каталога: 0700.
 Не помещайте резервные копии в каталог Nginx, /var/www или другой публичный
 каталог.
 
 Пример подготовки каталога:
-sudo install -d -m 0700 /var/lib/krit/restore
+sudo install -d -o krit -g krit -m 0700 /opt/krit-bot/data/restore
 
 
 4. РУЧНОЕ ВОССТАНОВЛЕНИЕ PRODUCTION POSTGRESQL
@@ -153,7 +153,7 @@ krit_bot
 Перед восстановлением:
 1) установите ту же или более новую совместимую версию PostgreSQL;
 2) установите серверную программу КРиТ в /opt/krit-bot;
-3) настройте закрытый файл окружения /etc/krit-bot/krit-bot.env;
+3) настройте закрытый файл окружения /opt/krit-bot/config/krit-bot.env;
 4) задайте DATABASE_URL для базы krit_bot;
 5) остановите службу КРиТ.
 
@@ -178,14 +178,14 @@ sudo -u postgres createdb --owner=krit_bot krit_bot
 
 Файл `.backup` является комплектом. Сначала извлеките из него дамп PostgreSQL:
 
-unzip -j /var/lib/krit/restore/KRiT-latest.backup krit_bot.dump \
-  -d /var/lib/krit/restore
+unzip -j /opt/krit-bot/data/restore/KRiT-latest.backup krit_bot.dump \
+  -d /opt/krit-bot/data/restore
 
 Затем восстановите дамп с немедленной остановкой при первой ошибке:
 
 sudo -u postgres pg_restore --exit-on-error --clean --if-exists --no-owner \
   --role=krit_bot --dbname=krit_bot \
-  /var/lib/krit/restore/krit_bot.dump
+  /opt/krit-bot/data/restore/krit_bot.dump
 
 После восстановления примените миграции из установленной версии КРиТ:
 sudo -u krit /opt/krit-bot/.venv/bin/krit-migrate

@@ -9,4 +9,4 @@ ExecStart=/opt/krit-bot/venv/bin/python /opt/krit-bot/deploy/krit_restore_helper
 UMask=0077
 PrivateTmp=true
 ProtectHome=true
-ReadWritePaths=/var/lib/krit
+ReadWritePaths=/opt/krit-bot/data

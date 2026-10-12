@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from deploy.krit_restore_helper import restore_operation
+from deploy.krit_restore_helper import delete_pending_safety, restore_operation
 from pwdlib import PasswordHash
 from pydantic import SecretStr
 
@@ -208,6 +208,54 @@ async def test_stale_unstarted_restore_does_not_block_new_operation(tmp_path) ->
 
     assert replacement["id"] != abandoned["id"]
     assert not (tmp_path / abandoned["id"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_stale_failed_restore_workspace_is_removed(tmp_path) -> None:
+    async def dispatch(_operation_id: str) -> dict:
+        return {"id": "safety"}
+
+    service = RestoreService(
+        root=tmp_path,
+        database_names=("krit_bot",),
+        dispatcher=dispatch,
+        free_space=lambda: 10_000_000,
+    )
+    info, _body = _backup_body()
+    failed = await service.create(info, target_has_business_data=True)
+    state_path = tmp_path / failed["id"] / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["phase"] = "failed"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    stale_time = time.time() - 2 * 60 * 60
+    os.utime(state_path, (stale_time, stale_time))
+
+    replacement = await service.create(info, target_has_business_data=True)
+
+    assert replacement["id"] != failed["id"]
+    assert not (tmp_path / failed["id"]).exists()
+
+
+def test_delete_safety_removes_completed_restore_workspace(tmp_path) -> None:
+    operation_id = "c" * 32
+    operation_dir = tmp_path / operation_id
+    operation_dir.mkdir()
+    (operation_dir / "state.json").write_text(
+        json.dumps({"id": operation_id, "phase": "completed"}), encoding="utf-8"
+    )
+    safety_root = tmp_path / "safety-pending"
+    safety_root.mkdir()
+    (safety_root / "krit_bot.dump").write_bytes(b"PGDMP safety")
+    (tmp_path / "pending-safety.json").write_text(
+        json.dumps({"id": operation_id, "databases": ["krit_bot"]}),
+        encoding="utf-8",
+    )
+
+    delete_pending_safety(tmp_path)
+
+    assert not (tmp_path / "pending-safety.json").exists()
+    assert not safety_root.exists()
+    assert not operation_dir.exists()
 
 
 @pytest.mark.asyncio
