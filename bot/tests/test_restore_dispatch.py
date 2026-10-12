@@ -6,7 +6,9 @@ import pytest
 from deploy.krit_restore_dispatch import dispatch_restore
 
 
-def test_dispatch_restore_starts_only_valid_existing_operation(tmp_path) -> None:
+def test_dispatch_restore_queues_valid_existing_operation_after_api_handoff(
+    tmp_path,
+) -> None:
     operation_id = "a" * 32
     operation = tmp_path / operation_id
     operation.mkdir()
@@ -22,6 +24,10 @@ def test_dispatch_restore_starts_only_valid_existing_operation(tmp_path) -> None
     assert calls == [
         (
             [
+                "/usr/bin/systemd-run",
+                f"--unit=krit-restore-dispatch-{operation_id}",
+                "--on-active=2s",
+                "--collect",
                 "/usr/bin/systemctl",
                 "start",
                 "--no-block",

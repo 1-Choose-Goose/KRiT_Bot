@@ -9,6 +9,7 @@ from pathlib import Path
 
 RESTORE_ROOT = Path("/opt/krit-bot/data/restore")
 SYSTEMCTL = "/usr/bin/systemctl"
+SYSTEMD_RUN = "/usr/bin/systemd-run"
 
 
 def dispatch_restore(
@@ -23,6 +24,10 @@ def dispatch_restore(
         raise FileNotFoundError(operation_id)
     runner(
         [
+            SYSTEMD_RUN,
+            f"--unit=krit-restore-dispatch-{operation_id}",
+            "--on-active=2s",
+            "--collect",
             SYSTEMCTL,
             "start",
             "--no-block",
