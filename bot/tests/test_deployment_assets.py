@@ -35,6 +35,19 @@ def test_systemd_and_nginx_assets_are_locked_down() -> None:
     assert "ALL=(ALL) ALL" not in sudoers
     assert dispatcher.is_file()
 
+    executable_assets = (
+        "deploy/krit_restore_dispatch.py",
+        "deploy/krit_nginx_configure.py",
+    )
+    for relative_path in executable_assets:
+        stage = subprocess.run(
+            ["git", "ls-files", "--stage", "--", relative_path],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert stage.startswith("100755 "), f"{relative_path} must be executable"
+
     for asset in DEPLOY.iterdir():
         if asset.is_file() and asset.suffix in {".sh", ".service", ".sudoers", ".conf"}:
             relative_path = str(asset.relative_to(ROOT))
