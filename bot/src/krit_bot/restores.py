@@ -128,6 +128,19 @@ class RestoreService:
     def has_active_operation(self) -> bool:
         return self._has_active_operation()
 
+    def is_applying(self) -> bool:
+        if not self.root.is_dir():
+            return False
+        for state_path in self.root.glob("*/state.json"):
+            try:
+                if json.loads(state_path.read_text(encoding="utf-8")).get("phase") == (
+                    "applying"
+                ):
+                    return True
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+        return False
+
     async def create(
         self, metadata: dict[str, Any], *, target_has_business_data: bool
     ) -> dict[str, Any]:

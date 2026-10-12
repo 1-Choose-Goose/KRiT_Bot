@@ -164,6 +164,30 @@ async def test_cancel_abandoned_restore_allows_next_operation(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pending_restore_does_not_report_database_application_active(tmp_path) -> None:
+    async def dispatch(_operation_id: str) -> dict:
+        return {"id": "safety"}
+
+    service = RestoreService(
+        root=tmp_path,
+        database_names=("krit_bot",),
+        dispatcher=dispatch,
+        free_space=lambda: 10_000_000,
+    )
+    info, _body = _backup_body()
+    operation = await service.create(info, target_has_business_data=True)
+
+    assert service.is_applying() is False
+
+    state_path = tmp_path / operation["id"] / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["phase"] = "applying"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert service.is_applying() is True
+
+
+@pytest.mark.asyncio
 async def test_stale_unstarted_restore_does_not_block_new_operation(tmp_path) -> None:
     async def dispatch(_operation_id: str) -> dict:
         return {"id": "safety"}

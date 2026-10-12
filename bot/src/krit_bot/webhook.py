@@ -481,7 +481,7 @@ def create_app(
             else (None if restore_dispatcher is not None else systemd_safety_delete_dispatcher)
         ),
     )
-    backup_export_service.conflict_checker = restore_service.has_active_operation
+    backup_export_service.conflict_checker = restore_service.is_applying
     restore_service.conflict_checker = lambda: backup_export_service.active
     polling_task: asyncio.Task[None] | None = None
     syndication_task: asyncio.Task[None] | None = None
