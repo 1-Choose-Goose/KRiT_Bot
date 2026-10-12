@@ -1,3 +1,4 @@
+#!/opt/krit-bot/venv/bin/python
 from __future__ import annotations
 
 import re

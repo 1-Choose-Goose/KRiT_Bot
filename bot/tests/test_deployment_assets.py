@@ -34,6 +34,9 @@ def test_systemd_and_nginx_assets_are_locked_down() -> None:
     assert "*" not in sudoers
     assert "ALL=(ALL) ALL" not in sudoers
     assert dispatcher.is_file()
+    assert dispatcher.read_text(encoding="utf-8").startswith(
+        "#!/opt/krit-bot/venv/bin/python\n"
+    )
 
     executable_assets = (
         "deploy/krit_restore_dispatch.py",
