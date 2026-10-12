@@ -291,11 +291,22 @@ class ManagementApi:
         return data if isinstance(data, dict) else {}
 
     def begin_backup_export(self, installation_id: str) -> dict[str, Any]:
-        data = self._request(
-            "POST",
-            "/backups/exports",
-            json={"installation_id": installation_id},
-        )
+        try:
+            data = self._request(
+                "POST",
+                "/backups/exports",
+                json={"installation_id": installation_id},
+            )
+        except ApiError as exc:
+            if exc.status_code == 404:
+                raise ApiError(
+                    "Серверная часть КРиТ не поддерживает создание локальных "
+                    "резервных копий. Обновите серверную программу и повторите действие.",
+                    status_code=exc.status_code,
+                    detail=exc.detail,
+                    path=exc.path,
+                ) from exc
+            raise
         return data if isinstance(data, dict) else {}
 
     def complete_backup_export(

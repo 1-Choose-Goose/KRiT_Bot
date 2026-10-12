@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 import krit_management.backup_store as backup_store_module
-from krit_management.api import ManagementApi
+from krit_management.api import ApiError, ManagementApi
 from krit_management.backup_controller import BackupController
 from krit_management.backup_store import BackupStore, application_directory
 
@@ -234,6 +234,23 @@ def test_database_stream_without_valid_footer_is_deleted(tmp_path) -> None:
         api.download_backup_database("export-1", "krit_bot", destination)
 
     assert not destination.exists()
+    api.close()
+
+
+def test_backup_export_404_explains_outdated_server() -> None:
+    api = ManagementApi("https://example.test/api/v1")
+    api._client.close()
+    api._client = httpx.Client(
+        base_url="https://example.test/api/v1",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(404, json={"detail": "Not Found"})
+        ),
+    )
+
+    with pytest.raises(ApiError, match="Обновите серверную программу") as raised:
+        api.begin_backup_export("computer-001")
+
+    assert raised.value.status_code == 404
     api.close()
 
 

@@ -127,7 +127,7 @@ class MainWindow(QMainWindow):
     def _backup_failed(self, message: str) -> None:
         self.tray.showMessage(
             "Резервная копия не создана",
-            f"Проверьте доступ к папке {self.backup_controller.store.root}.\n{message}",
+            f"Папка резервных копий: {self.backup_controller.store.root}.\n{message}",
             QSystemTrayIcon.MessageIcon.Warning,
             10_000,
         )

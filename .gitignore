@@ -23,6 +23,7 @@ __pycache__/
 *.bak
 *.log
 data/
+/management/Backups/
 *.tar.gz
 .coverage
 build/
