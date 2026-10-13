@@ -78,19 +78,21 @@ chmod -R u=rwX,g=rX,o= /opt/krit-bot/venv
 
 DB_PASSWORD=${KRIT_PGPASSWORD:-}
 DB_PASSWORD=${DB_PASSWORD:-$(openssl rand -hex 24)}
+DB_ROLE=${KRIT_PGUSER:-krit}
+if [[ ! ${DB_ROLE} =~ ^[a-zA-Z][a-zA-Z0-9_]{0,62}$ ]]; then
+  echo "Некорректное имя роли PostgreSQL."
+  exit 1
+fi
 JWT_SECRET=${JWT_SECRET:-$(openssl rand -hex 32)}
 WEBHOOK_SECRET=${MAX_WEBHOOK_SECRET:-$(openssl rand -hex 32)}
 
-sudo -u postgres psql --set=ON_ERROR_STOP=1 --set=db_password="${DB_PASSWORD}" <<'SQL'
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'krit') THEN
-    CREATE ROLE krit LOGIN;
-  END IF;
-END
-$$;
-ALTER ROLE krit PASSWORD :'db_password';
-SELECT 'CREATE DATABASE krit_bot OWNER krit'
+sudo -u postgres psql --set=ON_ERROR_STOP=1 \
+  --set=db_role="${DB_ROLE}" --set=db_password="${DB_PASSWORD}" <<'SQL'
+SELECT format('CREATE ROLE %I LOGIN', :'db_role')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'db_role')\gexec
+SELECT format('ALTER ROLE %I PASSWORD %L', :'db_role', :'db_password')\gexec
+SELECT format('ALTER ROLE %I CREATEDB', :'db_role')\gexec
+SELECT format('CREATE DATABASE krit_bot OWNER %I', :'db_role')
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'krit_bot')\gexec
 SQL
 

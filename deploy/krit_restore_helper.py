@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 import zipfile
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -148,7 +149,10 @@ def restore_operation(
     manifest = safe_extract(operation_dir / "upload.backup", extracted)
     members = {str(item["name"]): extracted / str(item["filename"]) for item in manifest["databases"]}
     args = postgres_args(config)
+    preflight_database = f"krit_restore_preflight_{uuid.uuid4().hex[:12]}"
     try:
+        runner(["createdb", *args, preflight_database], config)
+        runner(["dropdb", *args, "--if-exists", preflight_database], config)
         for database in database_names:
             runner(
                 [

@@ -395,6 +395,19 @@ def test_privileged_helper_safety_dumps_all_databases_and_rolls_back_set(tmp_pat
     assert safety["databases"] == ["krit_bot", "krit_messages"]
     assert len([item for item in commands if item[0] == "pg_dump"]) == 2
     assert len([item for item in commands if item[0] == "pg_restore"]) == 2
+    preflight_creates = [
+        item
+        for item in commands
+        if item[0] == "createdb" and item[-1].startswith("krit_restore_preflight_")
+    ]
+    assert len(preflight_creates) == 1
+    preflight_name = preflight_creates[0][-1]
+    assert ["dropdb", *preflight_creates[0][1:-1], "--if-exists", preflight_name] in commands
+    assert commands.index(preflight_creates[0]) < next(
+        index
+        for index, item in enumerate(commands)
+        if item[0] == "dropdb" and item[-1] == "krit_bot"
+    )
     assert all("secret" not in " ".join(item) for item in commands)
     terminate_commands = [
         item

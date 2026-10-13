@@ -69,7 +69,9 @@ def test_installer_is_idempotent_generates_secrets_and_never_embeds_real_ones() 
     installer = (DEPLOY / "install-krit-server.sh").read_text(encoding="utf-8")
     assert "set -Eeuo pipefail" in installer
     assert "id -u krit" in installer
-    assert "IF NOT EXISTS" in installer
+    assert "WHERE NOT EXISTS" in installer
+    assert "DB_ROLE=${KRIT_PGUSER:-krit}" in installer
+    assert "CREATEDB" in installer
     assert "openssl rand" in installer
     assert "chmod 0640 /opt/krit-bot/config/krit-bot.env" in installer
     assert "chown -R root:krit /opt/krit-bot/venv" in installer
