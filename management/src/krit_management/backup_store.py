@@ -100,6 +100,17 @@ class BackupStore:
         trusted = [item for item in self.entries() if item.trust == "trusted"]
         return max(trusted, key=lambda item: item.created_at, default=None)
 
+    def verify(self, entry: BackupEntry) -> dict[str, Any]:
+        if not entry.archive.is_file():
+            raise FileNotFoundError(entry.archive)
+        expected_size = int(entry.info.get("size") or 0)
+        if expected_size and entry.archive.stat().st_size != expected_size:
+            raise ValueError("backup size mismatch")
+        expected_digest = str(entry.info.get("sha256") or "")
+        if expected_digest and self._sha256(entry.archive) != expected_digest:
+            raise ValueError("backup checksum mismatch")
+        return self._verify_archive(entry.archive, entry.info)
+
     def _update_pointer(self) -> None:
         trusted = [item for item in self.entries() if item.trust == "trusted"]
         pointer = self.root / self.POINTER_NAME

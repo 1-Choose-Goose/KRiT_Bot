@@ -138,6 +138,20 @@ def test_bad_or_interrupted_download_preserves_previous_trusted_set(tmp_path) ->
     assert not list(tmp_path.glob("*.part"))
 
 
+def test_verify_rejects_changed_local_backup(tmp_path) -> None:
+    store = BackupStore(tmp_path)
+    info, body = _archive(
+        created_at=datetime(2026, 10, 1, 10, tzinfo=UTC), people=10, watermark=50
+    )
+    entry = store.install_from_stream(info, [body])
+
+    assert store.verify(entry)["id"] == info["id"]
+
+    entry.archive.write_bytes(body + b"changed")
+    with pytest.raises(ValueError, match="size mismatch"):
+        store.verify(entry)
+
+
 def test_rotation_keeps_seven_daily_and_four_additional_weekly_sets(tmp_path) -> None:
     store = BackupStore(tmp_path)
     start = datetime(2026, 6, 1, 10, tzinfo=UTC)

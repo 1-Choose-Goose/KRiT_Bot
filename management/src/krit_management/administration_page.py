@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import Qt, QThreadPool, QTimer
+from PySide6.QtCore import Qt, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QTableWidget,
@@ -27,11 +29,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .api import ManagementApi
+from .api import ApiError, ManagementApi
 from .backup_controller import BackupController
+from .backup_store import BackupEntry
 from .dialogs import ChangePasswordDialog
 from .widgets import configure_form_layout
-from .workers import Worker
+from .workers import ProgressWorker, Worker
 
 
 class ReportsPage(QWidget):
@@ -122,7 +125,7 @@ class AdminUserDialog(QDialog):
 class RestoreServerDialog(QDialog):
     def __init__(
         self,
-        backup_description: str,
+        backups: list[BackupEntry],
         parent=None,
         *,
         current_server_url: str = "",
@@ -130,13 +133,13 @@ class RestoreServerDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self._current_server_url = current_server_url.strip().rstrip("/")
+        self._backups = sorted(backups, key=lambda item: item.created_at, reverse=True)
         self.setWindowTitle("Восстановление баз КРиТ")
-        self.setMinimumWidth(590)
+        self.setMinimumWidth(680)
         layout = QVBoxLayout(self)
         warning = QLabel(
-            "Будет использована последняя доверенная локальная копия:\n"
-            f"{backup_description}\n\n"
-            "Перед заменой сервер автоматически создаст страховочный комплект "
+            "Выберите доверенную локальную копию. Перед заменой сервер "
+            "автоматически создаст страховочный комплект "
             "текущих баз."
         )
         warning.setWordWrap(True)
@@ -153,6 +156,22 @@ class RestoreServerDialog(QDialog):
 
         form = QFormLayout()
         configure_form_layout(form)
+        self.backup = QComboBox()
+        for entry in self._backups:
+            counts = {
+                key: sum(
+                    int((database.get("critical_counts") or {}).get(key, 0))
+                    for database in entry.info.get("databases", [])
+                )
+                for key in ("persons", "lessons")
+            }
+            size_mb = entry.archive.stat().st_size / (1024 * 1024)
+            self.backup.addItem(
+                f"{entry.created_at.astimezone():%d.%m.%Y %H:%M} · "
+                f"{size_mb:.1f} МБ · {counts['persons']} клиентов · "
+                f"{counts['lessons']} занятий",
+                entry,
+            )
         self.target_mode = QComboBox()
         self.target_mode.addItem("Текущий сервер", "current")
         self.target_mode.addItem("Другой сервер", "other")
@@ -175,6 +194,7 @@ class RestoreServerDialog(QDialog):
             self.new_password_repeat,
         ):
             field.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Резервная копия", self.backup)
         form.addRow("Куда восстановить", self.target_mode)
         form.addRow("Адрес сервера", self.address)
         form.addRow("Порт", self.port)
@@ -245,8 +265,14 @@ class RestoreServerDialog(QDialog):
         port = self.port.text().strip()
         return f"{address}:{port}" if port and port != "443" else address
 
+    def selected_backup(self) -> BackupEntry:
+        return self.backup.currentData()
+
 
 class AdministrationPage(QWidget):
+    server_restart_expected = Signal()
+    server_restart_finished = Signal()
+
     def __init__(
         self,
         api: ManagementApi,
@@ -868,6 +894,23 @@ class AdministrationPage(QWidget):
         worker.signals.failed.connect(failed)
         self.pool.start(worker)
 
+    def _run_progress(self, function, progress, success, failure) -> None:
+        worker = ProgressWorker(function)
+        self._workers.add(worker)
+
+        def done(result: object) -> None:
+            self._workers.discard(worker)
+            success(result)
+
+        def failed(message: str) -> None:
+            self._workers.discard(worker)
+            failure(message)
+
+        worker.signals.progress.connect(progress)
+        worker.signals.finished.connect(done)
+        worker.signals.failed.connect(failed)
+        self.pool.start(worker)
+
     def _run_action(self, function) -> None:
         self._run(function, lambda _result: self.refresh_status())
 
@@ -983,26 +1026,27 @@ class AdministrationPage(QWidget):
             self._render_backup_summary()
 
     def _restore_databases(self) -> None:
-        latest = self.backup_store.latest_trusted()
-        if latest is None:
+        backups = sorted(
+            (item for item in self.backup_store.entries() if item.trust == "trusted"),
+            key=lambda item: item.created_at,
+            reverse=True,
+        )
+        if not backups:
             QMessageBox.warning(
                 self,
                 "Нет резервной копии",
                 "Сначала создайте и успешно сохраните доверенную резервную копию.",
             )
             return
-        description = (
-            f"{latest.created_at.astimezone().strftime('%d.%m.%Y %H:%M')} · "
-            f"{latest.archive.stat().st_size / (1024 * 1024):.1f} МБ"
-        )
         dialog = RestoreServerDialog(
-            description,
+            backups,
             self,
             current_server_url=self.api.server_url(),
             current_username=str(self.api.profile.get("username") or "Choose_Goose"),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        selected = dialog.selected_backup()
         credentials = {
             "url": dialog.server_url(),
             "username": dialog.username.text().strip(),
@@ -1011,11 +1055,45 @@ class AdministrationPage(QWidget):
             "confirmation": dialog.confirmation_phrase.text().strip(),
         }
         self.restore_button.setEnabled(False)
+        current_target = (
+            str(credentials["url"]).rstrip("/") == self.api.server_url().rstrip("/")
+        )
+        if current_target:
+            self.server_restart_expected.emit()
 
-        def restore() -> dict[str, Any]:
+        restore_progress = QProgressDialog(
+            "Проверка выбранной резервной копии…", "", 0, 0, self
+        )
+        restore_progress.setWindowTitle("Восстановление баз КРиТ")
+        restore_progress.setCancelButton(None)
+        restore_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        restore_progress.setAutoClose(False)
+        restore_progress.setMinimumDuration(0)
+        restore_progress.show()
+
+        def show_progress(payload: object) -> None:
+            data = payload if isinstance(payload, dict) else {}
+            restore_progress.setLabelText(str(data.get("stage") or "Восстановление…"))
+            percent = int(data.get("percent", -1))
+            if percent < 0:
+                restore_progress.setRange(0, 0)
+            else:
+                restore_progress.setRange(0, 100)
+                restore_progress.setValue(percent)
+
+        def restore(report) -> dict[str, Any]:
             target = ManagementApi.for_server(str(credentials["url"]))
             operation_id: str | None = None
+            apply_started = False
             try:
+                report({"stage": "Проверка выбранной резервной копии…", "percent": -1})
+                try:
+                    self.backup_store.verify(selected)
+                except (OSError, ValueError) as exc:
+                    raise RuntimeError(
+                        "Выбранная резервная копия повреждена или недоступна."
+                    ) from exc
+                report({"stage": "Подключение к серверу…", "percent": -1})
                 profile = target.login(
                     str(credentials["username"]), str(credentials["password"])
                 )
@@ -1029,7 +1107,8 @@ class AdministrationPage(QWidget):
                         str(credentials["new_password"]),
                     )
                     credentials["password"] = credentials["new_password"]
-                operation = target.create_restore(latest.info)
+                report({"stage": "Подготовка восстановления…", "percent": -1})
+                operation = target.create_restore(selected.info)
                 operation_id = str(operation["id"])
                 if operation.get("target_has_business_data") and (
                     credentials["confirmation"] != "ВОССТАНОВИТЬ"
@@ -1037,16 +1116,68 @@ class AdministrationPage(QWidget):
                     raise RuntimeError(
                         "Для действующего сервера введите контрольную фразу ВОССТАНОВИТЬ."
                     )
-                target.upload_restore(operation_id, latest.archive)
-                result = target.apply_restore(
+                def upload_progress(transferred: int, total: int) -> None:
+                    percent = min(100, int(transferred * 100 / total)) if total else 0
+                    report(
+                        {
+                            "stage": f"Загрузка резервной копии… {percent}%",
+                            "percent": percent,
+                        }
+                    )
+
+                target.upload_restore(
+                    operation_id, selected.archive, progress=upload_progress
+                )
+                report({"stage": "Запуск восстановления…", "percent": -1})
+                target.apply_restore(
                     operation_id,
                     password=str(credentials["password"]),
                     confirmation_phrase=str(credentials["confirmation"]),
                 )
-                operation_id = None
-                return result
+                apply_started = True
+                report(
+                    {
+                        "stage": "Сервер заменяет базы и перезапускается…",
+                        "percent": -1,
+                    }
+                )
+                deadline = time.monotonic() + 300
+                while True:
+                    try:
+                        result = target.restore_completion(operation_id)
+                    except ApiError as exc:
+                        if exc.status_code not in {None, 502, 503, 504}:
+                            raise
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError(
+                                "Сервер не завершил восстановление за 5 минут. "
+                                "Проверьте его состояние и повторите попытку."
+                            ) from exc
+                        time.sleep(1)
+                        continue
+                    phase = str(result.get("phase") or "")
+                    if phase == "completed":
+                        report(
+                            {
+                                "stage": "Проверка восстановленных данных…",
+                                "percent": 100,
+                            }
+                        )
+                        operation_id = None
+                        return {"backup": selected, "status": result}
+                    if phase == "failed":
+                        raise RuntimeError(
+                            "Сервер не смог восстановить базы. Прежние базы "
+                            "автоматически возвращены."
+                        )
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            "Сервер не завершил восстановление за 5 минут. "
+                            "Проверьте его состояние и повторите попытку."
+                        )
+                    time.sleep(1)
             except Exception:
-                if operation_id is not None:
+                if operation_id is not None and not apply_started:
                     try:
                         target.cancel_restore(operation_id)
                     except Exception:
@@ -1058,18 +1189,29 @@ class AdministrationPage(QWidget):
                 target.close()
 
         def complete(_result: object) -> None:
+            restore_progress.close()
+            restore_progress.deleteLater()
             self.restore_button.setEnabled(True)
+            if current_target:
+                self.server_restart_finished.emit()
+            self.refresh_status()
+            self.refresh_users()
             QMessageBox.information(
                 self,
-                "Восстановление запущено",
-                "Сервер принял комплект. После перезапуска войдите в программу заново.",
+                "Базы успешно восстановлены",
+                "Выбранная резервная копия установлена. Сервер и бот снова "
+                "работают, данные в программе обновятся автоматически.",
             )
 
         def failed(message: str) -> None:
+            restore_progress.close()
+            restore_progress.deleteLater()
             self.restore_button.setEnabled(True)
+            if current_target:
+                self.server_restart_finished.emit()
             QMessageBox.warning(self, "Восстановление не выполнено", message)
 
-        self._run(restore, complete, failed)
+        self._run_progress(restore, show_progress, complete, failed)
 
     def _rollback_safety(self) -> None:
         answer = QMessageBox.warning(

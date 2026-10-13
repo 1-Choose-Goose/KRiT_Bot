@@ -322,6 +322,11 @@ async def test_restore_api_streams_archive_and_requires_safety_decision(tmp_path
                 json={},
             )
             assert applied.status_code == 200, applied.text
+            completion = await client.get(
+                f"/api/v1/administration/restores/{operation_id}/completion"
+            )
+            assert completion.status_code == 200, completion.text
+            assert completion.json() == {"phase": "completed", "error": None}
             assert dispatched == [operation_id]
             assert len(preserved_hashes) == 1
             assert password_hash.verify("admin", preserved_hashes[0])

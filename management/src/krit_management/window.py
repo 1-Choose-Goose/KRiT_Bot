@@ -78,6 +78,7 @@ class MainWindow(QMainWindow):
         self._closing = False
         self._refresh_running = False
         self._refresh_generation = 0
+        self._server_restart_expected = False
         self._last_snapshot_payload: dict[str, Any] | None = None
         self._background_jobs = 0
         self._update_progress: QProgressDialog | None = None
@@ -163,6 +164,12 @@ class MainWindow(QMainWindow):
         if self.role == "superadmin":
             self.administration_page = AdministrationPage(
                 self.api, backup_controller=self.backup_controller
+            )
+            self.administration_page.server_restart_expected.connect(
+                self._expect_server_restart
+            )
+            self.administration_page.server_restart_finished.connect(
+                self._finish_server_restart
             )
             administration_widget: QWidget = self.administration_page
         else:
@@ -356,6 +363,7 @@ class MainWindow(QMainWindow):
         self._run(
             lambda: self.api.admin_notifications(unread_only=False),
             lambda result: self._notifications_changed(result if isinstance(result, list) else []),
+            lambda _message: None,
         )
         self._run(
             self.api.communication_conversations,
@@ -731,14 +739,32 @@ class MainWindow(QMainWindow):
                 if selected_row >= 0:
                     table.setCurrentCell(selected_row, 0)
             self._last_snapshot_payload = deepcopy(snapshot_payload)
-        text = "Бот активен" if status_data.get("status") == "ok" else "Сервер активен"
-        self._set_connection(text, "online")
+        if self._server_restart_expected:
+            self._set_connection("Восстановление данных…", "loading")
+        else:
+            text = "Бот активен" if status_data.get("status") == "ok" else "Сервер активен"
+            self._set_connection(text, "online")
 
     def _refresh_failed(self, message: str, silent: bool) -> None:
         self._refresh_running = False
+        if self._server_restart_expected:
+            self._set_connection("Восстановление данных…", "loading")
+            return
         self._set_connection("Нет связи", "offline")
         if not silent:
             QMessageBox.critical(self, "Ошибка подключения", message)
+
+    def _expect_server_restart(self) -> None:
+        self._server_restart_expected = True
+        self._refresh_generation += 1
+        self._refresh_running = False
+        self._set_connection("Восстановление данных…", "loading")
+
+    def _finish_server_restart(self) -> None:
+        self._server_restart_expected = False
+        self._refresh_generation += 1
+        self._refresh_running = False
+        self.refresh()
 
     def _set_connection(self, text: str, state: str) -> None:
         self.status_label.setText(text)

@@ -529,6 +529,12 @@ class ManagementApi:
         data = self._request("GET", f"/administration/restores/{operation_id}")
         return data if isinstance(data, dict) else {}
 
+    def restore_completion(self, operation_id: str) -> dict[str, Any]:
+        data = self._request(
+            "GET", f"/administration/restores/{operation_id}/completion"
+        )
+        return data if isinstance(data, dict) else {}
+
     def pending_restore_safety(self) -> dict[str, Any] | None:
         data = self._request("GET", "/administration/restores/safety/pending")
         return data if isinstance(data, dict) else None

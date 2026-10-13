@@ -117,12 +117,26 @@ def _labels(window: MainWindow) -> list[str]:
 
 def test_restore_dialog_defaults_to_current_server_and_explains_same_server() -> None:
     app = QApplication.instance() or QApplication([])
+    older = SimpleNamespace(
+        archive=SimpleNamespace(stat=lambda: SimpleNamespace(st_size=100_000)),
+        created_at=datetime(2026, 10, 10, 18, 0, tzinfo=UTC),
+        info={"databases": [{"critical_counts": {"persons": 60, "lessons": 20}}]},
+    )
+    latest = SimpleNamespace(
+        archive=SimpleNamespace(stat=lambda: SimpleNamespace(st_size=110_000)),
+        created_at=datetime(2026, 10, 11, 20, 4, tzinfo=UTC),
+        info={"databases": [{"critical_counts": {"persons": 68, "lessons": 30}}]},
+    )
     dialog = RestoreServerDialog(
-        "11.10.2026 20:04 · 0.1 МБ",
+        [latest, older],
         current_server_url="https://krit.example",
         current_username="admin",
     )
 
+    assert dialog.backup.count() == 2
+    assert dialog.selected_backup() is latest
+    assert "68 клиентов" in dialog.backup.currentText()
+    assert "30 занятий" in dialog.backup.currentText()
     assert dialog.target_mode.currentData() == "current"
     assert dialog.server_url() == "https://krit.example"
     assert dialog.address.isEnabled() is False
@@ -167,12 +181,17 @@ def test_restore_to_current_server_uses_local_copy_and_current_address(
     latest = SimpleNamespace(
         archive=archive,
         created_at=datetime(2026, 10, 11, 20, 4, tzinfo=UTC),
+        trust="trusted",
         info={"id": "trusted", "databases": [{"name": "krit_bot"}]},
     )
 
     class Store:
-        def latest_trusted(self):
-            return latest
+        def entries(self):
+            return [latest]
+
+        def verify(self, entry):
+            calls.append(("verify", entry.archive))
+            return entry.info
 
     class Field:
         def __init__(self, value: str) -> None:
@@ -184,7 +203,8 @@ def test_restore_to_current_server_uses_local_copy_and_current_address(
     dialog_arguments: dict[str, str] = {}
 
     class Dialog:
-        def __init__(self, _description, _parent, **kwargs) -> None:
+        def __init__(self, backups, _parent, **kwargs) -> None:
+            assert backups == [latest]
             dialog_arguments.update(kwargs)
             self.username = Field("admin")
             self.password = Field("secret-password")
@@ -197,6 +217,9 @@ def test_restore_to_current_server_uses_local_copy_and_current_address(
         def server_url(self) -> str:
             return "https://current.example"
 
+        def selected_backup(self):
+            return latest
+
     calls: list[tuple] = []
 
     class Target:
@@ -208,12 +231,18 @@ def test_restore_to_current_server_uses_local_copy_and_current_address(
             calls.append(("create", info))
             return {"id": "restore-1", "target_has_business_data": True}
 
-        def upload_restore(self, restore_id: str, path) -> None:
+        def upload_restore(self, restore_id: str, path, progress=None) -> None:
             calls.append(("upload", restore_id, path))
+            if progress is not None:
+                progress(12, 12)
 
         def apply_restore(self, restore_id: str, **kwargs) -> dict:
             calls.append(("apply", restore_id, kwargs["confirmation_phrase"]))
             return {"status": "accepted"}
+
+        def restore_completion(self, restore_id: str) -> dict:
+            calls.append(("completion", restore_id))
+            return {"phase": "completed", "error": None}
 
         def close(self) -> None:
             calls.append(("close",))
@@ -230,17 +259,81 @@ def test_restore_to_current_server_uses_local_copy_and_current_address(
     api.server_url = lambda: "https://current.example"  # type: ignore[attr-defined]
     page = AdministrationPage(api)  # type: ignore[arg-type]
     page.backup_store = Store()  # type: ignore[assignment]
-    page._run = (  # type: ignore[method-assign]
-        lambda function, success=None, failure=None: success(function())
+    restart_expected: list[bool] = []
+    restart_finished: list[bool] = []
+    page.server_restart_expected.connect(lambda: restart_expected.append(True))
+    page.server_restart_finished.connect(lambda: restart_finished.append(True))
+    page._run_progress = (  # type: ignore[method-assign]
+        lambda function, progress, success, failure: success(function(progress))
     )
 
     page._restore_databases()
 
     assert dialog_arguments["current_server_url"] == "https://current.example"
     assert target_urls == ["https://current.example"]
+    assert ("verify", archive) in calls
     assert ("upload", "restore-1", archive) in calls
     assert ("apply", "restore-1", "ВОССТАНОВИТЬ") in calls
+    assert ("completion", "restore-1") in calls
+    assert restart_expected == [True]
+    assert restart_finished == [True]
     page.shutdown()
+    app.processEvents()
+
+
+def test_expected_restore_restart_is_shown_without_connection_error(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeAdministrationApi("superadmin"))  # type: ignore[arg-type]
+    window.pool.waitForDone(5_000)
+    app.processEvents()
+    messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, _title, message: messages.append(message),
+    )
+
+    window._expect_server_restart()
+    window._refresh_failed("temporary outage", silent=False)
+
+    assert window._server_restart_expected is True
+    assert window.status_label.text() == "Восстановление данных…"
+    assert messages == []
+
+    window._loaded(FakeAdministrationApi("superadmin").snapshot())
+    assert window._server_restart_expected is True
+    assert window.status_label.text() == "Восстановление данных…"
+
+    window._finish_server_restart()
+    window.pool.waitForDone(5_000)
+    app.processEvents()
+    assert window._server_restart_expected is False
+    assert window.status_label.text() == "Бот активен"
+    window.close()
+    app.processEvents()
+
+
+def test_background_notification_poll_never_opens_error_dialog(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeAdministrationApi("administrator"))  # type: ignore[arg-type]
+    window.pool.waitForDone(5_000)
+    app.processEvents()
+    messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, _title, message: messages.append(message),
+    )
+
+    def fail_background(_function, _success, on_failure=None) -> None:
+        (on_failure or window._show_error)("temporary outage")
+
+    window._run = fail_background  # type: ignore[method-assign]
+    window.api.communication_conversations = lambda: []  # type: ignore[attr-defined]
+    window._poll_notifications()
+
+    assert messages == []
+    window.close()
     app.processEvents()
 
 
@@ -253,12 +346,16 @@ def test_restore_cancels_server_operation_when_confirmation_is_invalid(
     latest = SimpleNamespace(
         archive=archive,
         created_at=datetime(2026, 10, 12, 20, 4, tzinfo=UTC),
+        trust="trusted",
         info={"id": "trusted", "databases": [{"name": "krit_bot"}]},
     )
 
     class Store:
-        def latest_trusted(self):
-            return latest
+        def entries(self):
+            return [latest]
+
+        def verify(self, entry):
+            return entry.info
 
     class Field:
         def __init__(self, value: str) -> None:
@@ -279,6 +376,9 @@ def test_restore_cancels_server_operation_when_confirmation_is_invalid(
 
         def server_url(self) -> str:
             return "https://current.example"
+
+        def selected_backup(self):
+            return latest
 
     calls: list[tuple] = []
 
@@ -307,13 +407,13 @@ def test_restore_cancels_server_operation_when_confirmation_is_invalid(
     page = AdministrationPage(api)  # type: ignore[arg-type]
     page.backup_store = Store()  # type: ignore[assignment]
 
-    def run(function, _success=None, failure=None):
+    def run(function, progress, _success=None, failure=None):
         try:
-            function()
+            function(progress)
         except Exception as exc:
             failure(str(exc))
 
-    page._run = run  # type: ignore[method-assign]
+    page._run_progress = run  # type: ignore[method-assign]
 
     page._restore_databases()
 

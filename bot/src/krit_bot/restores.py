@@ -429,6 +429,18 @@ def create_restore_router(
         except Exception as exc:
             raise translate_restore_error(exc) from None
 
+    @router.get("/{operation_id}/completion")
+    async def restore_completion(operation_id: str) -> dict[str, Any]:
+        """Expose only the result needed by the client reconnect workflow."""
+        try:
+            state = service.state(operation_id)
+        except Exception as exc:
+            raise translate_restore_error(exc) from None
+        return {
+            "phase": str(state.get("phase") or "unknown"),
+            "error": state.get("error"),
+        }
+
     @router.get("/safety/pending")
     async def pending_safety(
         _principal: Annotated[AdminPrincipal, Depends(require_superadmin)],
