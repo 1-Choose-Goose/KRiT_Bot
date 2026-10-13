@@ -10,7 +10,8 @@ from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 import krit_management.administration_page as administration_module
 from krit_management.administration_page import AdministrationPage, RestoreServerDialog
-from krit_management.dialogs import ChangePasswordDialog
+from krit_management.dialogs import ChangePasswordDialog, LoginDialog
+from krit_management.main import load_last_username, save_last_username
 from krit_management.window import MainWindow
 
 
@@ -734,4 +735,19 @@ def test_initial_password_dialog_requires_matching_seven_character_password() ->
     dialog._accept_if_valid()
     assert dialog.result() == 1
     dialog.close()
+    app.processEvents()
+
+
+def test_login_dialog_is_blank_until_a_successful_username_was_saved(tmp_path) -> None:
+    from PySide6.QtCore import QSettings
+
+    app = QApplication.instance() or QApplication([])
+    settings = QSettings(str(tmp_path / "login.ini"), QSettings.Format.IniFormat)
+    assert load_last_username(settings) == ""
+    assert LoginDialog().username.text() == ""
+
+    save_last_username(settings, "  Choose_Goose  ")
+
+    assert load_last_username(settings) == "Choose_Goose"
+    assert LoginDialog(load_last_username(settings)).username.text() == "Choose_Goose"
     app.processEvents()

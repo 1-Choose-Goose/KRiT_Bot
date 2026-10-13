@@ -4,7 +4,7 @@ import ctypes
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
+from PySide6.QtCore import QLibraryInfo, QLocale, QSettings, QTranslator
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QDialog
 
@@ -301,6 +301,22 @@ QCheckBox::indicator:checked:disabled {
 
 ASSETS_DIR = Path(__file__).with_name("assets")
 APP_ICON = ASSETS_DIR / "app_icon.ico"
+LAST_USERNAME_KEY = "authentication/last_username"
+
+
+def load_last_username(settings: QSettings | None = None) -> str:
+    store = settings or QSettings()
+    value = store.value(LAST_USERNAME_KEY, "", type=str)
+    return value.strip()
+
+
+def save_last_username(settings: QSettings | None, username: str) -> None:
+    normalized = username.strip()
+    if not normalized:
+        return
+    store = settings or QSettings()
+    store.setValue(LAST_USERNAME_KEY, normalized)
+    store.sync()
 
 
 def build_stylesheet() -> str:
@@ -342,13 +358,14 @@ def run() -> None:
 
     api = ManagementApi(API_URL)
     while True:
-        dialog = LoginDialog()
+        dialog = LoginDialog(load_last_username())
         if dialog.exec() != QDialog.DialogCode.Accepted:
             api.close()
             raise SystemExit(0)
         try:
             current_password = dialog.password.text()
-            profile = api.login(dialog.username.text().strip(), current_password)
+            entered_username = dialog.username.text().strip()
+            profile = api.login(entered_username, current_password)
         except ApiError as exc:
             from PySide6.QtWidgets import QMessageBox
 
@@ -370,6 +387,7 @@ def run() -> None:
 
                 QMessageBox.warning(None, "Пароль не изменён", str(exc))
                 continue
+        save_last_username(None, entered_username)
         current_password = ""
         break
 

@@ -121,9 +121,22 @@ def apply_update(
         try:
             report("Установка новой версии…", 84)
             payload.rename(install_dir)
+            previous_backups = backup / "Backups"
+            current_backups = install_dir / "Backups"
+            if previous_backups.exists():
+                if current_backups.exists():
+                    if current_backups.is_dir():
+                        shutil.rmtree(current_backups)
+                    else:
+                        current_backups.unlink()
+                previous_backups.rename(current_backups)
             report("Запуск обновлённой программы…", 96)
             subprocess.Popen([str(install_dir / executable)], cwd=install_dir, close_fds=True)
         except Exception:
+            current_backups = install_dir / "Backups"
+            previous_backups = backup / "Backups"
+            if current_backups.exists() and not previous_backups.exists():
+                current_backups.rename(previous_backups)
             if install_dir.exists():
                 shutil.rmtree(install_dir, ignore_errors=True)
             backup.rename(install_dir)

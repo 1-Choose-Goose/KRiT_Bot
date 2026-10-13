@@ -19,15 +19,20 @@ fi
 
 PYTHON_BIN=${PYTHON_BIN:-}
 if [[ -z ${PYTHON_BIN} ]]; then
-  if command -v python3.13 >/dev/null 2>&1; then
-    PYTHON_BIN=$(command -v python3.13)
-  elif command -v python3 >/dev/null 2>&1; then
+  if command -v python3 >/dev/null 2>&1 && python3 -c \
+    'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
     PYTHON_BIN=$(command -v python3)
+  elif command -v python3.13 >/dev/null 2>&1; then
+    PYTHON_BIN=$(command -v python3.13)
+  elif command -v python3.12 >/dev/null 2>&1; then
+    PYTHON_BIN=$(command -v python3.12)
+  elif command -v python3.11 >/dev/null 2>&1; then
+    PYTHON_BIN=$(command -v python3.11)
   fi
 fi
 if [[ -z ${PYTHON_BIN} ]] || ! "${PYTHON_BIN}" -c \
-  'import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)'; then
-  echo "Для КРиТ требуется Python 3.13 или новее. Установка не изменяла службы сервера."
+  'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+  echo "Для КРиТ требуется Python 3.11 или новее. Установка не изменяла службы сервера."
   exit 1
 fi
 
@@ -104,7 +109,6 @@ KRIT_PGHOST=127.0.0.1
 KRIT_PGPORT=5432
 KRIT_PGUSER=krit
 KRIT_PGPASSWORD=${DB_PASSWORD}
-BACKUP_ROOT=/opt/krit-bot/data/backups
 RESTORE_ROOT=/opt/krit-bot/data/restore
 MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
 MAX_API_BASE_URL=https://platform-api2.max.ru

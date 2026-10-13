@@ -96,7 +96,11 @@ try {
             "KRiT-Management-Windows-x64.zip",
             "SetupKrit.exe"
         ) | ForEach-Object {
-            [pscustomobject]@{ Name = $_.Name; Size = $_.Length; SHA256 = (Get-FileHash $_).Hash }
+            [pscustomobject]@{
+                Name = $_.Name
+                Size = $_.Length
+                SHA256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+            }
         }
 }
 finally {

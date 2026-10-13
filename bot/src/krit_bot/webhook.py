@@ -708,7 +708,7 @@ def create_app(
     async def collect_backup_status() -> dict[str, Any]:
         local_status = await collect_local_backup_installation_status()
         try:
-            free_bytes = shutil.disk_usage(settings.backup_root.parent).free
+            free_bytes = shutil.disk_usage(settings.restore_root.parent).free
         except OSError:
             free_bytes = None
         return {

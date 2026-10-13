@@ -280,7 +280,6 @@ async def test_restore_api_streams_archive_and_requires_safety_decision(tmp_path
         jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
         bot_mode="webhook",
         vk_syndication_enabled=False,
-        backup_root=tmp_path / "backups",
         restore_root=restore_root,
     )
     app = create_app(settings, restore_dispatcher=dispatch)

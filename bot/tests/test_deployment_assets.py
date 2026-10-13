@@ -90,10 +90,10 @@ def test_installer_is_idempotent_generates_secrets_and_never_embeds_real_ones() 
     assert "MAX_BOT_TOKEN=replace_me" not in installer
 
 
-def test_installer_checks_python_313_before_server_mutations_and_preserves_env() -> None:
+def test_installer_accepts_stock_python_311_before_server_mutations_and_preserves_env() -> None:
     installer = (DEPLOY / "install-krit-server.sh").read_text(encoding="utf-8")
 
-    version_check = installer.index("Python 3.13")
+    version_check = installer.index("Python 3.11")
     first_server_mutation = installer.index("useradd --system")
     assert version_check < first_server_mutation
     assert "PYTHON_BIN" in installer
@@ -104,6 +104,16 @@ def test_installer_checks_python_313_before_server_mutations_and_preserves_env()
     assert "JWT_SECRET=${JWT_SECRET:-$(openssl rand -hex 32)}" in installer
     assert "WEBHOOK_SECRET=${MAX_WEBHOOK_SECRET:-$(openssl rand -hex 32)}" in installer
     assert "MAX_BOT_TOKEN=${MAX_BOT_TOKEN}" in installer
+    assert "sys.version_info >= (3, 11)" in installer
+    assert installer.index("command -v python3 >/dev/null") < installer.index(
+        "command -v python3.13 >/dev/null"
+    )
+    assert 'requires-python = ">=3.11"' in (ROOT / "bot" / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert 'requires-python = ">=3.11"' in (
+        ROOT / "management" / "pyproject.toml"
+    ).read_text(encoding="utf-8")
 
 
 def test_runtime_assets_keep_all_krit_state_under_application_root() -> None:
@@ -128,6 +138,10 @@ def test_runtime_assets_keep_all_krit_state_under_application_root() -> None:
         'RESTORE_ROOT = Path("/opt/krit-bot/data/restore")'
         in (DEPLOY / "krit_restore_dispatch.py").read_text(encoding="utf-8")
     )
+    installer = (DEPLOY / "install-krit-server.sh").read_text(encoding="utf-8")
+    environment_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "BACKUP_ROOT=" not in installer
+    assert "AUTOMATIC_BACKUPS_ENABLED" not in environment_example
 
 
 def test_nginx_limits_large_uploads_to_restore_content_route() -> None:
@@ -147,6 +161,8 @@ def test_nginx_limits_large_uploads_to_restore_content_route() -> None:
 def test_server_package_builder_and_beginner_restore_guide_cover_required_assets() -> None:
     builder = (DEPLOY / "build-server-package.ps1").read_text(encoding="utf-8")
     guide = (ROOT / "RESTORE_DATABASES.txt").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert 'python-version: ["3.11", "3.13"]' in workflow
     for entry in (
         "bot/src",
         "bot/alembic",

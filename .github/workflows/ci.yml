@@ -7,6 +7,10 @@ on:
 jobs:
   tests:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
     services:
       postgres:
         image: postgres:16-alpine
@@ -29,7 +33,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install system test tools
         run: >-
@@ -38,7 +42,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e "./bot[dev]" -e "./management[dev]" ruff asyncpg
+          pip install -e "./bot[dev]" -e "./management[dev]" ruff asyncpg pip-audit
+      - name: Dependency audit
+        run: pip-audit --local --progress-spinner off
       - name: Ruff
         run: ruff check bot/src bot/tests management/src management/tests
       - name: Compile

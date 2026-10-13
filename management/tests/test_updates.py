@@ -14,6 +14,19 @@ from krit_management.updates import (
     release_notes_html,
     version_tuple,
 )
+from krit_management.version import APP_VERSION
+
+
+def test_release_version_is_synchronized_across_client_and_server() -> None:
+    root = Path(__file__).resolve().parents[2]
+    assert APP_VERSION == "1.0.0"
+    assert 'version = "1.0.0"' in (root / "management/pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert 'version = "1.0.0"' in (root / "bot/pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert "## 1.0.0" in (root / "CHANGELOG.md").read_text(encoding="utf-8")
 
 
 def test_semantic_version_comparison() -> None:
@@ -55,6 +68,9 @@ def test_updater_window_uses_bundled_brand_icon(tmp_path, monkeypatch) -> None:
         build_script.read_text(encoding="utf-8-sig")
     )
     assert '"SetupKrit.exe"' in build_script.read_text(encoding="utf-8-sig")
+    assert "Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256" in build_script.read_text(
+        encoding="utf-8-sig"
+    )
     assert '"RESTORE_DATABASES.txt"' in build_script.read_text(encoding="utf-8-sig")
     assert "OutputBaseFilename=SetupKrit" in installer_script.read_text(
         encoding="utf-8-sig"
@@ -119,6 +135,10 @@ def test_installer_reports_each_stage_and_replaces_application(tmp_path, monkeyp
     install_dir.mkdir()
     executable = "KRiTManagement.exe"
     (install_dir / executable).write_text("old", encoding="utf-8")
+    backups = install_dir / "Backups"
+    backups.mkdir()
+    trusted_copy = backups / "KRiT-trusted.backup"
+    trusted_copy.write_bytes(b"critical-local-backup")
     archive = tmp_path / "update.zip"
     with zipfile.ZipFile(archive, "w") as package:
         package.writestr(executable, "new")
@@ -138,6 +158,34 @@ def test_installer_reports_each_stage_and_replaces_application(tmp_path, monkeyp
 
     assert (install_dir / executable).read_text(encoding="utf-8") == "new"
     assert (install_dir / "_internal/library.dat").read_text(encoding="utf-8") == "payload"
+    assert (install_dir / "Backups/KRiT-trusted.backup").read_bytes() == (
+        b"critical-local-backup"
+    )
     assert launched
     assert stages[-1] == ("Обновление установлено", 100)
     assert {value for _, value in stages} >= {5, 12, 20, 65, 72, 84, 96, 100}
+
+
+def test_updater_rollback_restores_application_and_local_backups(tmp_path, monkeypatch) -> None:
+    install_dir = tmp_path / "KRiTManagement"
+    install_dir.mkdir()
+    executable = "KRiTManagement.exe"
+    (install_dir / executable).write_text("old", encoding="utf-8")
+    backups = install_dir / "Backups"
+    backups.mkdir()
+    (backups / "trusted.backup").write_bytes(b"trusted")
+    archive = tmp_path / "update.zip"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr(executable, "new")
+
+    monkeypatch.setattr(
+        updater.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("launch failed")),
+    )
+
+    with pytest.raises(OSError, match="launch failed"):
+        apply_update(archive, install_dir, 0, executable)
+
+    assert (install_dir / executable).read_text(encoding="utf-8") == "old"
+    assert (install_dir / "Backups/trusted.backup").read_bytes() == b"trusted"

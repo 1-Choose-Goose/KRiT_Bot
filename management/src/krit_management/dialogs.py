@@ -46,7 +46,7 @@ def person_roles(person: dict[str, Any]) -> list[str]:
 
 
 class LoginDialog(QDialog):
-    def __init__(self, parent=None) -> None:
+    def __init__(self, username: str = "", parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Вход · КРиТ")
         self.setMinimumWidth(420)
@@ -58,7 +58,7 @@ class LoginDialog(QDialog):
         layout.addWidget(title)
         form = QFormLayout()
         configure_form_layout(form)
-        self.username = QLineEdit("admin")
+        self.username = QLineEdit(username.strip())
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         form.addRow("Логин", self.username)
@@ -74,7 +74,7 @@ class LoginDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self.password.returnPressed.connect(self._accept_if_valid)
-        self.password.setFocus()
+        (self.password if self.username.text() else self.username).setFocus()
 
     def _accept_if_valid(self) -> None:
         if self.username.text().strip() and self.password.text():

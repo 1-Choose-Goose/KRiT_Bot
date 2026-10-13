@@ -12,8 +12,6 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from krit_bot.backups import BackupService
-
 POSTGRES_URL = os.getenv("KRIT_TEST_POSTGRES_URL")
 
 
@@ -32,14 +30,41 @@ async def test_postgresql_backup_can_replace_database_and_recover_data(tmp_path)
         await connection.execute(text("INSERT INTO krit_restore_probe VALUES ('from-backup')"))
     await engine.dispose()
 
-    backup = BackupService(
-        database_url=str(POSTGRES_URL),
-        database_names=("krit_bot",),
-        root=tmp_path / "backups",
+    dump_path = tmp_path / "krit_bot.dump"
+    backup_environment = {"PGPASSWORD": str(url.password or "")}
+    run_command(
+        [
+            "pg_dump",
+            "--format=custom",
+            "--no-owner",
+            "--no-privileges",
+            "--host",
+            str(url.host or "127.0.0.1"),
+            "--port",
+            str(url.port or 5432),
+            "--username",
+            str(url.username or "postgres"),
+            "--dbname",
+            "krit_bot",
+            "--file",
+            str(dump_path),
+        ],
+        backup_environment,
     )
-    info = await backup.create()
-    _metadata, archive_path = backup.get(info["id"]) or (None, None)
-    assert archive_path is not None
+    archive_path = tmp_path / "trusted.backup"
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "format": 1,
+                    "databases": [
+                        {"name": "krit_bot", "filename": dump_path.name}
+                    ],
+                }
+            ),
+        )
+        archive.write(dump_path, dump_path.name)
 
     engine = create_async_engine(str(POSTGRES_URL))
     async with engine.begin() as connection:
