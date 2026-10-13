@@ -105,6 +105,7 @@ def test_installer_accepts_stock_python_311_before_server_mutations_and_preserve
     assert "WEBHOOK_SECRET=${MAX_WEBHOOK_SECRET:-$(openssl rand -hex 32)}" in installer
     assert "MAX_BOT_TOKEN=${MAX_BOT_TOKEN}" in installer
     assert "sys.version_info >= (3, 11)" in installer
+    assert "'setuptools>=83'" in installer
     assert installer.index("command -v python3 >/dev/null") < installer.index(
         "command -v python3.13 >/dev/null"
     )
@@ -163,6 +164,7 @@ def test_server_package_builder_and_beginner_restore_guide_cover_required_assets
     guide = (ROOT / "RESTORE_DATABASES.txt").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert 'python-version: ["3.11", "3.13"]' in workflow
+    assert 'python -m pip install --upgrade pip "setuptools>=83"' in workflow
     for entry in (
         "bot/src",
         "bot/alembic",

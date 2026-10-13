@@ -41,7 +41,7 @@ jobs:
           libegl1 postgresql-client
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip "setuptools>=83"
           pip install -e "./bot[dev]" -e "./management[dev]" ruff asyncpg pip-audit
       - name: Dependency audit
         run: pip-audit --local --progress-spinner off

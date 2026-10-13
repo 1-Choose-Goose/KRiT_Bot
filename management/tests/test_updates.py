@@ -71,6 +71,7 @@ def test_updater_window_uses_bundled_brand_icon(tmp_path, monkeypatch) -> None:
     assert "Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256" in build_script.read_text(
         encoding="utf-8-sig"
     )
+    assert '"setuptools>=83"' in build_script.read_text(encoding="utf-8-sig")
     assert '"RESTORE_DATABASES.txt"' in build_script.read_text(encoding="utf-8-sig")
     assert "OutputBaseFilename=SetupKrit" in installer_script.read_text(
         encoding="utf-8-sig"

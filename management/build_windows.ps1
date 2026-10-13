@@ -23,7 +23,7 @@ if (Test-Path -LiteralPath $buildRoot) { [IO.Directory]::Delete($buildRoot, $tru
 try {
     & $pythonLauncher.Source -3.13 -m venv (Join-Path $buildRoot "venv")
     $python = Join-Path $buildRoot "venv\Scripts\python.exe"
-    & $python -m pip install --disable-pip-version-check --quiet --upgrade pip
+    & $python -m pip install --disable-pip-version-check --quiet --upgrade pip "setuptools>=83"
     & $python -m pip install --disable-pip-version-check --quiet -e $managementRoot "pyinstaller==6.22.3"
 
     # Изолируем PyInstaller от DLL из Codex, Poppler, Git и других SDK.

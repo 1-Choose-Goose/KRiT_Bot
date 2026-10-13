@@ -76,7 +76,7 @@ install -d -o krit -g krit -m 0700 /opt/krit-bot/data /opt/krit-bot/data/restore
 rsync -a --delete "${PACKAGE_ROOT}/bot/" /opt/krit-bot/bot/
 rsync -a --delete "${PACKAGE_ROOT}/deploy/" /opt/krit-bot/deploy/
 "${PYTHON_BIN}" -m venv /opt/krit-bot/venv
-/opt/krit-bot/venv/bin/python -m pip install --no-cache-dir --upgrade pip
+/opt/krit-bot/venv/bin/python -m pip install --no-cache-dir --upgrade pip 'setuptools>=83'
 /opt/krit-bot/venv/bin/python -m pip install --no-cache-dir -e /opt/krit-bot/bot
 chown -R root:krit /opt/krit-bot/venv
 chmod -R u=rwX,g=rX,o= /opt/krit-bot/venv
