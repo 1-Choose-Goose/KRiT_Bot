@@ -269,6 +269,12 @@ QLabel#connectionStatus {
 QLabel#connectionStatus[state="online"] { background: #dcf7e9; color: #087448; }
 QLabel#connectionStatus[state="loading"] { background: #fff2d9; color: #875400; }
 QLabel#connectionStatus[state="offline"] { background: #fde7ea; color: #a52b3b; }
+QDialog#updateProgressDialog { background: #f5f7fb; }
+QProgressBar#updateProgressBar {
+    min-height: 8px; max-height: 8px; border: 0; border-radius: 4px;
+    background: #dfe6f0;
+}
+QProgressBar#updateProgressBar::chunk { background: #1b63db; border-radius: 4px; }
 QDialogButtonBox { background: transparent; }
 QMessageBox { background: #f5f7fb; }
 """

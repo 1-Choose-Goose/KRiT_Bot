@@ -195,6 +195,7 @@ class ManagementApi:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.profile: dict[str, Any] = {}
+        self.session_expired = False
         self._client = httpx.Client(
             base_url=self.base_url,
             headers={"User-Agent": "KRiT-Management/0.1"},
@@ -220,6 +221,7 @@ class ManagementApi:
         if not token:
             raise ApiError("Сервер не выдал токен доступа")
         self._client.headers["Authorization"] = f"Bearer {token}"
+        self.session_expired = False
         self.profile = dict(data)
         self.profile.pop("access_token", None)
         return self.profile
@@ -996,6 +998,9 @@ class ManagementApi:
                 detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
             except ValueError:
                 detail = response.text
+            if response.status_code == 401 and not path.endswith("/auth/login"):
+                self.session_expired = True
+                self._client.headers.pop("Authorization", None)
             raise ApiError(
                 _format_api_error(response.status_code, detail, path),
                 status_code=response.status_code,

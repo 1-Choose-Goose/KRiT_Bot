@@ -111,6 +111,21 @@ def test_login_allows_server_to_finish_starting(monkeypatch) -> None:
     api.close()
 
 
+def test_unauthorized_business_request_marks_session_expired(monkeypatch) -> None:
+    api = ManagementApi("http://127.0.0.1:1")
+    api._client.headers["Authorization"] = "Bearer expired-token"
+    request = httpx.Request("GET", "http://127.0.0.1:1/snapshot")
+    response = httpx.Response(401, json={"detail": "Unauthorized"}, request=request)
+    monkeypatch.setattr(api._client, "request", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(ApiError, match="Сеанс завершён"):
+        api.snapshot()
+
+    assert api.session_expired is True
+    assert "Authorization" not in api._client.headers
+    api.close()
+
+
 def test_early_leave_falls_back_for_older_server(monkeypatch) -> None:
     api = ManagementApi("http://127.0.0.1:1")
     calls: list[tuple[str, str, dict[str, object]]] = []

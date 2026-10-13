@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QProgressDialog,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QStackedWidget,
@@ -62,6 +62,57 @@ def format_phone(value: object) -> str:
     return str(value or "")
 
 
+class UpdateProgressDialog(QDialog):
+    def __init__(self, version: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("updateProgressDialog")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setWindowTitle(f"Обновление КРиТ до версии {version}")
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(10)
+
+        title = QLabel("Установка обновления")
+        title.setObjectName("dialogTitle")
+        layout.addWidget(title)
+
+        self.stage = QLabel("Подключение к серверу обновлений…")
+        self.stage.setWordWrap(True)
+        layout.addWidget(self.stage)
+
+        self.details = QLabel("Подготовка загрузки")
+        self.details.setObjectName("supportingText")
+        layout.addWidget(self.details)
+
+        self.progress = QProgressBar()
+        self.progress.setObjectName("updateProgressBar")
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(False)
+        layout.addWidget(self.progress)
+
+    def set_progress(self, value: UpdateProgress) -> None:
+        self.stage.setText(value.stage)
+        if value.total > 0:
+            downloaded_mb = value.downloaded / (1024 * 1024)
+            total_mb = value.total / (1024 * 1024)
+            self.progress.setRange(0, 100)
+            self.progress.setValue(value.percent)
+            self.details.setText(f"{downloaded_mb:.1f} из {total_mb:.1f} МБ")
+            return
+        self.progress.setRange(0, 0)
+        self.details.setText("Пожалуйста, подождите")
+
+    def set_installing(self) -> None:
+        self.stage.setText("Загрузка завершена. Запускается установка обновления…")
+        self.details.setText("Программа автоматически перезапустится")
+        self.progress.setRange(0, 0)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, api: ManagementApi) -> None:
         super().__init__()
@@ -81,7 +132,7 @@ class MainWindow(QMainWindow):
         self._server_restart_expected = False
         self._last_snapshot_payload: dict[str, Any] | None = None
         self._background_jobs = 0
-        self._update_progress: QProgressDialog | None = None
+        self._update_progress: UpdateProgressDialog | None = None
         self._seen_notification_ids: set[int] = set()
         self._notifications: list[dict[str, Any]] = []
         self._last_toast_lesson_id: int | None = None
@@ -750,7 +801,10 @@ class MainWindow(QMainWindow):
         if self._server_restart_expected:
             self._set_connection("Восстановление данных…", "loading")
             return
-        self._set_connection("Нет связи", "offline")
+        if getattr(self.api, "session_expired", False):
+            self._set_connection("Сеанс завершён", "offline")
+        else:
+            self._set_connection("Нет связи", "offline")
         if not silent:
             QMessageBox.critical(self, "Ошибка подключения", message)
 
@@ -1168,14 +1222,7 @@ class MainWindow(QMainWindow):
             self._start_update_download(info)
 
     def _start_update_download(self, info: UpdateInfo) -> None:
-        dialog = QProgressDialog("Подключение к серверу обновлений…", "", 0, 100, self)
-        dialog.setWindowTitle(f"Обновление КРиТ до версии {info.version}")
-        dialog.setCancelButton(None)
-        dialog.setMinimumDuration(0)
-        dialog.setAutoClose(False)
-        dialog.setAutoReset(False)
-        dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        dialog.setValue(0)
+        dialog = UpdateProgressDialog(info.version, self)
         dialog.show()
         self._update_progress = dialog
 
@@ -1198,17 +1245,7 @@ class MainWindow(QMainWindow):
     def _update_download_progress(self, value: object) -> None:
         if self._update_progress is None or not isinstance(value, UpdateProgress):
             return
-        if value.total > 0:
-            downloaded_mb = value.downloaded / (1024 * 1024)
-            total_mb = value.total / (1024 * 1024)
-            self._update_progress.setRange(0, 100)
-            self._update_progress.setValue(value.percent)
-            self._update_progress.setLabelText(
-                f"{value.stage}\n{downloaded_mb:.1f} из {total_mb:.1f} МБ"
-            )
-        else:
-            self._update_progress.setRange(0, 0)
-            self._update_progress.setLabelText(value.stage)
+        self._update_progress.set_progress(value)
 
     def _close_update_progress(self) -> None:
         if self._update_progress is not None:
@@ -1222,10 +1259,7 @@ class MainWindow(QMainWindow):
 
     def _update_downloaded(self, archive: object) -> None:
         if self._update_progress is not None:
-            self._update_progress.setRange(0, 0)
-            self._update_progress.setLabelText(
-                "Загрузка завершена. Запускается установка обновления…"
-            )
+            self._update_progress.set_installing()
         try:
             launch_updater(archive)  # type: ignore[arg-type]
         except Exception as exc:

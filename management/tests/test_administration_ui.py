@@ -6,13 +6,15 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 import krit_management.administration_page as administration_module
 from krit_management.administration_page import AdministrationPage, RestoreServerDialog
 from krit_management.dialogs import ChangePasswordDialog, LoginDialog
 from krit_management.main import load_last_username, save_last_username
-from krit_management.window import MainWindow
+from krit_management.updates import UpdateProgress
+from krit_management.window import MainWindow, UpdateProgressDialog
 
 
 class FakeAdministrationApi:
@@ -311,6 +313,41 @@ def test_expected_restore_restart_is_shown_without_connection_error(monkeypatch)
     assert window._server_restart_expected is False
     assert window.status_label.text() == "Бот активен"
     window.close()
+    app.processEvents()
+
+
+def test_expired_session_is_not_reported_as_lost_connection() -> None:
+    app = QApplication.instance() or QApplication([])
+    api = FakeAdministrationApi("superadmin")
+    api.session_expired = True
+    window = MainWindow(api)  # type: ignore[arg-type]
+    window.pool.waitForDone(5_000)
+    app.processEvents()
+
+    window._refresh_failed("Сеанс завершён. Войдите в программу ещё раз.", silent=True)
+
+    assert window.status_label.text() == "Сеанс завершён"
+    window.close()
+    app.processEvents()
+
+
+def test_update_progress_uses_fully_styled_custom_dialog() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = UpdateProgressDialog("1.0.1")
+
+    assert dialog.objectName() == "updateProgressDialog"
+    assert dialog.testAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+    assert dialog.minimumWidth() >= 380
+
+    dialog.set_progress(UpdateProgress("Загрузка обновления…", 5 * 1024**2, 10 * 1024**2))
+    assert dialog.progress.value() == 50
+    assert "5.0 из 10.0 МБ" in dialog.details.text()
+
+    dialog.set_installing()
+    assert dialog.progress.minimum() == 0
+    assert dialog.progress.maximum() == 0
+    assert "установка" in dialog.stage.text().lower()
+    dialog.close()
     app.processEvents()
 
 
