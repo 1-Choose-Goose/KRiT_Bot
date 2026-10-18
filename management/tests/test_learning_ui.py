@@ -1068,6 +1068,35 @@ def test_student_journal_loads_full_lesson_before_opening_card(monkeypatch) -> N
     app.processEvents()
 
 
+def test_cancelled_lesson_is_not_shown_as_expected_in_student_journal() -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.shutdown()
+
+    page._student_history_loaded(
+        {
+            "lessons": [
+                {
+                    "id": 28,
+                    "start_at": "2026-10-18T13:00:00+05:00",
+                    "end_at": "2026-10-18T14:00:00+05:00",
+                    "subject_name_snapshot": "Русский язык",
+                    "teacher_name_snapshot": "Учитель",
+                    "status": "cancelled",
+                    "cancelled_reason": "Преподаватель заболел",
+                    "attendance_status": "expected",
+                }
+            ]
+        }
+    )
+
+    assert page.student_journal.item(0, 4).text() == "Отменено"
+    assert page.student_journal.item(0, 4).toolTip() == "Преподаватель заболел"
+    page.deleteLater()
+    app.processEvents()
+
+
 def test_calendar_can_remove_selected_planned_lesson(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     page = LearningPage(FakeApi())  # type: ignore[arg-type]
@@ -1790,6 +1819,44 @@ def test_person_history_is_loaded_only_when_learning_tab_opens() -> None:
     app.processEvents()
     assert calls == [7]
     dialog.deleteLater()
+
+
+def test_cancelled_lesson_is_not_shown_as_expected_in_client_card() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = PersonDialog(
+        {
+            "id": 7,
+            "full_name": "Алексеев Александр Фёдорович",
+            "phone": "+70010000017",
+            "roles": ["student"],
+        }
+    )
+
+    dialog.set_learning_history(
+        {
+            "student": {
+                "lessons": [
+                    {
+                        "id": 28,
+                        "start_at": "2026-10-18T13:00:00+05:00",
+                        "end_at": "2026-10-18T14:00:00+05:00",
+                        "subject_name_snapshot": "Русский язык",
+                        "teacher_name_snapshot": "Учитель",
+                        "room_name_snapshot": "Кабинет №1",
+                        "status": "cancelled",
+                        "cancelled_reason": "Преподаватель заболел",
+                        "attendance_status": "expected",
+                    }
+                ],
+                "presence": [],
+            }
+        }
+    )
+
+    assert dialog.learning_history.item(0, 6).text() == "Отменено"
+    assert "Преподаватель заболел" in dialog.learning_history.item(0, 6).toolTip()
+    dialog.deleteLater()
+    app.processEvents()
 
 
 def test_group_defaults_fill_new_lesson_without_changing_override_support() -> None:

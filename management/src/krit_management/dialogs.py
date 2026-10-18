@@ -386,7 +386,13 @@ class PersonDialog(QDialog):
                 str(lesson.get("attendance_status", "—")),
             )
             cancellation = "—"
-            if lesson.get("cancelled_by"):
+            if lesson.get("status") == "cancelled":
+                attendance = "Отменено"
+                cancellation = (
+                    "Занятие отменено: "
+                    f"{lesson.get('cancelled_reason') or 'причина не указана'}"
+                )
+            elif lesson.get("cancelled_by"):
                 actor = {
                     "student": "учеником",
                     "guardian": "родителем",

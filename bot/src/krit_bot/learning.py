@@ -3753,6 +3753,7 @@ def create_learning_router(
                             "actual_start_at",
                             "actual_end_at",
                             "status",
+                            "cancelled_reason",
                             "subject_name_snapshot",
                             "teacher_name_snapshot",
                             "room_name_snapshot",
@@ -3780,7 +3781,7 @@ def create_learning_router(
                         select(Lesson)
                         .where(
                             Lesson.teacher_id == person_id,
-                            Lesson.status.in_(["planned", "scheduled"]),
+                            Lesson.status.in_(["planned", "scheduled", "cancelled"]),
                         )
                         .order_by(Lesson.start_at.desc())
                     )
@@ -3817,6 +3818,7 @@ def create_learning_router(
                             "start_at",
                             "end_at",
                             "status",
+                            "cancelled_reason",
                             "subject_name_snapshot",
                             "teacher_name_snapshot",
                             "room_name_snapshot",
@@ -3856,6 +3858,7 @@ def create_learning_router(
                         "actual_start_at",
                         "actual_end_at",
                         "status",
+                        "cancelled_reason",
                         "subject_name_snapshot",
                         "teacher_name_snapshot",
                         "room_name_snapshot",

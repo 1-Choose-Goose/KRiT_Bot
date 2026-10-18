@@ -644,6 +644,57 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
             assert len(near_alerts) == 1
             assert "Прибыли 1 из 2" in near_alerts[0]["message"]
 
+            cancelled_start = datetime.now(UTC) + timedelta(days=20)
+            cancelled_lesson = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **payload,
+                    "start_at": cancelled_start.isoformat(),
+                    "end_at": (cancelled_start + timedelta(hours=1)).isoformat(),
+                    "participant_ids": [student],
+                },
+            )
+            assert cancelled_lesson.status_code == 201, cancelled_lesson.text
+            cancelled_id = int(cancelled_lesson.json()["id"])
+            cancelled = await client.post(
+                f"/api/v1/learning/lessons/{cancelled_id}/cancel",
+                headers=headers,
+                json={"reason": "Занятие отменено администратором"},
+            )
+            assert cancelled.status_code == 200, cancelled.text
+
+            student_history = (
+                await client.get(
+                    f"/api/v1/learning/history/person/{student}", headers=headers
+                )
+            ).json()
+            student_cancelled = next(
+                item for item in student_history["lessons"] if item["id"] == cancelled_id
+            )
+            assert student_cancelled["status"] == "cancelled"
+            assert student_cancelled["cancelled_reason"] == (
+                "Занятие отменено администратором"
+            )
+            assert student_cancelled["attendance_status"] == "expected"
+
+            teacher_history = (
+                await client.get(
+                    f"/api/v1/learning/history/teacher/{teacher}", headers=headers
+                )
+            ).json()
+            assert any(
+                item["id"] == cancelled_id and item["status"] == "cancelled"
+                for item in teacher_history["lessons"]
+            )
+            teacher_cancelled = next(
+                item for item in teacher_history["lessons"] if item["id"] == cancelled_id
+            )
+            assert teacher_cancelled["cancelled_reason"] == (
+                "Занятие отменено администратором"
+            )
+            assert teacher_history["summary"]["cancelled"] >= 1
+
     connection = sqlite3.connect(database)
     try:
         teacher_reminders = connection.execute(

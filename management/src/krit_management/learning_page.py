@@ -3592,17 +3592,26 @@ class LearningPage(QWidget):
         for row, lesson in enumerate(lessons):
             start = parse_center(lesson["start_at"])
             end = parse_center(lesson["end_at"])
+            attendance_label = (
+                "Отменено"
+                if lesson.get("status") == "cancelled"
+                else labels.get(lesson.get("attendance_status"), "")
+            )
             values = [
                 f"{start:%d.%m.%Y}",
                 lesson.get("subject_name_snapshot", ""),
                 lesson.get("teacher_name_snapshot", ""),
                 f"{start:%H:%M}–{end:%H:%M}",
-                labels.get(lesson.get("attendance_status"), ""),
+                attendance_label,
                 lesson.get("late_minutes") or "—",
             ]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
                 cell.setData(Qt.ItemDataRole.UserRole, lesson)
+                if column == 4 and lesson.get("status") == "cancelled":
+                    cell.setToolTip(
+                        str(lesson.get("cancelled_reason") or "Причина не указана")
+                    )
                 self.student_journal.setItem(row, column, cell)
 
     def _open_student_journal_lesson(self, _index: object = None) -> None:
@@ -3663,6 +3672,10 @@ class LearningPage(QWidget):
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
                 cell.setData(Qt.ItemDataRole.UserRole, lesson)
+                if column == 5 and lesson.get("status") == "cancelled":
+                    cell.setToolTip(
+                        str(lesson.get("cancelled_reason") or "Причина не указана")
+                    )
                 self.teacher_journal.setItem(row, column, cell)
 
     def _open_teacher_journal_lesson(self, _index: object = None) -> None:
