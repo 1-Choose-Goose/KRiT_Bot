@@ -1835,7 +1835,6 @@ class FreeSlotDialog(QDialog):
 class LearningPage(QWidget):
     notifications_changed = Signal(list)
     person_requested = Signal(int)
-    schedule_publication_requested = Signal()
 
     def __init__(self, api: ManagementApi, parent=None) -> None:
         super().__init__(parent)
@@ -2021,15 +2020,6 @@ class LearningPage(QWidget):
         self.delete_calendar_button.setToolTip("Сначала выберите занятие в таблице")
         actions.addWidget(self.delete_calendar_button)
         actions.addStretch(1)
-        self.publish_schedule_button = _button(
-            "Опубликовать расписание",
-            self.schedule_publication_requested.emit,
-            "primary",
-        )
-        self.publish_schedule_button.setToolTip(
-            "Проверить изменения и опубликовать расписание"
-        )
-        actions.addWidget(self.publish_schedule_button)
         actions.addWidget(_button("Предпросмотр", self.preview_calendar))
         actions.addWidget(_button("Сохранить PDF", self.save_calendar_pdf))
         actions.addWidget(_button("Печать", self.print_calendar))

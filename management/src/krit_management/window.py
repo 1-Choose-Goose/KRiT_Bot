@@ -203,7 +203,7 @@ class MainWindow(QMainWindow):
         self.learning_page = LearningPage(self.api)
         self.pages.addWidget(self.learning_page)
         self.communications_page = CommunicationsPage(self.api)
-        self.learning_page.schedule_publication_requested.connect(
+        self.publish_schedule_button.clicked.connect(
             self.communications_page.open_schedule_publication
         )
         self.pages.addWidget(self.communications_page)
@@ -334,14 +334,35 @@ class MainWindow(QMainWindow):
         self.section_title.setObjectName("pageTitle")
         layout.addWidget(self.section_title)
         layout.addStretch(1)
+
+        controls = QVBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(8)
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(8)
         self.status_label = QLabel("Подключение…")
         self.status_label.setObjectName("connectionStatus")
         self.status_label.setProperty("state", "loading")
-        layout.addWidget(self.status_label)
+        status_row.addWidget(self.status_label)
         self.notifications_button = QPushButton("Уведомления")
         self.notifications_button.setProperty("kind", "secondary")
         self.notifications_button.clicked.connect(self.open_notification_center)
-        layout.addWidget(self.notifications_button)
+        status_row.addWidget(self.notifications_button)
+        controls.addLayout(status_row)
+
+        publish_row = QHBoxLayout()
+        publish_row.setContentsMargins(0, 0, 0, 0)
+        publish_row.addStretch(1)
+        self.publish_schedule_button = QPushButton("Опубликовать расписание")
+        self.publish_schedule_button.setProperty("kind", "primary")
+        self.publish_schedule_button.setToolTip(
+            "Проверить изменения и опубликовать расписание"
+        )
+        self.publish_schedule_button.hide()
+        publish_row.addWidget(self.publish_schedule_button)
+        controls.addLayout(publish_row)
+        layout.addLayout(controls)
         return card
 
     def _notifications_changed(self, notifications: list[dict[str, Any]]) -> None:
@@ -569,6 +590,7 @@ class MainWindow(QMainWindow):
             self.administration_page.deactivate()
         self.pages.setCurrentIndex(index)
         self.section_title.setText(self.section_names[index])
+        self.publish_schedule_button.setVisible(index == 1)
         if index == 1:
             self.learning_page.refresh()
         elif index == 2:
