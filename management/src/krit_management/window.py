@@ -203,6 +203,9 @@ class MainWindow(QMainWindow):
         self.learning_page = LearningPage(self.api)
         self.pages.addWidget(self.learning_page)
         self.communications_page = CommunicationsPage(self.api)
+        self.learning_page.schedule_publication_requested.connect(
+            self.communications_page.open_schedule_publication
+        )
         self.pages.addWidget(self.communications_page)
         self.reports_page = (
             ReportsPage()

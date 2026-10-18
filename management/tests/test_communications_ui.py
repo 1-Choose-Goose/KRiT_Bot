@@ -73,7 +73,6 @@ def test_communications_page_keeps_four_simple_tabs_and_escapes_chat_html() -> N
         "Опросы",
         "Настройки",
     ]
-    assert page.open_schedule_button.text() == "Публикация расписания…"
     assert page.schedule_dialog.windowTitle() == "Публикация расписания — КРиТ"
     assert page.campaigns.window() is page.schedule_dialog
     assert not page.schedule_dialog.isVisible()

@@ -408,17 +408,6 @@ class CommunicationsPage(QWidget):
         actions.addWidget(_button("Отправить", self.send_message, primary=True))
         layout.addLayout(actions)
 
-        schedule = QHBoxLayout()
-        schedule_hint = QLabel(
-            "Публикация расписания и история изменений находятся в отдельном окне."
-        )
-        schedule_hint.setWordWrap(True)
-        schedule.addWidget(schedule_hint, 1)
-        self.open_schedule_button = _button(
-            "Публикация расписания…", self.open_schedule_publication
-        )
-        schedule.addWidget(self.open_schedule_button)
-        layout.addLayout(schedule)
         self.schedule_dialog = self._build_schedule_publication_dialog()
         return page
 

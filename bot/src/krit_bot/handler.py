@@ -50,6 +50,39 @@ class IncomingCallback:
     message_text: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class BotStartedUser:
+    user_id: int
+    display_name: str | None
+    username: str | None
+
+
+def parse_bot_started(update: dict[str, Any]) -> BotStartedUser | None:
+    if update.get("update_type") != "bot_started":
+        return None
+    user = update.get("user") or {}
+    user_id = user.get("user_id")
+    if not isinstance(user_id, int) or user.get("is_bot"):
+        return None
+    name = user.get("name")
+    display_name = name.strip() if isinstance(name, str) and name.strip() else None
+    if display_name is None:
+        display_name = (
+            " ".join(
+                part
+                for part in (user.get("first_name"), user.get("last_name"))
+                if isinstance(part, str) and part.strip()
+            ).strip()
+            or None
+        )
+    username = user.get("username")
+    return BotStartedUser(
+        user_id=user_id,
+        display_name=display_name,
+        username=username if isinstance(username, str) else None,
+    )
+
+
 def parse_message_callback(update: dict[str, Any]) -> IncomingCallback | None:
     if update.get("update_type") != "message_callback":
         return None
@@ -163,6 +196,27 @@ class EchoHandler:
                         identity.channel_subscription_status = "missing"
                         identity.channel_subscription_checked_at = utcnow()
                         await session.commit()
+            return
+        started_user = parse_bot_started(update)
+        if started_user is not None:
+            async with self._sessions() as session:
+                if await is_authorized(session, started_user.user_id):
+                    return
+                await register_access_attempt(
+                    session,
+                    max_user_id=started_user.user_id,
+                    display_name=started_user.display_name,
+                    username=started_user.username,
+                )
+                await session.commit()
+            await self._api.request_contact(
+                user_id=started_user.user_id,
+                text=(
+                    "Для авторизации нажмите кнопку ниже и передайте номер телефона, "
+                    "который привязан к вашему аккаунту MAX и указан в карточке клиента «КРиТ»."
+                ),
+            )
+            log.info("authorization_requested", max_user_id=started_user.user_id)
             return
         callback = parse_message_callback(update)
         if callback is not None:

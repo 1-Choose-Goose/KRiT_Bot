@@ -12,7 +12,7 @@ from krit_bot.communication_models import (
     MaxRegistrationPending,
 )
 from krit_bot.config import Settings
-from krit_bot.db import Base, Person, PersonRole, build_session_factory
+from krit_bot.db import AccessAttempt, Base, Person, PersonRole, build_session_factory
 from krit_bot.handler import EchoHandler, parse_message_callback, parse_message_created
 from krit_bot.learning_models import PersonMaxIdentity
 from krit_bot.max_api import WEBHOOK_UPDATE_TYPES
@@ -70,6 +70,19 @@ def update(user_id: int, text: str = "Привет", mid: str = "m1") -> dict:
     }
 
 
+def bot_started_update(user_id: int) -> dict:
+    return {
+        "update_type": "bot_started",
+        "timestamp": 1573226679188,
+        "chat_id": user_id,
+        "user": {
+            "user_id": user_id,
+            "name": "Иван Иванов",
+            "username": "ivan",
+        },
+    }
+
+
 def contact_update(user_id: int, phone: str, mid: str = "contact-1") -> dict:
     item = update(user_id, text="", mid=mid)
     item["message"]["body"]["attachments"] = [
@@ -120,6 +133,25 @@ def test_parse_message_created() -> None:
     assert parsed is not None
     assert parsed.user_id == 42
     assert parsed.display_name == "Иван Иванов"
+
+
+async def test_bot_started_immediately_requests_authorization() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    api = FakeApi()
+    handler = EchoHandler(sessions=sessions, api=api)  # type: ignore[arg-type]
+
+    await handler.handle(bot_started_update(42))
+
+    assert api.contact_requests == [42]
+    async with sessions() as session:
+        attempt = await session.get(AccessAttempt, 42)
+        assert attempt is not None
+        assert attempt.display_name == "Иван Иванов"
+        assert attempt.username == "ivan"
+    await engine.dispose()
 
 
 def test_parse_message_callback_accepts_documented_root_user() -> None:

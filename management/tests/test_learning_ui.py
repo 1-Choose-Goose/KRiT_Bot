@@ -100,6 +100,13 @@ def test_main_window_loads_learning_calendar_without_worker_argument_error() -> 
     assert window.learning_page.calendar_date.displayFormat() == "dd.MM.yyyy"
     assert window.learning_page.calendar_end.displayFormat() == "dd.MM.yyyy"
     assert window.learning_page.calendar_table.horizontalScrollBar().maximum() == 0
+    assert window.learning_page.publish_schedule_button.text() == (
+        "Опубликовать расписание"
+    )
+    assert not window.communications_page.schedule_dialog.isVisible()
+    window.learning_page.publish_schedule_button.click()
+    app.processEvents()
+    assert window.communications_page.schedule_dialog.isVisible()
     assert all(button.text() != "Обновить" for button in window.findChildren(QPushButton))
     assert window.refresh_timer.isActive()
     assert window.learning_page.live_timer.isActive()
