@@ -7,9 +7,18 @@ from math import ceil
 from typing import Any
 
 from PySide6.QtCore import QDate, QDateTime, QMarginsF, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QPageLayout, QPageSize, QPixmap, QTextDocument
+from PySide6.QtGui import (
+    QColor,
+    QIcon,
+    QIntValidator,
+    QPageLayout,
+    QPageSize,
+    QPixmap,
+    QTextDocument,
+)
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter, QPrintPreviewWidget
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QColorDialog,
@@ -618,17 +627,16 @@ class LessonDialog(QDialog):
         self.end.setCalendarPopup(True)
         configure_calendar(self.end)
         self.end.setDisplayFormat("dd.MM.yyyy HH:mm")
-        self.duration = QSpinBox()
-        self.duration.setRange(5, 1440)
-        self.duration.setSingleStep(5)
-        self.duration.setSuffix(" мин")
-        self.duration.setValue(60)
-        self.duration.hide()
+        self.duration = QLineEdit("60")
+        self.duration.setValidator(QIntValidator(1, 1440, self.duration))
+        self.duration.setInputMethodHints(Qt.InputMethodHint.ImhDigitsOnly)
+        self.duration.setAccessibleName("Длительность занятия в минутах")
         self.end_display = self.end
+        self.end.setReadOnly(True)
+        self.end.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.end.setAccessibleName("Время окончания занятия")
         self.start.dateTimeChanged.connect(self._update_end_display)
-        self.duration.valueChanged.connect(self._update_end_display)
-        self.end.dateTimeChanged.connect(self._end_datetime_changed)
+        self.duration.textChanged.connect(self._update_end_display)
         self.students = QTableWidget(0, 3)
         self.students.setHorizontalHeaderLabels(["Выбрать", "Ученик", "Подтверждение"])
         self.students.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -681,6 +689,7 @@ class LessonDialog(QDialog):
         form.addRow("Преподаватель", self.teacher)
         form.addRow("Кабинет", self.room)
         form.addRow("Группа", self.group)
+        form.addRow("Длительность, мин", self.duration)
         form.addRow("Начало", self.start)
         form.addRow("Окончание", self.end)
         if not self.lesson:
@@ -743,7 +752,7 @@ class LessonDialog(QDialog):
         self._select(self.subject, group.get("subject_id"))
         self._reload_lesson_teachers(preferred=group.get("default_teacher_id"))
         duration = int(group.get("default_duration_minutes") or 60)
-        self.duration.setValue(duration)
+        self.duration.setText(str(duration))
         self._refresh_group_participants()
 
     def _toggle_student_row(self, row: int, column: int) -> None:
@@ -959,7 +968,7 @@ class LessonDialog(QDialog):
         if start.isValid():
             self.start.setDateTime(start)
         if start.isValid() and end.isValid():
-            self.duration.setValue(max(5, start.secsTo(end) // 60))
+            self.duration.setText(str(max(1, start.secsTo(end) // 60)))
             self.end.setDateTime(end)
         self.start.blockSignals(False)
         self.end.blockSignals(False)
@@ -967,22 +976,18 @@ class LessonDialog(QDialog):
     def _end_datetime(self) -> QDateTime:
         return self.end.dateTime()
 
+    def _duration_minutes(self) -> int | None:
+        try:
+            duration = int(self.duration.text().strip())
+        except ValueError:
+            return None
+        return duration if 1 <= duration <= 1440 else None
+
     def _update_end_display(self, _value: object = None) -> None:
-        expected = self.start.dateTime().addSecs(self.duration.value() * 60)
+        expected = self.start.dateTime().addSecs((self._duration_minutes() or 0) * 60)
         self.end.blockSignals(True)
         self.end.setDateTime(expected)
         self.end.blockSignals(False)
-
-    def _end_datetime_changed(self, _value: object = None) -> None:
-        seconds = self.start.dateTime().secsTo(self.end.dateTime())
-        if seconds < 300:
-            self.end.blockSignals(True)
-            self.end.setDateTime(self.start.dateTime().addSecs(300))
-            self.end.blockSignals(False)
-            seconds = 300
-        self.duration.blockSignals(True)
-        self.duration.setValue(max(5, seconds // 60))
-        self.duration.blockSignals(False)
 
     def _filter_students(self, _value: object = None) -> None:
         query = self.student_search.text()
@@ -1027,6 +1032,9 @@ class LessonDialog(QDialog):
                 missing.append(label)
         if missing:
             self.show_error("Выберите " + ", ".join(missing) + ".")
+            return
+        if self._duration_minutes() is None:
+            self.show_error("Укажите длительность занятия от 1 до 1440 минут.")
             return
         if self.end.dateTime() <= self.start.dateTime():
             self.show_error("Окончание должно быть позже начала.")

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QPushButton,
     QStyle,
     QStyleOptionSpinBox,
@@ -1883,8 +1884,35 @@ def test_group_defaults_fill_new_lesson_without_changing_override_support() -> N
 
     assert dialog.subject.currentData() == 1
     assert dialog.teacher.currentData() == 2
-    assert dialog.duration.value() == 90
+    assert dialog.duration.text() == "90"
     assert dialog.end.dateTime() == dialog.start.dateTime().addSecs(90 * 60)
+    dialog.deleteLater()
+
+
+def test_lesson_dialog_uses_manual_duration_and_calculates_end_time() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = LessonDialog(
+        {
+            "subjects": [],
+            "teachers": [],
+            "rooms": [],
+            "groups": [],
+            "students": [],
+        }
+    )
+    dialog.start.setDateTime(QDateTime(QDate(2026, 10, 18), QTime(20, 0)))
+
+    assert isinstance(dialog.duration, QLineEdit)
+    assert dialog.duration.text() == "60"
+    assert dialog.duration.isVisibleTo(dialog)
+    assert dialog.end.isReadOnly()
+    assert dialog.end.dateTime() == QDateTime(QDate(2026, 10, 18), QTime(21, 0))
+
+    dialog.duration.setText("75")
+    app.processEvents()
+
+    assert dialog.duration.text() == "75"
+    assert dialog.end.dateTime() == QDateTime(QDate(2026, 10, 18), QTime(21, 15))
     dialog.deleteLater()
 
 
