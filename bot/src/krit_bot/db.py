@@ -47,7 +47,7 @@ class Base(DeclarativeBase):
     pass
 
 
-EXPECTED_ALEMBIC_REVISION = "20261011_backup_exports_v8"
+EXPECTED_ALEMBIC_REVISION = "20261018_online_learning_v9"
 ADMIN_ROLES = frozenset({"superadmin", "director", "administrator"})
 PROTECTED_ADMIN_USERNAME = "choose_goose"
 
@@ -284,6 +284,7 @@ async def ensure_schema(engine: AsyncEngine) -> None:
         return
     from . import communication_models as _communication_models  # noqa: F401
     from . import learning_models as _learning_models  # noqa: F401
+    from . import online_models as _online_models  # noqa: F401
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)

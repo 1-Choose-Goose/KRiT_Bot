@@ -8,6 +8,7 @@ from alembic.config import Config
 
 from alembic import command
 from krit_bot import learning_models as _learning_models  # noqa: F401
+from krit_bot import online_models as _online_models  # noqa: F401
 from krit_bot.db import Base
 from krit_bot.migrate import run
 
@@ -33,7 +34,7 @@ def test_alembic_builds_empty_database(tmp_path, monkeypatch) -> None:
         assert "learning_lesson_teacher_segments" in tables
         assert "learning_subject_teachers" in tables
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20261011_backup_exports_v8",
+            "20261018_online_learning_v9",
         )
         admin_columns = {
             item[1]: item for item in connection.execute("PRAGMA table_info(admin_users)")
@@ -122,7 +123,7 @@ def test_alembic_adopts_known_legacy_database(tmp_path, monkeypatch) -> None:
             "SELECT person_id, max_user_id FROM person_max_identities WHERE person_id = 7"
         ).fetchone() == (7, 700000007)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20261011_backup_exports_v8",
+            "20261018_online_learning_v9",
         )
         assert connection.execute(
             "SELECT COUNT(*) FROM learning_admin_notifications "
