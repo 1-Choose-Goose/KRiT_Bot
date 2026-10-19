@@ -46,6 +46,29 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     krit_database_names: Annotated[tuple[str, ...], NoDecode] = ("krit_bot",)
     restore_root: Path = Path("./data/restore")
+    online_public_url: str = "http://localhost:8000/online.html"
+    online_cookie_name: str = "krit_online_session"
+    online_cookie_secure: bool = True
+    online_session_hours: int = Field(default=12, ge=1, le=168)
+    online_otp_pepper: SecretStr | None = None
+    online_allowed_origins: Annotated[tuple[str, ...], NoDecode] = ()
+    online_upload_root: Path = Path("./data/online-assets")
+    online_upload_limit_bytes: int = Field(
+        default=15 * 1024 * 1024, ge=1024, le=250 * 1024 * 1024
+    )
+    online_room_storage_limit_bytes: int = Field(
+        default=100 * 1024 * 1024, ge=1024 * 1024, le=2 * 1024 * 1024 * 1024
+    )
+    online_total_storage_limit_bytes: int = Field(
+        default=300 * 1024 * 1024, ge=1024 * 1024, le=10 * 1024 * 1024 * 1024
+    )
+    online_min_free_disk_bytes: int = Field(
+        default=1024 * 1024 * 1024, ge=100 * 1024 * 1024
+    )
+    online_snapshot_every_operations: int = Field(default=200, ge=50, le=2000)
+    online_operation_retention: int = Field(default=5000, ge=1000, le=100_000)
+    online_cleanup_interval_seconds: int = Field(default=900, ge=60, le=86_400)
+    online_abandoned_room_hours: int = Field(default=24, ge=1, le=720)
 
     @field_validator("krit_database_names", mode="before")
     @classmethod
@@ -55,6 +78,13 @@ class Settings(BaseSettings):
                 value = json.loads(value)
                 return tuple(str(item).strip() for item in value if str(item).strip())
             return tuple(item.strip() for item in value.split(",") if item.strip())
+        return value
+
+    @field_validator("online_allowed_origins", mode="before")
+    @classmethod
+    def parse_online_allowed_origins(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(item.strip().rstrip("/") for item in value.split(",") if item.strip())
         return value
 
     def initial_admin_credentials(self) -> tuple[str, str, bool]:
