@@ -521,28 +521,24 @@ async def cleanup_online_room(
         ):
             record_count += int(
                 await session.scalar(
-                    select(func.count()).select_from(model).where(
-                        model.online_session_id == room_id
-                    )
+                    select(func.count())
+                    .select_from(model)
+                    .where(model.online_session_id == room_id)
                 )
                 or 0
             )
         asset_count = int(
             await session.scalar(
-                select(func.count()).select_from(OnlineLessonAsset).where(
-                    OnlineLessonAsset.online_session_id == room_id
-                )
+                select(func.count())
+                .select_from(OnlineLessonAsset)
+                .where(OnlineLessonAsset.online_session_id == room_id)
             )
             or 0
         )
-    await anyio.to_thread.run_sync(
-        _remove_room_directory, settings.online_upload_root, room_id
-    )
+    await anyio.to_thread.run_sync(_remove_room_directory, settings.online_upload_root, room_id)
     async with sessions() as session:
         room = await session.scalar(
-            select(OnlineLessonSession)
-            .where(OnlineLessonSession.id == room_id)
-            .with_for_update()
+            select(OnlineLessonSession).where(OnlineLessonSession.id == room_id).with_for_update()
         )
         if room is None or room.cleaned_at is not None:
             return {"files": 0, "records": 0}
@@ -633,9 +629,7 @@ async def cleanup_orphan_online_files(
         valid_room_ids = set(
             (
                 await session.scalars(
-                    select(OnlineLessonSession.id).where(
-                        OnlineLessonSession.cleaned_at.is_(None)
-                    )
+                    select(OnlineLessonSession.id).where(OnlineLessonSession.cleaned_at.is_(None))
                 )
             ).all()
         )
@@ -1107,9 +1101,7 @@ def create_online_router(
                     "id": item.id,
                     "subject": item.subject_name_snapshot,
                     "teacher": item.teacher_name_snapshot,
-                    "role": (
-                        "teacher" if item.teacher_id == current.person.id else "student"
-                    ),
+                    "role": ("teacher" if item.teacher_id == current.person.id else "student"),
                     "start_at": item.start_at,
                     "end_at": item.end_at,
                     "status": item.status,
@@ -1516,9 +1508,7 @@ def create_online_router(
                 raise HTTPException(404, "Материал не найден")
             await _room_access(session, item.online_session_id, current)
         path = (
-            settings.online_upload_root.resolve()
-            / str(item.online_session_id)
-            / item.stored_name
+            settings.online_upload_root.resolve() / str(item.online_session_id) / item.stored_name
         )
         if not path.is_file():
             raise HTTPException(404, "Файл материала отсутствует")
@@ -1747,16 +1737,98 @@ def create_online_router(
                     OnlineAssignmentRecipient.assignment_id == OnlineAssignment.id,
                 ).where(OnlineAssignmentRecipient.person_id == current.person.id)
             items = list((await session.scalars(query.order_by(OnlineAssignment.id))).all())
-        return [
-            {
-                "id": item.id,
-                "kind": item.kind,
-                "title": item.title,
-                "instructions": item.instructions,
-                "due_at": item.due_at,
+            assignment_ids = [item.id for item in items]
+            recipient_rows = list(
+                (
+                    await session.scalars(
+                        select(OnlineAssignmentRecipient).where(
+                            OnlineAssignmentRecipient.assignment_id.in_(assignment_ids or [-1])
+                        )
+                    )
+                ).all()
+            )
+            submission_rows = list(
+                (
+                    await session.scalars(
+                        select(OnlineAssignmentSubmission).where(
+                            OnlineAssignmentSubmission.assignment_id.in_(assignment_ids or [-1])
+                        )
+                    )
+                ).all()
+            )
+            recipients_by_assignment: dict[int, list[OnlineAssignmentRecipient]] = defaultdict(list)
+            for recipient in recipient_rows:
+                recipients_by_assignment[recipient.assignment_id].append(recipient)
+            submissions = {
+                (submission.assignment_id, submission.person_id): submission
+                for submission in submission_rows
             }
-            for item in items
-        ]
+            people = {
+                person.id: person
+                for person in (
+                    await session.scalars(
+                        select(Person).where(
+                            Person.id.in_([entry.person_id for entry in recipient_rows] or [-1])
+                        )
+                    )
+                ).all()
+            }
+            result: list[dict[str, Any]] = []
+            for item in items:
+                view: dict[str, Any] = {
+                    "id": item.id,
+                    "kind": item.kind,
+                    "title": item.title,
+                    "instructions": item.instructions,
+                    "due_at": item.due_at,
+                }
+                recipients = recipients_by_assignment[item.id]
+                if role == "student":
+                    recipient = next(
+                        entry for entry in recipients if entry.person_id == current.person.id
+                    )
+                    submission = submissions.get((item.id, current.person.id))
+                    view["status"] = recipient.status
+                    view["submission"] = (
+                        {
+                            "answer_text": submission.answer_text,
+                            "board_payload": submission.board_payload,
+                            "teacher_comment": submission.teacher_comment,
+                            "grade": submission.grade,
+                        }
+                        if submission
+                        else None
+                    )
+                else:
+                    view["submissions"] = [
+                        {
+                            "person": _public_person(people[entry.person_id]),
+                            "status": entry.status,
+                            "answer_text": (
+                                submissions[(item.id, entry.person_id)].answer_text
+                                if (item.id, entry.person_id) in submissions
+                                else None
+                            ),
+                            "board_payload": (
+                                submissions[(item.id, entry.person_id)].board_payload
+                                if (item.id, entry.person_id) in submissions
+                                else None
+                            ),
+                            "teacher_comment": (
+                                submissions[(item.id, entry.person_id)].teacher_comment
+                                if (item.id, entry.person_id) in submissions
+                                else None
+                            ),
+                            "grade": (
+                                submissions[(item.id, entry.person_id)].grade
+                                if (item.id, entry.person_id) in submissions
+                                else None
+                            ),
+                        }
+                        for entry in recipients
+                    ]
+                result.append(view)
+        return result
 
     @router.put("/assignments/{assignment_id}/submission")
     async def save_submission(

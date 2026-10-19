@@ -427,15 +427,27 @@ async def test_teacher_controls_server_enforced_board_permission(tmp_path, monke
             )
             assert assignment.status_code == 201, assignment.text
             assignment_id = assignment.json()["id"]
-            student_tasks = await student_client.get(
-                f"/api/v1/online/rooms/{room_id}/assignments"
-            )
+            student_tasks = await student_client.get(f"/api/v1/online/rooms/{room_id}/assignments")
             assert [item["id"] for item in student_tasks.json()] == [assignment_id]
             submitted = await student_client.put(
                 f"/api/v1/online/assignments/{assignment_id}/submission",
-                json={"answer_text": "x = 4", "submit": True},
+                json={
+                    "answer_text": "x = 4",
+                    "board_payload": {"page_id": "main", "objects": []},
+                    "submit": True,
+                },
             )
             assert submitted.json()["status"] == "submitted"
+            student_task = (
+                await student_client.get(f"/api/v1/online/rooms/{room_id}/assignments")
+            ).json()[0]
+            assert student_task["status"] == "submitted"
+            assert student_task["submission"]["answer_text"] == "x = 4"
+            teacher_task = (
+                await teacher_client.get(f"/api/v1/online/rooms/{room_id}/assignments")
+            ).json()[0]
+            assert teacher_task["submissions"][0]["person"]["id"] == student_id
+            assert teacher_task["submissions"][0]["board_payload"]["page_id"] == "main"
             reviewed = await teacher_client.put(
                 f"/api/v1/online/assignments/{assignment_id}/submissions/{student_id}/review",
                 json={"status": "checked", "teacher_comment": "Верно", "grade": "5"},
