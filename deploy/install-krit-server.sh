@@ -162,7 +162,7 @@ install -o root -g root -m 0644 "${PACKAGE_ROOT}/deploy/nginx-krit-api.conf" /et
 sed "s/__KRIT_HOSTNAME__/${KRIT_HOSTNAME}/g" "${PACKAGE_ROOT}/deploy/nginx-krit.conf" \
   >/etc/nginx/sites-available/krit
 ln -sfn /etc/nginx/sites-available/krit /etc/nginx/sites-enabled/krit
-if /opt/krit-bot/deploy/krit_nginx_configure.py "${KRIT_HOSTNAME}"; then
+if "${PYTHON_BIN}" /opt/krit-bot/deploy/krit_nginx_configure.py "${KRIT_HOSTNAME}"; then
   echo "KRiT API подключён к существующему HTTPS-сайту."
 fi
 nginx -t
@@ -181,7 +181,7 @@ if ! certbot --nginx --non-interactive --agree-tos --register-unsafely-without-e
   exit 1
 fi
 
-/opt/krit-bot/deploy/krit_nginx_configure.py "${KRIT_HOSTNAME}"
+"${PYTHON_BIN}" /opt/krit-bot/deploy/krit_nginx_configure.py "${KRIT_HOSTNAME}"
 nginx -t
 systemctl reload nginx
 systemctl restart krit-bot.service
