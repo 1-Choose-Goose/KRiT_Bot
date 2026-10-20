@@ -13,6 +13,11 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .communication_models import (
+    InteractionRequest,
+    InteractionRequestLesson,
+    ScheduleRecipientSnapshot,
+)
 from .db import Person, PersonRole, StudentGuardian, utcnow
 from .learning_models import (
     AdminNotification,
@@ -677,7 +682,7 @@ async def _queue_communication_event(
     center_timezone: str,
     lesson_id: int | None = None,
     scheduled_at: datetime | None = None,
-) -> None:
+) -> bool:
     from .communications import (
         PRIORITY_VALUE,
         NotificationPolicyResolver,
@@ -692,15 +697,15 @@ async def _queue_communication_event(
         event_code=event_type,
     )
     if not policy.enabled:
-        return
+        return False
     due = apply_quiet_hours(
         scheduled_at or utcnow(),
         policy=policy,
         timezone=_display_timezone(center_timezone),
     )
     if due is None:
-        return
-    await enqueue_job(
+        return False
+    job = await enqueue_job(
         session,
         dedupe_key=dedupe_key,
         event_type=event_type,
@@ -716,6 +721,7 @@ async def _queue_communication_event(
             "subject_person_id": subject_person_id,
         },
     )
+    return job is not None
 
 
 async def _queue_lesson_state_notifications(
@@ -2668,38 +2674,47 @@ def create_learning_router(
             item = await session.get(Lesson, lesson_id, with_for_update=True)
             if item is None:
                 raise HTTPException(404)
-            if item.status == "cancelled":
-                participants = list(
-                    (
-                        await session.scalars(
-                            select(LessonParticipant).where(
-                                LessonParticipant.lesson_id == lesson_id
-                            )
-                        )
-                    ).all()
-                )
-                return _lesson_view(item, participants)
             if item.status not in {"planned", "scheduled"}:
                 raise HTTPException(
                     409,
-                    "Отменить можно только занятие, которое фактически не начиналось",
+                    "Удалить можно только занятие, которое фактически не начиналось",
                 )
-            item.status, item.cancelled_reason, item.updated_at = (
-                "cancelled",
-                payload.reason,
-                utcnow(),
-            )
-            item.notification_revision += 1
-            from .communication_models import LessonAttendanceIntent
 
-            await session.execute(
-                LessonAttendanceIntent.__table__.update()
-                .where(LessonAttendanceIntent.lesson_id == item.id)
-                .values(status="needs_reconfirmation", updated_at=utcnow())
+            delivered_recipients = list(
+                (
+                    await session.scalars(
+                        select(ScheduleRecipientSnapshot)
+                        .where(ScheduleRecipientSnapshot.lesson_id == lesson_id)
+                        .order_by(ScheduleRecipientSnapshot.id)
+                    )
+                ).all()
             )
-            await _resolve_admin_condition(session, f"lesson:{item.id}:not_started")
-            await _resolve_admin_condition(session, f"lesson:{item.id}:not_finished")
-            await _resolve_admin_condition(session, f"lesson:{item.id}:no_active_students")
+            linked_request_ids = list(
+                (
+                    await session.scalars(
+                        select(InteractionRequestLesson.request_id).where(
+                            InteractionRequestLesson.lesson_id == lesson_id
+                        )
+                    )
+                ).all()
+            )
+            if linked_request_ids:
+                await session.execute(
+                    InteractionRequest.__table__.update()
+                    .where(
+                        InteractionRequest.id.in_(linked_request_ids),
+                        InteractionRequest.status.in_(["active", "draft"]),
+                    )
+                    .values(status="cancelled", updated_at=utcnow())
+                )
+                await session.execute(
+                    NotificationJob.__table__.update()
+                    .where(
+                        NotificationJob.interaction_request_id.in_(linked_request_ids),
+                        NotificationJob.status.in_(["pending", "retry"]),
+                    )
+                    .values(status="cancelled")
+                )
             await session.execute(
                 NotificationJob.__table__.update()
                 .where(
@@ -2708,39 +2723,23 @@ def create_learning_router(
                 )
                 .values(status="cancelled")
             )
-            participants = list(
-                (
-                    await session.scalars(
-                        select(LessonParticipant).where(LessonParticipant.lesson_id == lesson_id)
-                    )
-                ).all()
+            local_start = _db_utc(item.start_at).astimezone(
+                _display_timezone(center_timezone)
             )
-            participant_ids = {entry.person_id for entry in participants}
-            guardian_rows = (
-                await session.execute(
-                    select(StudentGuardian.student_id, StudentGuardian.guardian_id).where(
-                        StudentGuardian.student_id.in_(participant_ids),
-                        StudentGuardian.guardian_id != StudentGuardian.student_id,
-                    )
-                )
-            ).all()
-            recipients = [(student_id, "student", student_id) for student_id in participant_ids]
-            recipients.extend(
-                (guardian_id, "guardian", student_id) for student_id, guardian_id in guardian_rows
-            )
-            recipients.append((item.teacher_id, "teacher", item.teacher_id))
-            local_start = _db_utc(item.start_at).astimezone(_display_timezone(center_timezone))
-            for recipient_id, recipient_context, subject_id in recipients:
-                await _queue_communication_event(
+            notifications_queued = 0
+            for delivery in delivered_recipients:
+                queued = await _queue_communication_event(
                     session,
                     dedupe_key=(
-                        f"lesson:{item.id}:cancelled:person:{recipient_id}:subject:{subject_id}"
+                        f"lesson:{item.id}:cancelled:person:"
+                        f"{delivery.recipient_person_id}:subject:"
+                        f"{delivery.subject_person_id}"
                     ),
                     event_type="lesson_cancelled",
-                    lesson_id=item.id,
-                    recipient_person_id=recipient_id,
-                    recipient_context=recipient_context,
-                    subject_person_id=subject_id,
+                    lesson_id=None,
+                    recipient_person_id=delivery.recipient_person_id,
+                    recipient_context=delivery.recipient_context,
+                    subject_person_id=delivery.subject_person_id,
                     text_value=(
                         f"Занятие «{item.subject_name_snapshot}» "
                         f"{local_start:%d.%m в %H:%M} "
@@ -2748,17 +2747,40 @@ def create_learning_router(
                     ),
                     center_timezone=center_timezone,
                 )
+                notifications_queued += int(queued)
+
+            await _resolve_admin_condition(session, f"lesson:{item.id}:not_started")
+            await _resolve_admin_condition(session, f"lesson:{item.id}:not_finished")
+            await _resolve_admin_condition(session, f"lesson:{item.id}:no_active_students")
             session.add(
                 AuditEvent(
                     actor_admin_id=admin_id,
-                    action="lesson.cancelled",
+                    action="lesson.deleted",
                     entity_type="lesson",
                     entity_id=item.id,
-                    details={"reason": payload.reason},
+                    details={
+                        "reason": payload.reason,
+                        "notifications_queued": notifications_queued,
+                    },
                 )
             )
+            series_id = item.series_id
+            await session.delete(item)
+            await session.flush()
+            if series_id is not None:
+                remaining_series_lesson = await session.scalar(
+                    select(Lesson.id).where(Lesson.series_id == series_id).limit(1)
+                )
+                if remaining_series_lesson is None:
+                    series = await session.get(LessonSeries, series_id)
+                    if series is not None:
+                        await session.delete(series)
             await session.commit()
-            return _lesson_view(item, participants)
+            return {
+                "id": lesson_id,
+                "deleted": True,
+                "notifications_queued": notifications_queued,
+            }
 
     @router.put("/lessons/{lesson_id}/participants/{person_id}/attendance")
     async def set_attendance(

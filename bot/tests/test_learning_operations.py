@@ -663,37 +663,26 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
                 json={"reason": "Занятие отменено администратором"},
             )
             assert cancelled.status_code == 200, cancelled.text
+            assert cancelled.json()["deleted"] is True
+            assert cancelled.json()["notifications_queued"] == 0
 
             student_history = (
                 await client.get(
                     f"/api/v1/learning/history/person/{student}", headers=headers
                 )
             ).json()
-            student_cancelled = next(
-                item for item in student_history["lessons"] if item["id"] == cancelled_id
+            assert all(
+                item["id"] != cancelled_id for item in student_history["lessons"]
             )
-            assert student_cancelled["status"] == "cancelled"
-            assert student_cancelled["cancelled_reason"] == (
-                "Занятие отменено администратором"
-            )
-            assert student_cancelled["attendance_status"] == "expected"
 
             teacher_history = (
                 await client.get(
                     f"/api/v1/learning/history/teacher/{teacher}", headers=headers
                 )
             ).json()
-            assert any(
-                item["id"] == cancelled_id and item["status"] == "cancelled"
-                for item in teacher_history["lessons"]
+            assert all(
+                item["id"] != cancelled_id for item in teacher_history["lessons"]
             )
-            teacher_cancelled = next(
-                item for item in teacher_history["lessons"] if item["id"] == cancelled_id
-            )
-            assert teacher_cancelled["cancelled_reason"] == (
-                "Занятие отменено администратором"
-            )
-            assert teacher_history["summary"]["cancelled"] >= 1
 
     connection = sqlite3.connect(database)
     try:
