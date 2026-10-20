@@ -19,14 +19,14 @@ from krit_management.version import APP_VERSION
 
 def test_release_version_is_synchronized_across_client_and_server() -> None:
     root = Path(__file__).resolve().parents[2]
-    assert APP_VERSION == "1.0.2"
-    assert 'version = "1.0.2"' in (root / "management/pyproject.toml").read_text(
+    assert APP_VERSION == "1.0.1"
+    assert 'version = "1.0.1"' in (root / "management/pyproject.toml").read_text(
         encoding="utf-8"
     )
-    assert 'version = "1.0.2"' in (root / "bot/pyproject.toml").read_text(
+    assert 'version = "1.0.1"' in (root / "bot/pyproject.toml").read_text(
         encoding="utf-8"
     )
-    assert "## 1.0.2" in (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "## 1.0.1" in (root / "CHANGELOG.md").read_text(encoding="utf-8")
 
 
 def test_semantic_version_comparison() -> None:
