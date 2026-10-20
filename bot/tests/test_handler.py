@@ -843,6 +843,44 @@ async def test_archived_pending_client_is_not_registered_as_access_attempt_again
     await engine.dispose()
 
 
+async def test_archived_legacy_max_id_is_not_registered_as_access_attempt_again() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        session.add(
+            Person(
+                full_name="Архивный Клиент",
+                phone="+79990000000",
+                max_auth_phone="+79990000000",
+                max_user_id=42,
+                role_links=[PersonRole(role="student")],
+                active=True,
+                archived_at=utcnow(),
+            )
+        )
+        await session.commit()
+    api = FakeApi()
+    handler = EchoHandler(
+        sessions=sessions,
+        api=api,  # type: ignore[arg-type]
+        required_channel_id=-100500,
+    )
+
+    await handler.handle(bot_started_update(42))
+    await handler.handle(update(42, "Сообщение", "archived-legacy-message"))
+
+    assert api.contact_requests == []
+    assert api.sent == [
+        (42, "Карточка клиента находится в архиве. Обратитесь к администратору."),
+        (42, "Карточка клиента находится в архиве. Обратитесь к администратору."),
+    ]
+    async with sessions() as session:
+        assert await session.get(AccessAttempt, 42) is None
+    await engine.dispose()
+
+
 async def test_registration_check_without_verified_phone_requests_contact_again() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -19,7 +20,16 @@ from krit_bot.db import (
     build_session_factory,
     utcnow,
 )
-from krit_bot.learning_models import AuditEvent, ClubPresenceSession, PersonMaxIdentity
+from krit_bot.learning_models import (
+    AuditEvent,
+    ClubPresenceSession,
+    Lesson,
+    LessonParticipant,
+    PersonMaxIdentity,
+    Room,
+    StudyGroup,
+    Subject,
+)
 from krit_bot.webhook import LoginRateLimiter, create_app
 
 password_hash = PasswordHash.recommended()
@@ -101,6 +111,56 @@ async def test_archive_hides_and_blocks_pending_authorization_request(tmp_path) 
                 assert pending is not None
                 assert pending.status == "archived"
                 assert await session.get(AccessAttempt, 42) is None
+            await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_max_id_is_hidden_and_removed_when_person_is_archived(tmp_path) -> None:
+    database_path = (tmp_path / "archive-legacy-registration.db").as_posix()
+    settings = _settings(database_path)
+    app = create_app(settings)
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            token = await _login(client, "admin", "admin")
+            headers = {"Authorization": f"Bearer {token['access_token']}"}
+
+            engine = build_engine(settings.database_url)
+            sessions = build_session_factory(engine)
+            async with sessions() as session:
+                person = Person(
+                    full_name="Архивный Клиент",
+                    phone="+79990000000",
+                    max_auth_phone="+79990000000",
+                    max_user_id=20_067_728,
+                    role_links=[PersonRole(role="student")],
+                    active=True,
+                )
+                session.add(person)
+                session.add(
+                    AccessAttempt(
+                        max_user_id=20_067_728,
+                        display_name="ChooseGoose",
+                        username=None,
+                        verified_phone=None,
+                    )
+                )
+                await session.commit()
+                person_id = person.id
+
+            assert (await client.get("/api/v1/access-attempts", headers=headers)).json() == []
+
+            archived = await client.post(
+                f"/api/v1/people/{person_id}/archive", headers=headers
+            )
+            assert archived.status_code == 200, archived.text
+            assert (await client.get("/api/v1/access-attempts", headers=headers)).json() == []
+            assert (await client.get("/api/v1/snapshot", headers=headers)).json()[
+                "access_attempts"
+            ] == []
+            async with sessions() as session:
+                assert await session.get(AccessAttempt, 20_067_728) is None
             await engine.dispose()
 
 
@@ -521,6 +581,7 @@ async def test_only_superadmin_can_permanently_delete_archived_person_and_histor
                     full_name="Архивный Клиент",
                     phone="+79990000000",
                     max_auth_phone="+79990000000",
+                    max_user_id=42,
                     role_links=[PersonRole(role="student")],
                     active=False,
                     archived_at=utcnow(),
@@ -528,6 +589,45 @@ async def test_only_superadmin_can_permanently_delete_archived_person_and_histor
                 session.add(person)
                 await session.flush()
                 person_id = person.id
+                other_person = Person(
+                    full_name="Другой Ученик",
+                    phone="+79990000001",
+                    max_auth_phone="+79990000001",
+                    role_links=[PersonRole(role="student")],
+                    active=True,
+                )
+                subject = Subject(name="Тестовый предмет")
+                room = Room(name="Тестовый кабинет", capacity=10)
+                session.add_all([other_person, subject, room])
+                await session.flush()
+                group = StudyGroup(
+                    name="Тестовая группа",
+                    subject_id=subject.id,
+                    default_teacher_id=person_id,
+                )
+                session.add(group)
+                await session.flush()
+                lesson = Lesson(
+                    subject_id=subject.id,
+                    teacher_id=person_id,
+                    room_id=room.id,
+                    group_id=group.id,
+                    start_at=utcnow(),
+                    end_at=utcnow() + timedelta(hours=1),
+                    status="completed",
+                    teacher_name_snapshot=person.full_name,
+                    room_name_snapshot=room.name,
+                    subject_name_snapshot=subject.name,
+                )
+                session.add(lesson)
+                await session.flush()
+                participant = LessonParticipant(
+                    lesson_id=lesson.id,
+                    person_id=other_person.id,
+                    person_name_snapshot=other_person.full_name,
+                    attendance_status="present",
+                )
+                session.add(participant)
                 session.add(
                     ClubPresenceSession(
                         person_id=person_id,
@@ -551,6 +651,10 @@ async def test_only_superadmin_can_permanently_delete_archived_person_and_histor
                     )
                 )
                 await session.commit()
+                other_person_id = other_person.id
+                lesson_id = lesson.id
+                participant_id = participant.id
+                group_id = group.id
 
             attempts = await client.get(
                 "/api/v1/access-attempts", headers=operator_headers
@@ -577,6 +681,12 @@ async def test_only_superadmin_can_permanently_delete_archived_person_and_histor
                     )
                 ) is None
                 assert await session.get(AccessAttempt, 42) is None
+                assert await session.get(Lesson, lesson_id) is None
+                assert await session.get(LessonParticipant, participant_id) is None
+                assert await session.get(Person, other_person_id) is not None
+                remaining_group = await session.get(StudyGroup, group_id)
+                assert remaining_group is not None
+                assert remaining_group.default_teacher_id is None
                 audit = await session.scalar(
                     select(AuditEvent).where(
                         AuditEvent.action == "person.permanently_deleted",

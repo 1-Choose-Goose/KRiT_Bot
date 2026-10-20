@@ -193,6 +193,10 @@ class EchoHandler:
                 .join(PersonMaxIdentity, PersonMaxIdentity.person_id == Person.id)
                 .where(PersonMaxIdentity.max_user_id == user_id)
             )
+        if person is None:
+            person = await session.scalar(
+                select(Person).where(Person.max_user_id == user_id)
+            )
         return pending, person
 
     async def _send_subscription_prompt(self, user_id: int) -> None:

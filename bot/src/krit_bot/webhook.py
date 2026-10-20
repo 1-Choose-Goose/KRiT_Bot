@@ -1040,6 +1040,9 @@ def create_app(
             known_ids = select(PersonMaxIdentity.max_user_id).where(
                 PersonMaxIdentity.max_user_id.is_not(None)
             )
+            legacy_known_ids = select(Person.max_user_id).where(
+                Person.max_user_id.is_not(None)
+            )
             archived_pending_ids = (
                 select(MaxRegistrationPending.max_user_id)
                 .join(Person, Person.id == MaxRegistrationPending.person_id)
@@ -1055,6 +1058,7 @@ def create_app(
                         select(AccessAttempt)
                         .where(
                             ~AccessAttempt.max_user_id.in_(known_ids),
+                            ~AccessAttempt.max_user_id.in_(legacy_known_ids),
                             ~AccessAttempt.max_user_id.in_(archived_pending_ids),
                             or_(
                                 AccessAttempt.verified_phone.is_(None),
@@ -1579,6 +1583,8 @@ def create_app(
             related_user_ids = [*pending_user_ids]
             if identity_user_id is not None:
                 related_user_ids.append(identity_user_id)
+            if person.max_user_id is not None:
+                related_user_ids.append(person.max_user_id)
             attempt_conditions = []
             if related_user_ids:
                 attempt_conditions.append(AccessAttempt.max_user_id.in_(related_user_ids))
@@ -1677,6 +1683,9 @@ def create_app(
             known_ids = select(PersonMaxIdentity.max_user_id).where(
                 PersonMaxIdentity.max_user_id.is_not(None)
             )
+            legacy_known_ids = select(Person.max_user_id).where(
+                Person.max_user_id.is_not(None)
+            )
             archived_pending_ids = (
                 select(MaxRegistrationPending.max_user_id)
                 .join(Person, Person.id == MaxRegistrationPending.person_id)
@@ -1692,6 +1701,7 @@ def create_app(
                         select(AccessAttempt)
                         .where(
                             ~AccessAttempt.max_user_id.in_(known_ids),
+                            ~AccessAttempt.max_user_id.in_(legacy_known_ids),
                             ~AccessAttempt.max_user_id.in_(archived_pending_ids),
                             or_(
                                 AccessAttempt.verified_phone.is_(None),

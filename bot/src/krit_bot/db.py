@@ -22,6 +22,7 @@ from sqlalchemy import (
     or_,
     select,
     text,
+    update,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -433,26 +434,43 @@ async def purge_archived_person(session: AsyncSession, person: Person) -> None:
     for table in reversed(Base.metadata.sorted_tables):
         if table is Person.__table__:
             continue
-        restricted_columns = [
-            foreign_key.parent
+        person_foreign_keys = [
+            foreign_key
             for foreign_key in table.foreign_keys
             if foreign_key.target_fullname == "persons.id"
-            and (foreign_key.ondelete or "RESTRICT").upper() in {"RESTRICT", "NO ACTION"}
         ]
-        if restricted_columns:
+        delete_columns = [
+            foreign_key.parent
+            for foreign_key in person_foreign_keys
+            if (foreign_key.ondelete or "RESTRICT").upper() != "SET NULL"
+        ]
+        if delete_columns:
             await session.execute(
                 delete(table).where(
-                    or_(*(column == person.id for column in restricted_columns))
+                    or_(*(column == person.id for column in delete_columns))
                 )
             )
-
-    if linked_max_user_ids:
-        await session.execute(
-            delete(AccessAttempt).where(
-                AccessAttempt.max_user_id.in_(linked_max_user_ids)
+        set_null_columns = [
+            foreign_key.parent
+            for foreign_key in person_foreign_keys
+            if (foreign_key.ondelete or "").upper() == "SET NULL"
+        ]
+        for column in set_null_columns:
+            await session.execute(
+                update(table).where(column == person.id).values({column.key: None})
             )
+
+    attempt_conditions = []
+    if linked_max_user_ids:
+        attempt_conditions.append(AccessAttempt.max_user_id.in_(linked_max_user_ids))
+    linked_phones = {person.phone, person.max_auth_phone} - {None, ""}
+    if linked_phones:
+        attempt_conditions.append(AccessAttempt.verified_phone.in_(linked_phones))
+    if attempt_conditions:
+        await session.execute(
+            delete(AccessAttempt).where(or_(*attempt_conditions))
         )
-    await session.delete(person)
+    await session.execute(delete(Person).where(Person.id == person.id))
 
 
 async def claim_message(session: AsyncSession, message_id: str) -> bool:
