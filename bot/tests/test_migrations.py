@@ -10,7 +10,7 @@ from alembic.script import ScriptDirectory
 from alembic import command
 from krit_bot import learning_models as _learning_models  # noqa: F401
 from krit_bot import online_models as _online_models  # noqa: F401
-from krit_bot.db import Base
+from krit_bot.db import EXPECTED_ALEMBIC_REVISION, Base
 from krit_bot.migrate import run
 
 
@@ -25,6 +25,12 @@ def test_revision_ids_fit_production_alembic_version_column() -> None:
     scripts = ScriptDirectory.from_config(_config())
 
     assert all(len(script.revision) <= 32 for script in scripts.walk_revisions())
+
+
+def test_expected_revision_matches_alembic_head() -> None:
+    scripts = ScriptDirectory.from_config(_config())
+
+    assert EXPECTED_ALEMBIC_REVISION == scripts.get_current_head()
 
 
 def test_alembic_builds_empty_database(tmp_path, monkeypatch) -> None:
