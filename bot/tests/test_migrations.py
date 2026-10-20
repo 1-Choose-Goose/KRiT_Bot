@@ -5,6 +5,7 @@ from pathlib import Path
 
 import sqlalchemy as sa
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from alembic import command
 from krit_bot import learning_models as _learning_models  # noqa: F401
@@ -18,6 +19,12 @@ def _config() -> Config:
     config = Config(str(bot_root / "alembic.ini"))
     config.set_main_option("script_location", str(bot_root / "alembic"))
     return config
+
+
+def test_revision_ids_fit_production_alembic_version_column() -> None:
+    scripts = ScriptDirectory.from_config(_config())
+
+    assert all(len(script.revision) <= 32 for script in scripts.walk_revisions())
 
 
 def test_alembic_builds_empty_database(tmp_path, monkeypatch) -> None:
@@ -34,7 +41,7 @@ def test_alembic_builds_empty_database(tmp_path, monkeypatch) -> None:
         assert "learning_lesson_teacher_segments" in tables
         assert "learning_subject_teachers" in tables
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20261020_access_attempt_phone_v10",
+            "20261020_access_phone_v10",
         )
         attempt_columns = {
             item[1] for item in connection.execute("PRAGMA table_info(access_attempts)")
