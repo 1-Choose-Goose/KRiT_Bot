@@ -36,6 +36,7 @@ class FakeApi:
         self.sent: list[tuple[int, str]] = []
         self.sent_attachments: list[list[dict] | None] = []
         self.contact_requests: list[int] = []
+        self.contact_request_texts: list[str] = []
         self.members: set[int] = set()
         self.member_checks: list[tuple[int, list[int]]] = []
         self.chat_link: str | None = None
@@ -48,6 +49,7 @@ class FakeApi:
 
     async def request_contact(self, *, user_id: int, text: str) -> dict:
         self.contact_requests.append(user_id)
+        self.contact_request_texts.append(text)
         return {}
 
     def verify_contact(self, *, vcf_info: str, signature: str) -> bool:
@@ -163,6 +165,11 @@ async def test_bot_started_immediately_requests_authorization() -> None:
     await handler.handle(bot_started_update(42))
 
     assert api.contact_requests == [42]
+    assert api.contact_request_texts == [
+        "Для авторизации нажмите кнопку «Поделиться номером». "
+        "Отправьте номер телефона, привязанный к вашему аккаунту MAX "
+        "и указанный при записи в «КРиТ»."
+    ]
     async with sessions() as session:
         attempt = await session.get(AccessAttempt, 42)
         assert attempt is not None
@@ -829,13 +836,13 @@ async def test_archived_pending_client_is_not_registered_as_access_attempt_again
 
     assert api.contact_requests == []
     assert api.sent == [
-        (42, "Карточка клиента находится в архиве. Обратитесь к администратору."),
-        (42, "Карточка клиента находится в архиве. Обратитесь к администратору."),
-        (42, "Карточка клиента находится в архиве. Обратитесь к администратору."),
+        (42, "Доступ к боту приостановлен. Обратитесь к администратору «КРиТ»."),
+        (42, "Доступ к боту приостановлен. Обратитесь к администратору «КРиТ»."),
+        (42, "Доступ к боту приостановлен. Обратитесь к администратору «КРиТ»."),
     ]
     assert api.callback_answers[-1] == (
         "archived-callback",
-        "Карточка клиента находится в архиве",
+        "Доступ к боту приостановлен",
         None,
     )
     async with sessions() as session:
@@ -873,8 +880,8 @@ async def test_archived_legacy_max_id_is_not_registered_as_access_attempt_again(
 
     assert api.contact_requests == []
     assert api.sent == [
-        (42, "Карточка клиента находится в архиве. Обратитесь к администратору."),
-        (42, "Карточка клиента находится в архиве. Обратитесь к администратору."),
+        (42, "Доступ к боту приостановлен. Обратитесь к администратору «КРиТ»."),
+        (42, "Доступ к боту приостановлен. Обратитесь к администратору «КРиТ»."),
     ]
     async with sessions() as session:
         assert await session.get(AccessAttempt, 42) is None

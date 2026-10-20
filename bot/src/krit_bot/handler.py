@@ -31,6 +31,16 @@ from .max_api import MaxApiClient, MaxApiError
 
 log = structlog.get_logger()
 
+AUTHORIZATION_CONTACT_PROMPT = (
+    "Для авторизации нажмите кнопку «Поделиться номером». "
+    "Отправьте номер телефона, привязанный к вашему аккаунту MAX "
+    "и указанный при записи в «КРиТ»."
+)
+ARCHIVED_ACCESS_MESSAGE = (
+    "Доступ к боту приостановлен. Обратитесь к администратору «КРиТ»."
+)
+ARCHIVED_ACCESS_NOTIFICATION = "Доступ к боту приостановлен"
+
 
 @dataclass(frozen=True, slots=True)
 class IncomingMessage:
@@ -271,7 +281,7 @@ class EchoHandler:
             await session.commit()
             await self._api.send_text(
                 user_id=user_id,
-                text="Карточка клиента находится в архиве. Обратитесь к администратору.",
+                text=ARCHIVED_ACCESS_MESSAGE,
             )
             return True
         if person is not None and (not person.active or not person.bot_access_enabled):
@@ -365,10 +375,7 @@ class EchoHandler:
                 await session.commit()
             await self._api.request_contact(
                 user_id=started_user.user_id,
-                text=(
-                    "Для авторизации нажмите кнопку ниже и передайте номер телефона, "
-                    "который привязан к вашему аккаунту MAX и указан в карточке клиента «КРиТ»."
-                ),
+                text=AUTHORIZATION_CONTACT_PROMPT,
             )
             log.info("authorization_requested", max_user_id=started_user.user_id)
             return
@@ -470,10 +477,7 @@ class EchoHandler:
                     await session.commit()
                     await self._api.send_text(
                         user_id=incoming.user_id,
-                        text=(
-                            "Карточка клиента находится в архиве. "
-                            "Обратитесь к администратору."
-                        ),
+                        text=ARCHIVED_ACCESS_MESSAGE,
                     )
                     return
                 await register_access_attempt(
@@ -556,10 +560,7 @@ class EchoHandler:
             await session.commit()
             await self._api.request_contact(
                 user_id=incoming.user_id,
-                text=(
-                    "Для авторизации нажмите кнопку ниже и передайте номер телефона, "
-                    "который привязан к вашему аккаунту MAX и указан в карточке клиента «КРиТ»."
-                ),
+                text=AUTHORIZATION_CONTACT_PROMPT,
             )
             log.info("authorization_requested", max_user_id=incoming.user_id)
 
@@ -616,11 +617,11 @@ class EchoHandler:
             if person is not None and person.archived_at is not None:
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
-                    notification="Карточка клиента находится в архиве",
+                    notification=ARCHIVED_ACCESS_NOTIFICATION,
                 )
                 await self._api.send_text(
                     user_id=callback.user_id,
-                    text="Карточка клиента находится в архиве. Обратитесь к администратору.",
+                    text=ARCHIVED_ACCESS_MESSAGE,
                 )
                 return
             if pending is not None and pending.status == "pending":
@@ -967,11 +968,11 @@ class EchoHandler:
             if person is not None and person.archived_at is not None:
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
-                    notification="Карточка клиента находится в архиве",
+                    notification=ARCHIVED_ACCESS_NOTIFICATION,
                 )
                 await self._api.send_text(
                     user_id=callback.user_id,
-                    text="Карточка клиента находится в архиве. Обратитесь к администратору.",
+                    text=ARCHIVED_ACCESS_MESSAGE,
                 )
                 return
             expires_at = pending.expires_at if pending is not None else None
