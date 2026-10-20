@@ -6,7 +6,7 @@ from datetime import UTC, timedelta
 from typing import Any
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .communication_models import (
@@ -17,6 +17,7 @@ from .communication_models import (
 )
 from .communications import record_message, save_interaction_response
 from .db import (
+    AccessAttempt,
     Person,
     bind_max_user_by_phone,
     claim_message,
@@ -177,6 +178,143 @@ class EchoHandler:
         self._required_channel_id = required_channel_id
         self._required_channel_link = required_channel_link
 
+    async def _registration_context(
+        self, session: AsyncSession, user_id: int
+    ) -> tuple[MaxRegistrationPending | None, Person | None]:
+        pending = await session.scalar(
+            select(MaxRegistrationPending).where(
+                MaxRegistrationPending.max_user_id == user_id
+            )
+        )
+        person = await session.get(Person, pending.person_id) if pending is not None else None
+        if person is None:
+            person = await session.scalar(
+                select(Person)
+                .join(PersonMaxIdentity, PersonMaxIdentity.person_id == Person.id)
+                .where(PersonMaxIdentity.max_user_id == user_id)
+            )
+        return pending, person
+
+    async def _send_subscription_prompt(self, user_id: int) -> None:
+        buttons = []
+        channel_link = await self._get_required_channel_link()
+        if channel_link:
+            buttons.append(
+                [
+                    {
+                        "type": "link",
+                        "text": "Подписаться на канал",
+                        "url": channel_link,
+                    }
+                ]
+            )
+        buttons.append(
+            [
+                {
+                    "type": "callback",
+                    "text": "Проверить подписку",
+                    "payload": "registration:check",
+                }
+            ]
+        )
+        await self._api.send_text(
+            user_id=user_id,
+            text=(
+                "Для завершения регистрации подпишитесь на канал КРиТ, "
+                "затем нажмите «Проверить подписку»."
+            ),
+            attachments=[
+                {
+                    "type": "inline_keyboard",
+                    "payload": {"buttons": buttons},
+                }
+            ],
+        )
+
+    async def _authorized_subscription_is_valid(
+        self, session: AsyncSession, user_id: int
+    ) -> bool:
+        if self._required_channel_id is None:
+            return True
+        identity = await session.scalar(
+            select(PersonMaxIdentity)
+            .join(Person, Person.id == PersonMaxIdentity.person_id)
+            .where(
+                PersonMaxIdentity.max_user_id == user_id,
+                Person.active.is_(True),
+                Person.bot_access_enabled.is_(True),
+                Person.archived_at.is_(None),
+            )
+        )
+        if identity is None:
+            return True
+        subscribed = await self._is_channel_member(user_id)
+        identity.channel_subscription_status = "member" if subscribed else "missing"
+        identity.channel_subscription_checked_at = utcnow()
+        await session.commit()
+        if not subscribed:
+            await self._send_subscription_prompt(user_id)
+        return subscribed
+
+    async def _handle_known_registration_state(
+        self, session: AsyncSession, user_id: int
+    ) -> bool:
+        pending, person = await self._registration_context(session, user_id)
+        if person is not None and person.archived_at is not None:
+            await session.execute(
+                delete(AccessAttempt).where(AccessAttempt.max_user_id == user_id)
+            )
+            await session.commit()
+            await self._api.send_text(
+                user_id=user_id,
+                text="Карточка клиента находится в архиве. Обратитесь к администратору.",
+            )
+            return True
+        if person is not None and (not person.active or not person.bot_access_enabled):
+            await session.execute(
+                delete(AccessAttempt).where(AccessAttempt.max_user_id == user_id)
+            )
+            await session.commit()
+            await self._api.send_text(
+                user_id=user_id,
+                text="Доступ к боту отключён. Обратитесь к администратору.",
+            )
+            return True
+        if pending is None or pending.status != "pending":
+            return False
+        expires_at = pending.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if expires_at < utcnow():
+            pending.status = "expired"
+            await session.commit()
+            return False
+        if not await self._is_channel_member(user_id):
+            pending.last_checked_at = utcnow()
+            await session.commit()
+            await self._send_subscription_prompt(user_id)
+            return True
+        result = await bind_max_user_by_phone(
+            session,
+            phone=pending.verified_phone,
+            max_user_id=user_id,
+        )
+        if result not in {"linked", "already_linked"}:
+            pending.status = "failed"
+            await session.commit()
+            return False
+        pending.status = "completed"
+        identity = await session.get(PersonMaxIdentity, pending.person_id)
+        if identity is not None:
+            identity.channel_subscription_status = "member"
+            identity.channel_subscription_checked_at = utcnow()
+        await session.commit()
+        await self._api.send_text(
+            user_id=user_id,
+            text="Авторизация завершена. Добро пожаловать в «КРиТ»!",
+        )
+        return True
+
     async def handle(self, update: dict[str, Any]) -> None:
         if (
             update.get("update_type") == "user_removed"
@@ -201,10 +339,18 @@ class EchoHandler:
         if started_user is not None:
             async with self._sessions() as session:
                 if await is_authorized(session, started_user.user_id):
+                    if not await self._authorized_subscription_is_valid(
+                        session, started_user.user_id
+                    ):
+                        return
                     await self._api.send_text(
                         user_id=started_user.user_id,
                         text="Вы уже авторизованы в «КРиТ».",
                     )
+                    return
+                if await self._handle_known_registration_state(
+                    session, started_user.user_id
+                ):
                     return
                 await register_access_attempt(
                     session,
@@ -234,6 +380,10 @@ class EchoHandler:
             if not await claim_message(session, incoming.message_id):
                 return
             if await is_authorized(session, incoming.user_id):
+                if not await self._authorized_subscription_is_valid(
+                    session, incoming.user_id
+                ):
+                    return
                 person_id = await session.scalar(
                     select(PersonMaxIdentity.person_id).where(
                         PersonMaxIdentity.max_user_id == incoming.user_id
@@ -288,6 +438,9 @@ class EchoHandler:
                     )
                 return
 
+            if await self._handle_known_registration_state(session, incoming.user_id):
+                return
+
             contact_is_valid = bool(
                 incoming.contact_vcf
                 and incoming.contact_hash
@@ -298,6 +451,27 @@ class EchoHandler:
             )
             phone = phone_from_vcard(incoming.contact_vcf or "") if contact_is_valid else None
             if phone is not None:
+                archived_person = await session.scalar(
+                    select(Person).where(
+                        Person.max_auth_phone == phone,
+                        Person.archived_at.is_not(None),
+                    )
+                )
+                if archived_person is not None:
+                    await session.execute(
+                        delete(AccessAttempt).where(
+                            AccessAttempt.max_user_id == incoming.user_id
+                        )
+                    )
+                    await session.commit()
+                    await self._api.send_text(
+                        user_id=incoming.user_id,
+                        text=(
+                            "Карточка клиента находится в архиве. "
+                            "Обратитесь к администратору."
+                        ),
+                    )
+                    return
                 await register_access_attempt(
                     session,
                     max_user_id=incoming.user_id,
@@ -334,40 +508,7 @@ class EchoHandler:
                             pending.status = "pending"
                             pending.expires_at = utcnow() + timedelta(days=7)
                         await session.commit()
-                        buttons = []
-                        channel_link = await self._get_required_channel_link()
-                        if channel_link:
-                            buttons.append(
-                                [
-                                    {
-                                        "type": "link",
-                                        "text": "Подписаться на канал",
-                                        "url": channel_link,
-                                    }
-                                ]
-                            )
-                        buttons.append(
-                            [
-                                {
-                                    "type": "callback",
-                                    "text": "Проверить подписку",
-                                    "payload": "registration:check",
-                                }
-                            ]
-                        )
-                        await self._api.send_text(
-                            user_id=incoming.user_id,
-                            text=(
-                                "Для завершения регистрации подпишитесь на канал КРиТ, "
-                                "затем нажмите «Проверить подписку»."
-                            ),
-                            attachments=[
-                                {
-                                    "type": "inline_keyboard",
-                                    "payload": {"buttons": buttons},
-                                }
-                            ],
-                        )
+                        await self._send_subscription_prompt(incoming.user_id)
                         return
                 result = await bind_max_user_by_phone(
                     session, phone=phone, max_user_id=incoming.user_id
@@ -458,6 +599,36 @@ class EchoHandler:
         if parts == ["registration", "check"]:
             await self._handle_registration_callback(callback)
             return
+        async with self._sessions() as session:
+            if not await self._authorized_subscription_is_valid(
+                session, callback.user_id
+            ):
+                await self._api.answer_callback(
+                    callback_id=callback.callback_id,
+                    notification="Сначала подтвердите подписку на канал",
+                )
+                return
+            pending, person = await self._registration_context(session, callback.user_id)
+            if person is not None and person.archived_at is not None:
+                await self._api.answer_callback(
+                    callback_id=callback.callback_id,
+                    notification="Карточка клиента находится в архиве",
+                )
+                await self._api.send_text(
+                    user_id=callback.user_id,
+                    text="Карточка клиента находится в архиве. Обратитесь к администратору.",
+                )
+                return
+            if pending is not None and pending.status == "pending":
+                if not await self._is_channel_member(callback.user_id):
+                    pending.last_checked_at = utcnow()
+                    await session.commit()
+                    await self._api.answer_callback(
+                        callback_id=callback.callback_id,
+                        notification="Сначала подтвердите подписку на канал",
+                    )
+                    await self._send_subscription_prompt(callback.user_id)
+                    return
         if len(parts) == 3 and parts[0] == "reason" and parts[2] in {"write", "skip"}:
             if request_id is not None:
                 await self._handle_reason_callback(callback, request_id, parts[2])
@@ -759,16 +930,55 @@ class EchoHandler:
 
     async def _handle_registration_callback(self, callback: IncomingCallback) -> None:
         async with self._sessions() as session:
-            pending = await session.scalar(
-                select(MaxRegistrationPending).where(
-                    MaxRegistrationPending.max_user_id == callback.user_id,
-                    MaxRegistrationPending.status == "pending",
+            identity = await session.scalar(
+                select(PersonMaxIdentity)
+                .join(Person, Person.id == PersonMaxIdentity.person_id)
+                .where(
+                    PersonMaxIdentity.max_user_id == callback.user_id,
+                    Person.active.is_(True),
+                    Person.bot_access_enabled.is_(True),
+                    Person.archived_at.is_(None),
                 )
             )
+            if identity is not None:
+                subscribed = await self._is_channel_member(callback.user_id)
+                identity.channel_subscription_status = (
+                    "member" if subscribed else "missing"
+                )
+                identity.channel_subscription_checked_at = utcnow()
+                await session.commit()
+                if not subscribed:
+                    await self._api.answer_callback(
+                        callback_id=callback.callback_id,
+                        notification="Подписка пока не найдена",
+                    )
+                    await self._send_subscription_prompt(callback.user_id)
+                    return
+                await self._api.answer_callback(
+                    callback_id=callback.callback_id,
+                    notification="Подписка подтверждена",
+                )
+                return
+            pending, person = await self._registration_context(session, callback.user_id)
+            if person is not None and person.archived_at is not None:
+                await self._api.answer_callback(
+                    callback_id=callback.callback_id,
+                    notification="Карточка клиента находится в архиве",
+                )
+                await self._api.send_text(
+                    user_id=callback.user_id,
+                    text="Карточка клиента находится в архиве. Обратитесь к администратору.",
+                )
+                return
             expires_at = pending.expires_at if pending is not None else None
             if expires_at is not None and expires_at.tzinfo is None:
                 expires_at = expires_at.replace(tzinfo=UTC)
-            if pending is None or expires_at is None or expires_at < utcnow():
+            if (
+                pending is None
+                or pending.status != "pending"
+                or expires_at is None
+                or expires_at < utcnow()
+            ):
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
                     notification="Снова отправьте контакт для регистрации",
@@ -788,6 +998,7 @@ class EchoHandler:
                     callback_id=callback.callback_id,
                     notification="Подписка пока не найдена",
                 )
+                await self._send_subscription_prompt(callback.user_id)
                 return
             result = await bind_max_user_by_phone(
                 session,

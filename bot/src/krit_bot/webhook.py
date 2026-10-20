@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from .administration import create_administration_router
 from .auth import AdminPrincipal, decode_access_token, issue_access_token, normalize_admin_username
 from .backup_exports import BackupExportService, create_backup_export_router
-from .communication_models import CommunicationMessage
+from .communication_models import CommunicationMessage, MaxRegistrationPending
 from .communications import create_communications_router, run_communications_maintenance
 from .config import Settings
 from .db import (
@@ -1040,11 +1040,27 @@ def create_app(
             known_ids = select(PersonMaxIdentity.max_user_id).where(
                 PersonMaxIdentity.max_user_id.is_not(None)
             )
+            archived_pending_ids = (
+                select(MaxRegistrationPending.max_user_id)
+                .join(Person, Person.id == MaxRegistrationPending.person_id)
+                .where(Person.archived_at.is_not(None))
+            )
+            archived_phones = select(Person.max_auth_phone).where(
+                Person.archived_at.is_not(None),
+                Person.max_auth_phone.is_not(None),
+            )
             attempts = list(
                 (
                     await session.scalars(
                         select(AccessAttempt)
-                        .where(~AccessAttempt.max_user_id.in_(known_ids))
+                        .where(
+                            ~AccessAttempt.max_user_id.in_(known_ids),
+                            ~AccessAttempt.max_user_id.in_(archived_pending_ids),
+                            or_(
+                                AccessAttempt.verified_phone.is_(None),
+                                ~AccessAttempt.verified_phone.in_(archived_phones),
+                            ),
+                        )
                         .order_by(AccessAttempt.last_seen_at.desc())
                         .limit(100)
                     )
@@ -1536,6 +1552,44 @@ def create_app(
                 )
             person.archived_at = archived_at
             person.updated_at = archived_at
+            pending_user_ids = list(
+                (
+                    await session.scalars(
+                        select(MaxRegistrationPending.max_user_id).where(
+                            MaxRegistrationPending.person_id == person_id,
+                            MaxRegistrationPending.status == "pending",
+                        )
+                    )
+                ).all()
+            )
+            if pending_user_ids:
+                await session.execute(
+                    update(MaxRegistrationPending)
+                    .where(
+                        MaxRegistrationPending.person_id == person_id,
+                        MaxRegistrationPending.status == "pending",
+                    )
+                    .values(status="archived", last_checked_at=archived_at)
+                )
+            identity_user_id = await session.scalar(
+                select(PersonMaxIdentity.max_user_id).where(
+                    PersonMaxIdentity.person_id == person_id
+                )
+            )
+            related_user_ids = [*pending_user_ids]
+            if identity_user_id is not None:
+                related_user_ids.append(identity_user_id)
+            attempt_conditions = []
+            if related_user_ids:
+                attempt_conditions.append(AccessAttempt.max_user_id.in_(related_user_ids))
+            if person.max_auth_phone:
+                attempt_conditions.append(
+                    AccessAttempt.verified_phone == person.max_auth_phone
+                )
+            if attempt_conditions:
+                await session.execute(
+                    delete(AccessAttempt).where(or_(*attempt_conditions))
+                )
             await session.commit()
             await session.refresh(person)
             return as_person_view(person)
@@ -1623,11 +1677,27 @@ def create_app(
             known_ids = select(PersonMaxIdentity.max_user_id).where(
                 PersonMaxIdentity.max_user_id.is_not(None)
             )
+            archived_pending_ids = (
+                select(MaxRegistrationPending.max_user_id)
+                .join(Person, Person.id == MaxRegistrationPending.person_id)
+                .where(Person.archived_at.is_not(None))
+            )
+            archived_phones = select(Person.max_auth_phone).where(
+                Person.archived_at.is_not(None),
+                Person.max_auth_phone.is_not(None),
+            )
             return list(
                 (
                     await session.scalars(
                         select(AccessAttempt)
-                        .where(~AccessAttempt.max_user_id.in_(known_ids))
+                        .where(
+                            ~AccessAttempt.max_user_id.in_(known_ids),
+                            ~AccessAttempt.max_user_id.in_(archived_pending_ids),
+                            or_(
+                                AccessAttempt.verified_phone.is_(None),
+                                ~AccessAttempt.verified_phone.in_(archived_phones),
+                            ),
+                        )
                         .order_by(AccessAttempt.last_seen_at.desc())
                         .limit(100)
                     )

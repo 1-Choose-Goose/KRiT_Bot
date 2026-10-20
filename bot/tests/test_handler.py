@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -12,7 +14,14 @@ from krit_bot.communication_models import (
     MaxRegistrationPending,
 )
 from krit_bot.config import Settings
-from krit_bot.db import AccessAttempt, Base, Person, PersonRole, build_session_factory
+from krit_bot.db import (
+    AccessAttempt,
+    Base,
+    Person,
+    PersonRole,
+    build_session_factory,
+    utcnow,
+)
 from krit_bot.handler import EchoHandler, parse_message_callback, parse_message_created
 from krit_bot.learning_models import PersonMaxIdentity
 from krit_bot.max_api import WEBHOOK_UPDATE_TYPES
@@ -671,6 +680,166 @@ async def test_registration_waits_for_required_channel_membership() -> None:
         assert identity.channel_subscription_status == "member"
         assert pending is not None and pending.status == "completed"
     assert api.callback_answers[-1] == ("cb-member", "Регистрация завершена", None)
+    await engine.dispose()
+
+
+async def test_unsubscribed_registration_repeats_prompt_for_every_interaction() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        session.add(
+            Person(
+                full_name="Иван Иванов",
+                phone="+79990000000",
+                max_auth_phone="+79990000000",
+                role_links=[PersonRole(role="student")],
+                active=True,
+            )
+        )
+        await session.commit()
+    api = FakeApi()
+    handler = EchoHandler(
+        sessions=sessions,
+        api=api,  # type: ignore[arg-type]
+        required_channel_id=-100500,
+        required_channel_link="https://max.ru/channel",
+    )
+
+    await handler.handle(contact_update(42, "79990000000"))
+    await handler.handle(update(42, "Ещё сообщение", "message-after-contact"))
+    await handler.handle(bot_started_update(42))
+    await handler.handle(callback_update(42, "registration:check", "cb-still-missing"))
+
+    assert len(api.sent) == 4
+    assert all("подпишитесь на канал" in text for _, text in api.sent)
+    assert all(
+        attachments
+        and attachments[0]["payload"]["buttons"][-1][0]["payload"]
+        == "registration:check"
+        for attachments in api.sent_attachments
+    )
+    assert api.contact_requests == []
+    assert api.callback_answers[-1] == (
+        "cb-still-missing",
+        "Подписка пока не найдена",
+        None,
+    )
+    await engine.dispose()
+
+
+async def test_authorized_user_must_restore_subscription_before_interacting() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(
+            full_name="Иван Иванов",
+            phone="+79990000000",
+            max_auth_phone="+79990000000",
+            role_links=[PersonRole(role="student")],
+            active=True,
+        )
+        session.add(person)
+        await session.flush()
+        session.add(
+            PersonMaxIdentity(
+                person_id=person.id,
+                verified_phone=person.max_auth_phone,
+                max_user_id=42,
+                channel_subscription_status="member",
+            )
+        )
+        await session.commit()
+        person_id = person.id
+    api = FakeApi()
+    handler = EchoHandler(
+        sessions=sessions,
+        api=api,  # type: ignore[arg-type]
+        required_channel_id=-100500,
+        required_channel_link="https://max.ru/channel",
+    )
+
+    await handler.handle(update(42, "Сообщение", "authorized-but-unsubscribed"))
+    await handler.handle(callback_update(42, "registration:check", "cb-resubscribe-missing"))
+
+    assert len(api.sent) == 2
+    assert all("подпишитесь на канал" in text for _, text in api.sent)
+    async with sessions() as session:
+        identity = await session.get(PersonMaxIdentity, person_id)
+        assert identity is not None
+        assert identity.channel_subscription_status == "missing"
+        assert await session.scalar(select(func.count(CommunicationMessage.id))) == 0
+
+    api.members.add(42)
+    await handler.handle(callback_update(42, "registration:check", "cb-resubscribed"))
+
+    assert api.callback_answers[-1] == (
+        "cb-resubscribed",
+        "Подписка подтверждена",
+        None,
+    )
+    assert api.contact_requests == []
+    async with sessions() as session:
+        identity = await session.get(PersonMaxIdentity, person_id)
+        assert identity is not None
+        assert identity.channel_subscription_status == "member"
+    await engine.dispose()
+
+
+async def test_archived_pending_client_is_not_registered_as_access_attempt_again() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(
+            full_name="Архивный Клиент",
+            phone="+79990000000",
+            max_auth_phone="+79990000000",
+            role_links=[PersonRole(role="student")],
+            active=True,
+            archived_at=utcnow(),
+        )
+        session.add(person)
+        await session.flush()
+        session.add(
+            MaxRegistrationPending(
+                person_id=person.id,
+                max_user_id=42,
+                verified_phone=person.max_auth_phone,
+                required_channel_id=-100500,
+                status="archived",
+                expires_at=utcnow() + timedelta(days=7),
+            )
+        )
+        await session.commit()
+    api = FakeApi()
+    handler = EchoHandler(
+        sessions=sessions,
+        api=api,  # type: ignore[arg-type]
+        required_channel_id=-100500,
+    )
+
+    await handler.handle(bot_started_update(42))
+    await handler.handle(update(42, "Сообщение", "archived-message"))
+    await handler.handle(callback_update(42, "registration:check", "archived-callback"))
+
+    assert api.contact_requests == []
+    assert api.sent == [
+        (42, "Карточка клиента находится в архиве. Обратитесь к администратору."),
+        (42, "Карточка клиента находится в архиве. Обратитесь к администратору."),
+        (42, "Карточка клиента находится в архиве. Обратитесь к администратору."),
+    ]
+    assert api.callback_answers[-1] == (
+        "archived-callback",
+        "Карточка клиента находится в архиве",
+        None,
+    )
+    async with sessions() as session:
+        assert await session.get(AccessAttempt, 42) is None
     await engine.dispose()
 
 

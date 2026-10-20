@@ -8,6 +8,7 @@ from pwdlib import PasswordHash
 from pydantic import SecretStr
 from sqlalchemy import select
 
+from krit_bot.communication_models import MaxRegistrationPending
 from krit_bot.config import Settings
 from krit_bot.db import (
     AccessAttempt,
@@ -40,6 +41,67 @@ async def _login(client: httpx.AsyncClient, username: str, password: str) -> dic
     )
     assert response.status_code == 200, response.text
     return response.json()
+
+
+@pytest.mark.asyncio
+async def test_archive_hides_and_blocks_pending_authorization_request(tmp_path) -> None:
+    database_path = (tmp_path / "archive-registration.db").as_posix()
+    settings = _settings(database_path)
+    app = create_app(settings)
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            token = await _login(client, "admin", "admin")
+            headers = {"Authorization": f"Bearer {token['access_token']}"}
+            created = await client.post(
+                "/api/v1/people",
+                headers=headers,
+                json={
+                    "full_name": "Архивный Клиент",
+                    "phone": "+79990000000",
+                    "roles": ["student"],
+                    "active": True,
+                },
+            )
+            assert created.status_code == 201, created.text
+            person_id = created.json()["id"]
+
+            engine = build_engine(settings.database_url)
+            sessions = build_session_factory(engine)
+            async with sessions() as session:
+                session.add(
+                    AccessAttempt(
+                        max_user_id=42,
+                        display_name="Архивный Клиент",
+                        verified_phone="+79990000000",
+                    )
+                )
+                session.add(
+                    MaxRegistrationPending(
+                        person_id=person_id,
+                        max_user_id=42,
+                        verified_phone="+79990000000",
+                        required_channel_id=-100500,
+                        expires_at=utcnow(),
+                    )
+                )
+                await session.commit()
+
+            archived = await client.post(
+                f"/api/v1/people/{person_id}/archive", headers=headers
+            )
+            assert archived.status_code == 200, archived.text
+            assert (await client.get("/api/v1/access-attempts", headers=headers)).json() == []
+            assert (await client.get("/api/v1/snapshot", headers=headers)).json()[
+                "access_attempts"
+            ] == []
+            async with sessions() as session:
+                pending = await session.scalar(select(MaxRegistrationPending))
+                assert pending is not None
+                assert pending.status == "archived"
+                assert await session.get(AccessAttempt, 42) is None
+            await engine.dispose()
 
 
 def test_login_limiter_is_scoped_resettable_and_bounded() -> None:
