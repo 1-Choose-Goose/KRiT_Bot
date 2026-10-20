@@ -25,12 +25,16 @@ from krit_bot.webhook import (
 class FakeApi:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
+        self.sent_attachments: list[list[dict] | None] = []
         self.contact_requests: list[int] = []
         self.members: set[int] = set()
+        self.member_checks: list[tuple[int, list[int]]] = []
+        self.chat_link: str | None = None
         self.callback_answers: list[tuple[str, str, dict | None]] = []
 
     async def send_text(self, *, user_id: int, text: str, attachments=None) -> dict:
         self.sent.append((user_id, text))
+        self.sent_attachments.append(attachments)
         return {}
 
     async def request_contact(self, *, user_id: int, text: str) -> dict:
@@ -41,11 +45,15 @@ class FakeApi:
         return signature == "valid"
 
     async def get_chat_members(self, *, chat_id: int, user_ids: list[int]) -> dict:
+        self.member_checks.append((chat_id, user_ids))
         return {
             "members": [
                 {"user_id": user_id} for user_id in user_ids if user_id in self.members
             ]
         }
+
+    async def get_chat(self, *, chat_id: int) -> dict:
+        return {"chat_id": chat_id, "type": "channel", "link": self.chat_link}
 
     async def answer_callback(
         self, *, callback_id: str, notification: str, message: dict | None = None
@@ -151,6 +159,39 @@ async def test_bot_started_immediately_requests_authorization() -> None:
         assert attempt is not None
         assert attempt.display_name == "Иван Иванов"
         assert attempt.username == "ivan"
+    await engine.dispose()
+
+
+async def test_bot_started_confirms_existing_authorization() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(
+            full_name="Иван Иванов",
+            phone="+79990000000",
+            max_auth_phone="+79990000000",
+            role_links=[PersonRole(role="student")],
+            active=True,
+        )
+        session.add(person)
+        await session.flush()
+        session.add(
+            PersonMaxIdentity(
+                person_id=person.id,
+                max_user_id=42,
+                verified_phone="+79990000000",
+            )
+        )
+        await session.commit()
+    api = FakeApi()
+    handler = EchoHandler(sessions=sessions, api=api)  # type: ignore[arg-type]
+
+    await handler.handle(bot_started_update(42))
+
+    assert api.sent == [(42, "Вы уже авторизованы в «КРиТ».")]
+    assert api.contact_requests == []
     await engine.dispose()
 
 
@@ -561,6 +602,29 @@ async def test_verified_contact_links_user_once() -> None:
     await engine.dispose()
 
 
+async def test_unknown_contact_tells_user_to_contact_administrator() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    api = FakeApi()
+    handler = EchoHandler(sessions=sessions, api=api)  # type: ignore[arg-type]
+
+    await handler.handle(contact_update(42, "79990000000"))
+
+    assert api.sent == [
+        (
+            42,
+            "Номер не найден в базе «КРиТ». Для регистрации обратитесь к администратору.",
+        )
+    ]
+    async with sessions() as session:
+        attempt = await session.get(AccessAttempt, 42)
+        assert attempt is not None
+        assert attempt.verified_phone == "+79990000000"
+    await engine.dispose()
+
+
 async def test_registration_waits_for_required_channel_membership() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
@@ -607,6 +671,105 @@ async def test_registration_waits_for_required_channel_membership() -> None:
         assert identity.channel_subscription_status == "member"
         assert pending is not None and pending.status == "completed"
     assert api.callback_answers[-1] == ("cb-member", "Регистрация завершена", None)
+    await engine.dispose()
+
+
+async def test_registration_check_without_verified_phone_requests_contact_again() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    api = FakeApi()
+    handler = EchoHandler(
+        sessions=sessions,
+        api=api,  # type: ignore[arg-type]
+        required_channel_id=-100500,
+    )
+
+    await handler.handle(callback_update(42, "registration:check", "cb-no-phone"))
+
+    assert api.callback_answers[-1] == (
+        "cb-no-phone",
+        "Снова отправьте контакт для регистрации",
+        None,
+    )
+    assert api.contact_requests == [42]
+    await engine.dispose()
+
+
+async def test_channel_is_checked_only_after_verified_known_phone() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        session.add(
+            Person(
+                full_name="Иван Иванов",
+                phone="+79990000000",
+                max_auth_phone="+79990000000",
+                role_links=[PersonRole(role="student")],
+                active=True,
+            )
+        )
+        await session.commit()
+    api = FakeApi()
+    handler = EchoHandler(
+        sessions=sessions,
+        api=api,  # type: ignore[arg-type]
+        required_channel_id=-100500,
+    )
+
+    await handler.handle(bot_started_update(42))
+    await handler.handle(update(42, "Произвольное сообщение", "plain-message"))
+    assert api.member_checks == []
+
+    await handler.handle(contact_update(42, "79990000000", mid="verified-contact"))
+    assert api.member_checks == [(-100500, [42])]
+    await engine.dispose()
+
+
+async def test_registration_uses_channel_link_from_max_and_marks_direct_member() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(
+            full_name="Иван Иванов",
+            phone="+79990000000",
+            max_auth_phone="+79990000000",
+            role_links=[PersonRole(role="student")],
+            active=True,
+        )
+        session.add(person)
+        await session.commit()
+        person_id = person.id
+    api = FakeApi()
+    api.chat_link = "https://max.ru/join/channel-from-api"
+    handler = EchoHandler(
+        sessions=sessions,
+        api=api,  # type: ignore[arg-type]
+        required_channel_id=-100500,
+    )
+
+    await handler.handle(contact_update(42, "79990000000"))
+
+    buttons = api.sent_attachments[-1][0]["payload"]["buttons"]
+    assert buttons[0][0] == {
+        "type": "link",
+        "text": "Подписаться на канал",
+        "url": "https://max.ru/join/channel-from-api",
+    }
+
+    api.members.add(43)
+    await handler.handle(contact_update(43, "79990000000", mid="contact-43"))
+    async with sessions() as session:
+        identity = await session.get(PersonMaxIdentity, person_id)
+        assert identity is not None
+        assert identity.max_user_id == 43
+        assert identity.channel_subscription_status == "member"
+        assert identity.channel_subscription_checked_at is not None
     await engine.dispose()
 
 

@@ -9,8 +9,16 @@ from pydantic import SecretStr
 from sqlalchemy import select
 
 from krit_bot.config import Settings
-from krit_bot.db import AdminUser, build_engine, build_session_factory
-from krit_bot.learning_models import AuditEvent, PersonMaxIdentity
+from krit_bot.db import (
+    AccessAttempt,
+    AdminUser,
+    Person,
+    PersonRole,
+    build_engine,
+    build_session_factory,
+    utcnow,
+)
+from krit_bot.learning_models import AuditEvent, ClubPresenceSession, PersonMaxIdentity
 from krit_bot.webhook import LoginRateLimiter, create_app
 
 password_hash = PasswordHash.recommended()
@@ -412,6 +420,110 @@ async def test_superadmin_manages_users_roles_protection_and_audit(tmp_path) -> 
             }
             assert "replacement-password" not in repr([event.details for event in events])
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_only_superadmin_can_permanently_delete_archived_person_and_history(
+    tmp_path,
+) -> None:
+    settings = _settings((tmp_path / "person-purge.db").as_posix())
+    app = create_app(settings)
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            superadmin = await _login(client, "admin", "admin")
+            super_headers = {
+                "Authorization": f"Bearer {superadmin['access_token']}"
+            }
+            created_admin = await client.post(
+                "/api/v1/administration/users",
+                headers=super_headers,
+                json={
+                    "full_name": "Администратор Клуба",
+                    "username": "operator",
+                    "role": "administrator",
+                    "password": "operator-password",
+                },
+            )
+            assert created_admin.status_code == 201, created_admin.text
+            operator = await _login(client, "operator", "operator-password")
+            operator_headers = {
+                "Authorization": f"Bearer {operator['access_token']}"
+            }
+
+            engine = build_engine(settings.database_url)
+            sessions = build_session_factory(engine)
+            async with sessions() as session:
+                person = Person(
+                    full_name="Архивный Клиент",
+                    phone="+79990000000",
+                    max_auth_phone="+79990000000",
+                    role_links=[PersonRole(role="student")],
+                    active=False,
+                    archived_at=utcnow(),
+                )
+                session.add(person)
+                await session.flush()
+                person_id = person.id
+                session.add(
+                    ClubPresenceSession(
+                        person_id=person_id,
+                        arrived_at=utcnow(),
+                        left_at=utcnow(),
+                    )
+                )
+                session.add(
+                    AccessAttempt(
+                        max_user_id=42,
+                        display_name="Архивный Клиент",
+                        username="archived",
+                        verified_phone="+79990000000",
+                    )
+                )
+                session.add(
+                    PersonMaxIdentity(
+                        person_id=person_id,
+                        max_user_id=42,
+                        verified_phone="+79990000000",
+                    )
+                )
+                await session.commit()
+
+            attempts = await client.get(
+                "/api/v1/access-attempts", headers=operator_headers
+            )
+            assert attempts.status_code == 200
+            assert attempts.json() == []
+
+            denied = await client.delete(
+                f"/api/v1/people/{person_id}", headers=operator_headers
+            )
+            assert denied.status_code == 403
+
+            deleted = await client.delete(
+                f"/api/v1/people/{person_id}", headers=super_headers
+            )
+            assert deleted.status_code == 200, deleted.text
+            assert deleted.json() == {"deleted": True}
+
+            async with sessions() as session:
+                assert await session.get(Person, person_id) is None
+                assert await session.scalar(
+                    select(ClubPresenceSession).where(
+                        ClubPresenceSession.person_id == person_id
+                    )
+                ) is None
+                assert await session.get(AccessAttempt, 42) is None
+                audit = await session.scalar(
+                    select(AuditEvent).where(
+                        AuditEvent.action == "person.permanently_deleted",
+                        AuditEvent.entity_id == person_id,
+                    )
+                )
+                assert audit is not None
+                assert audit.actor_admin_id == superadmin["id"]
+            await engine.dispose()
 
 
 @pytest.mark.asyncio

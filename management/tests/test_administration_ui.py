@@ -665,6 +665,58 @@ def test_main_snapshot_skips_unchanged_render_and_preserves_selected_person() ->
     window = MainWindow(FakeAdministrationApi("administrator"))  # type: ignore[arg-type]
     window.pool.waitForDone(5_000)
     app.processEvents()
+
+
+def test_authorization_requests_show_verified_phone() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeAdministrationApi("administrator"))  # type: ignore[arg-type]
+    window.pool.waitForDone(5_000)
+    app.processEvents()
+
+
+def test_permanent_delete_is_visible_only_to_superadmin() -> None:
+    app = QApplication.instance() or QApplication([])
+    archived = [
+        {
+            "id": 7,
+            "full_name": "Архивный Клиент",
+            "phone": "+79990000000",
+            "roles": ["student"],
+        }
+    ]
+    visible_actions: dict[str, list[str]] = {}
+    for role in ("administrator", "superadmin"):
+        window = MainWindow(FakeAdministrationApi(role))  # type: ignore[arg-type]
+        window.pool.waitForDone(5_000)
+        app.processEvents()
+        window.archived_people = archived
+        window._render_archive()
+        actions = window.archive_table.cellWidget(0, 3)
+        assert actions is not None
+        visible_actions[role] = [
+            button.text() for button in actions.findChildren(QPushButton)
+        ]
+        window.close()
+        app.processEvents()
+
+    assert visible_actions["administrator"] == ["Восстановить"]
+    assert visible_actions["superadmin"] == ["Восстановить", "Полностью удалить"]
+    window.attempts = [
+        {
+            "max_user_id": 42,
+            "display_name": "Иван Иванов",
+            "username": "ivan",
+            "verified_phone": "+79990000000",
+            "attempts": 2,
+        }
+    ]
+
+    window._render_attempts()
+
+    assert window.attempts_table.horizontalHeaderItem(2).text() == "Телефон"
+    assert window.attempts_table.item(0, 2).text() == "+7 (999) 000-00-00"
+    window.close()
+    app.processEvents()
     renders = {"people": 0, "attempts": 0, "archive": 0}
     original_people = window._render_people
     original_attempts = window._render_attempts

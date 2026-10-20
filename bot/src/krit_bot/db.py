@@ -17,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    delete,
     event,
     or_,
     select,
@@ -133,6 +134,7 @@ class AccessAttempt(Base):
     max_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     display_name: Mapped[str | None] = mapped_column(String(250))
     username: Mapped[str | None] = mapped_column(String(250))
+    verified_phone: Mapped[str | None] = mapped_column(String(32), index=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -357,7 +359,12 @@ async def bind_max_user_by_phone(
 
 
 async def register_access_attempt(
-    session: AsyncSession, *, max_user_id: int, display_name: str | None, username: str | None
+    session: AsyncSession,
+    *,
+    max_user_id: int,
+    display_name: str | None,
+    username: str | None,
+    verified_phone: str | None = None,
 ) -> None:
     now = utcnow()
     if session.bind and session.bind.dialect.name == "postgresql":
@@ -365,6 +372,7 @@ async def register_access_attempt(
             max_user_id=max_user_id,
             display_name=display_name,
             username=username,
+            verified_phone=verified_phone,
             attempts=1,
             first_seen_at=now,
             last_seen_at=now,
@@ -374,6 +382,11 @@ async def register_access_attempt(
             set_={
                 "display_name": display_name,
                 "username": username,
+                "verified_phone": (
+                    verified_phone
+                    if verified_phone is not None
+                    else AccessAttempt.verified_phone
+                ),
                 "attempts": AccessAttempt.attempts + 1,
                 "last_seen_at": now,
             },
@@ -388,13 +401,58 @@ async def register_access_attempt(
                 max_user_id=max_user_id,
                 display_name=display_name,
                 username=username,
+                verified_phone=verified_phone,
             )
         )
     else:
         item.display_name = display_name
         item.username = username
+        if verified_phone is not None:
+            item.verified_phone = verified_phone
         item.attempts += 1
         item.last_seen_at = now
+
+
+async def purge_archived_person(session: AsyncSession, person: Person) -> None:
+    """Permanently remove an archived person and every person-owned record."""
+    from .learning_models import PersonMaxIdentity
+
+    if person.archived_at is None:
+        raise ValueError("Перед удалением перенесите клиента в архив")
+
+    linked_max_user_ids = set(
+        await session.scalars(
+            select(PersonMaxIdentity.max_user_id).where(
+                PersonMaxIdentity.person_id == person.id
+            )
+        )
+    )
+    if person.max_user_id is not None:
+        linked_max_user_ids.add(person.max_user_id)
+
+    for table in reversed(Base.metadata.sorted_tables):
+        if table is Person.__table__:
+            continue
+        restricted_columns = [
+            foreign_key.parent
+            for foreign_key in table.foreign_keys
+            if foreign_key.target_fullname == "persons.id"
+            and (foreign_key.ondelete or "RESTRICT").upper() in {"RESTRICT", "NO ACTION"}
+        ]
+        if restricted_columns:
+            await session.execute(
+                delete(table).where(
+                    or_(*(column == person.id for column in restricted_columns))
+                )
+            )
+
+    if linked_max_user_ids:
+        await session.execute(
+            delete(AccessAttempt).where(
+                AccessAttempt.max_user_id.in_(linked_max_user_ids)
+            )
+        )
+    await session.delete(person)
 
 
 async def claim_message(session: AsyncSession, message_id: str) -> bool:

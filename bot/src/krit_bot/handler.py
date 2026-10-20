@@ -26,7 +26,7 @@ from .db import (
     utcnow,
 )
 from .learning_models import Lesson, PersonMaxIdentity
-from .max_api import MaxApiClient
+from .max_api import MaxApiClient, MaxApiError
 
 log = structlog.get_logger()
 
@@ -201,6 +201,10 @@ class EchoHandler:
         if started_user is not None:
             async with self._sessions() as session:
                 if await is_authorized(session, started_user.user_id):
+                    await self._api.send_text(
+                        user_id=started_user.user_id,
+                        text="Вы уже авторизованы в «КРиТ».",
+                    )
                     return
                 await register_access_attempt(
                     session,
@@ -294,6 +298,13 @@ class EchoHandler:
             )
             phone = phone_from_vcard(incoming.contact_vcf or "") if contact_is_valid else None
             if phone is not None:
+                await register_access_attempt(
+                    session,
+                    max_user_id=incoming.user_id,
+                    display_name=incoming.display_name,
+                    username=incoming.username,
+                    verified_phone=phone,
+                )
                 candidate = await session.scalar(
                     select(Person).where(
                         Person.max_auth_phone == phone,
@@ -324,13 +335,14 @@ class EchoHandler:
                             pending.expires_at = utcnow() + timedelta(days=7)
                         await session.commit()
                         buttons = []
-                        if self._required_channel_link:
+                        channel_link = await self._get_required_channel_link()
+                        if channel_link:
                             buttons.append(
                                 [
                                     {
                                         "type": "link",
                                         "text": "Подписаться на канал",
-                                        "url": self._required_channel_link,
+                                        "url": channel_link,
                                     }
                                 ]
                             )
@@ -361,6 +373,15 @@ class EchoHandler:
                     session, phone=phone, max_user_id=incoming.user_id
                 )
                 if result in {"linked", "already_linked"}:
+                    if self._required_channel_id is not None:
+                        identity = await session.scalar(
+                            select(PersonMaxIdentity).where(
+                                PersonMaxIdentity.max_user_id == incoming.user_id
+                            )
+                        )
+                        if identity is not None:
+                            identity.channel_subscription_status = "member"
+                            identity.channel_subscription_checked_at = utcnow()
                     await session.commit()
                     await self._api.send_text(
                         user_id=incoming.user_id,
@@ -369,17 +390,14 @@ class EchoHandler:
                     log.info("user_authorized", max_user_id=incoming.user_id)
                     return
 
-                await register_access_attempt(
-                    session,
-                    max_user_id=incoming.user_id,
-                    display_name=incoming.display_name,
-                    username=incoming.username,
-                )
                 await session.commit()
                 message = (
                     "Этот номер уже привязан к другому аккаунту MAX. Обратитесь к администратору."
                     if result == "belongs_to_another_user"
-                    else "Номер не найден в базе «КРиТ». Обратитесь к администратору."
+                    else (
+                        "Номер не найден в базе «КРиТ». "
+                        "Для регистрации обратитесь к администратору."
+                    )
                 )
                 await self._api.send_text(user_id=incoming.user_id, text=message)
                 return
@@ -399,6 +417,26 @@ class EchoHandler:
                 ),
             )
             log.info("authorization_requested", max_user_id=incoming.user_id)
+
+    async def _get_required_channel_link(self) -> str | None:
+        if self._required_channel_link:
+            return self._required_channel_link
+        if self._required_channel_id is None:
+            return None
+        try:
+            chat = await self._api.get_chat(chat_id=self._required_channel_id)
+        except MaxApiError as exc:
+            log.warning(
+                "required_channel_link_unavailable",
+                chat_id=self._required_channel_id,
+                error=str(exc),
+            )
+            return None
+        link = chat.get("link")
+        if not isinstance(link, str) or not link.strip():
+            return None
+        self._required_channel_link = link.strip()
+        return self._required_channel_link
 
     async def _is_channel_member(self, user_id: int) -> bool:
         if self._required_channel_id is None:
@@ -734,6 +772,13 @@ class EchoHandler:
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
                     notification="Снова отправьте контакт для регистрации",
+                )
+                await self._api.request_contact(
+                    user_id=callback.user_id,
+                    text=(
+                        "Для продолжения регистрации повторно нажмите кнопку ниже "
+                        "и передайте номер телефона, привязанный к вашему аккаунту MAX."
+                    ),
                 )
                 return
             pending.last_checked_at = utcnow()

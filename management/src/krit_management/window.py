@@ -656,7 +656,14 @@ class MainWindow(QMainWindow):
     def _attempts_tab(self) -> QWidget:
         page, layout = self._page()
         self.attempts_table = self._table(
-            ["Имя в MAX", "Имя пользователя", "ID в MAX", "Попыток", "Действия"]
+            [
+                "Имя в MAX",
+                "Имя пользователя",
+                "Телефон",
+                "ID в MAX",
+                "Попыток",
+                "Действия",
+            ]
         )
         layout.addWidget(self.attempts_table, 1)
         self.attempts_empty = self._empty_state("Новых запросов авторизации нет")
@@ -951,13 +958,14 @@ class MainWindow(QMainWindow):
                 [
                     attempt.get("display_name") or "Без имени",
                     attempt.get("username") or "—",
+                    format_phone(attempt.get("verified_phone")),
                     attempt.get("max_user_id", ""),
                     attempt.get("attempts", 0),
                 ],
             )
             self.attempts_table.setCellWidget(
                 row,
-                4,
+                5,
                 self._actions(
                     [
                         (
@@ -993,7 +1001,17 @@ class MainWindow(QMainWindow):
                             "secondary",
                             lambda item=person: self.restore_person(item),
                         ),
-                        ("Удалить", "danger", lambda item=person: self.delete_person(item)),
+                        *(
+                            [
+                                (
+                                    "Полностью удалить",
+                                    "danger",
+                                    lambda item=person: self.delete_person(item),
+                                )
+                            ]
+                            if self.role == "superadmin"
+                            else []
+                        ),
                     ]
                 ),
             )
@@ -1189,7 +1207,11 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.warning(
             self,
             "Удаление клиента",
-            f"Навсегда удалить «{person.get('full_name', '')}»?\n\nЭто действие нельзя отменить.",
+            (
+                f"Навсегда удалить «{person.get('full_name', '')}» из всех баз?\n\n"
+                "Будут удалены карточка, авторизация, сообщения и связанная история. "
+                "Это действие нельзя отменить."
+            ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )

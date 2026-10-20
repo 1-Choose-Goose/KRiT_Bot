@@ -34,8 +34,12 @@ def test_alembic_builds_empty_database(tmp_path, monkeypatch) -> None:
         assert "learning_lesson_teacher_segments" in tables
         assert "learning_subject_teachers" in tables
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20261018_online_learning_v9",
+            "20261020_access_attempt_phone_v10",
         )
+        attempt_columns = {
+            item[1] for item in connection.execute("PRAGMA table_info(access_attempts)")
+        }
+        assert "verified_phone" in attempt_columns
         admin_columns = {
             item[1]: item for item in connection.execute("PRAGMA table_info(admin_users)")
         }

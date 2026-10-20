@@ -43,6 +43,7 @@ from .db import (
     build_session_factory,
     ensure_schema,
     normalize_phone,
+    purge_archived_person,
     utcnow,
 )
 from .handler import EchoHandler
@@ -268,6 +269,7 @@ class AccessAttemptView(BaseModel):
     max_user_id: int
     display_name: str | None
     username: str | None
+    verified_phone: str | None
     attempts: int
     last_seen_at: Any
 
@@ -521,6 +523,15 @@ def create_app(
         if principal.must_change_password:
             raise HTTPException(status_code=403, detail="password_change_required")
         return principal.id
+
+    async def require_superadmin_management_token(
+        principal: Annotated[AdminPrincipal, Depends(require_admin)],
+    ) -> AdminPrincipal:
+        if principal.must_change_password:
+            raise HTTPException(status_code=403, detail="password_change_required")
+        if principal.role != "superadmin":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        return principal
 
     async def ensure_bootstrap_admin() -> None:
         async with sessions() as session:
@@ -1026,13 +1037,8 @@ def create_app(
                     )
                 ).all()
             )
-            known_ids = (
-                select(PersonMaxIdentity.max_user_id)
-                .join(Person, Person.id == PersonMaxIdentity.person_id)
-                .where(
-                    PersonMaxIdentity.max_user_id.is_not(None),
-                    Person.archived_at.is_(None),
-                )
+            known_ids = select(PersonMaxIdentity.max_user_id).where(
+                PersonMaxIdentity.max_user_id.is_not(None)
             )
             attempts = list(
                 (
@@ -1571,9 +1577,13 @@ def create_app(
 
     @app.delete(
         "/api/v1/people/{person_id}",
-        dependencies=[Depends(require_management_token)],
     )
-    async def delete_person(person_id: int) -> dict[str, bool]:
+    async def delete_person(
+        person_id: int,
+        _principal: Annotated[
+            AdminPrincipal, Depends(require_superadmin_management_token)
+        ],
+    ) -> dict[str, bool]:
         async with sessions() as session:
             person = await session.get(Person, person_id)
             if person is None or person.archived_at is None:
@@ -1581,7 +1591,16 @@ def create_app(
                     status_code=409,
                     detail="Перед удалением перенесите клиента в архив",
                 )
-            await session.delete(person)
+            session.add(
+                AuditEvent(
+                    actor_admin_id=_principal.id,
+                    action="person.permanently_deleted",
+                    entity_type="person",
+                    entity_id=person.id,
+                    details={},
+                )
+            )
+            await purge_archived_person(session, person)
             try:
                 await session.commit()
             except IntegrityError as exc:
@@ -1589,8 +1608,7 @@ def create_app(
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "Клиента нельзя удалить: с ним связана история учебного процесса. "
-                        "Оставьте карточку в архиве."
+                        "Клиента не удалось полностью удалить из связанных данных."
                     ),
                 ) from exc
             return {"deleted": True}
@@ -1602,13 +1620,8 @@ def create_app(
     )
     async def list_access_attempts() -> list[AccessAttempt]:
         async with sessions() as session:
-            known_ids = (
-                select(PersonMaxIdentity.max_user_id)
-                .join(Person, Person.id == PersonMaxIdentity.person_id)
-                .where(
-                    PersonMaxIdentity.max_user_id.is_not(None),
-                    Person.archived_at.is_(None),
-                )
+            known_ids = select(PersonMaxIdentity.max_user_id).where(
+                PersonMaxIdentity.max_user_id.is_not(None)
             )
             return list(
                 (
