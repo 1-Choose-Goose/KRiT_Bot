@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 from krit_bot import communication_models as _communication_models  # noqa: F401
 from krit_bot import learning_models as _learning_models  # noqa: F401
+from krit_bot import online_models as _online_models  # noqa: F401
 from krit_bot.db import Base
 
 config = context.config

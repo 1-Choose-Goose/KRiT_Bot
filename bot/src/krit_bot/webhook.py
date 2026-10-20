@@ -15,6 +15,7 @@ from typing import Annotated, Any
 import jwt
 import structlog
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pwdlib import PasswordHash
@@ -57,6 +58,7 @@ from .learning_models import (
 )
 from .learning_notifications import LearningNotificationWorker
 from .max_api import WEBHOOK_UPDATE_TYPES, MaxApiClient
+from .online import create_online_router, reset_online_presence, run_online_maintenance
 from .polling import run_polling
 from .restores import RestoreService, create_restore_router
 from .syndication import (
@@ -489,6 +491,7 @@ def create_app(
     learning_notifications_task: asyncio.Task[None] | None = None
     communications_task: asyncio.Task[None] | None = None
     max_subscription_task: asyncio.Task[bool] | None = None
+    online_maintenance_task: asyncio.Task[None] | None = None
     syndication_worker: SyndicationWorker | None = None
     invalid_password_hash = password_hash.hash("invalid-password")
     login_rate_limiter = LoginRateLimiter()
@@ -780,9 +783,14 @@ def create_app(
     async def lifespan(_: FastAPI):
         nonlocal polling_task, syndication_task, vk_long_poll_task, syndication_worker
         nonlocal learning_notifications_task, communications_task
+        nonlocal online_maintenance_task
         await ensure_schema(engine)
         await ensure_bootstrap_admin()
         await start_max_workers()
+        await reset_online_presence(sessions)
+        online_maintenance_task = asyncio.create_task(
+            run_online_maintenance(sessions, settings), name="online-room-maintenance"
+        )
         if settings.vk_syndication_enabled:
             required = {
                 "VK_ACCESS_TOKEN": settings.vk_access_token,
@@ -844,11 +852,35 @@ def create_app(
             await asyncio.gather(syndication_task, return_exceptions=True)
         if syndication_worker is not None:
             await syndication_worker.close()
+        if online_maintenance_task is not None:
+            online_maintenance_task.cancel()
+            await asyncio.gather(online_maintenance_task, return_exceptions=True)
+            online_maintenance_task = None
         await stop_max_workers()
         await api.close()
         await engine.dispose()
 
     app = FastAPI(title="KRiT MAX Bot", lifespan=lifespan, docs_url=None, redoc_url=None)
+
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault(
+            "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+        )
+        return response
+
+    if settings.online_allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(settings.online_allowed_origins),
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Content-Type", "X-Online-CSRF"],
+        )
+    app.include_router(create_online_router(sessions, api, settings))
     app.include_router(
         create_learning_router(
             sessions,

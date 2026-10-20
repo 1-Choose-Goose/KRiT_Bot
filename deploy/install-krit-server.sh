@@ -71,7 +71,8 @@ id -u krit >/dev/null 2>&1 || useradd --system --home /opt/krit-bot/data --shell
 usermod --home /opt/krit-bot/data krit
 install -d -o root -g root -m 0755 /opt/krit-bot
 install -d -o root -g krit -m 0750 /opt/krit-bot/config
-install -d -o krit -g krit -m 0700 /opt/krit-bot/data /opt/krit-bot/data/restore
+install -d -o krit -g krit -m 0700 \
+  /opt/krit-bot/data /opt/krit-bot/data/restore /opt/krit-bot/data/online-assets
 
 rsync -a --delete "${PACKAGE_ROOT}/bot/" /opt/krit-bot/bot/
 rsync -a --delete "${PACKAGE_ROOT}/deploy/" /opt/krit-bot/deploy/
@@ -90,6 +91,7 @@ if [[ ! ${DB_ROLE} =~ ^[a-zA-Z][a-zA-Z0-9_]{0,62}$ ]]; then
 fi
 JWT_SECRET=${JWT_SECRET:-$(openssl rand -hex 32)}
 WEBHOOK_SECRET=${MAX_WEBHOOK_SECRET:-$(openssl rand -hex 32)}
+ONLINE_OTP_PEPPER=${ONLINE_OTP_PEPPER:-$(openssl rand -hex 32)}
 
 sudo -u postgres psql --set=ON_ERROR_STOP=1 \
   --set=db_role="${DB_ROLE}" --set=db_password="${DB_PASSWORD}" <<'SQL'
@@ -110,6 +112,18 @@ KRIT_PGPORT=5432
 KRIT_PGUSER=krit
 KRIT_PGPASSWORD=${DB_PASSWORD}
 RESTORE_ROOT=/opt/krit-bot/data/restore
+ONLINE_UPLOAD_ROOT=/opt/krit-bot/data/online-assets
+ONLINE_UPLOAD_LIMIT_BYTES=15728640
+ONLINE_ROOM_STORAGE_LIMIT_BYTES=104857600
+ONLINE_TOTAL_STORAGE_LIMIT_BYTES=314572800
+ONLINE_MIN_FREE_DISK_BYTES=1073741824
+ONLINE_CLEANUP_INTERVAL_SECONDS=900
+ONLINE_ABANDONED_ROOM_HOURS=24
+ONLINE_PUBLIC_URL=https://${KRIT_HOSTNAME}/online.html
+ONLINE_ALLOWED_ORIGINS=https://${KRIT_HOSTNAME}
+ONLINE_COOKIE_SECURE=true
+ONLINE_SESSION_HOURS=12
+ONLINE_OTP_PEPPER=${ONLINE_OTP_PEPPER}
 MAX_BOT_TOKEN=${MAX_BOT_TOKEN}
 MAX_API_BASE_URL=https://platform-api2.max.ru
 MAX_WEBHOOK_SECRET=${WEBHOOK_SECRET}
@@ -119,6 +133,20 @@ BOT_MODE=webhook
 CENTER_TIMEZONE=Asia/Yekaterinburg
 EOF
 fi
+grep -q '^ONLINE_UPLOAD_ROOT=' "${EXISTING_ENV}" || cat >>"${EXISTING_ENV}" <<EOF
+ONLINE_UPLOAD_ROOT=/opt/krit-bot/data/online-assets
+ONLINE_UPLOAD_LIMIT_BYTES=15728640
+ONLINE_ROOM_STORAGE_LIMIT_BYTES=104857600
+ONLINE_TOTAL_STORAGE_LIMIT_BYTES=314572800
+ONLINE_MIN_FREE_DISK_BYTES=1073741824
+ONLINE_CLEANUP_INTERVAL_SECONDS=900
+ONLINE_ABANDONED_ROOM_HOURS=24
+ONLINE_PUBLIC_URL=https://${KRIT_HOSTNAME}/online.html
+ONLINE_ALLOWED_ORIGINS=https://${KRIT_HOSTNAME}
+ONLINE_COOKIE_SECURE=true
+ONLINE_SESSION_HOURS=12
+ONLINE_OTP_PEPPER=${ONLINE_OTP_PEPPER}
+EOF
 chown root:krit /opt/krit-bot/config/krit-bot.env
 chmod 0640 /opt/krit-bot/config/krit-bot.env
 
@@ -134,7 +162,7 @@ install -o root -g root -m 0644 "${PACKAGE_ROOT}/deploy/nginx-krit-api.conf" /et
 sed "s/__KRIT_HOSTNAME__/${KRIT_HOSTNAME}/g" "${PACKAGE_ROOT}/deploy/nginx-krit.conf" \
   >/etc/nginx/sites-available/krit
 ln -sfn /etc/nginx/sites-available/krit /etc/nginx/sites-enabled/krit
-if /opt/krit-bot/deploy/krit_nginx_configure.py "${KRIT_HOSTNAME}"; then
+if "${PYTHON_BIN}" /opt/krit-bot/deploy/krit_nginx_configure.py "${KRIT_HOSTNAME}"; then
   echo "KRiT API подключён к существующему HTTPS-сайту."
 fi
 nginx -t
@@ -153,7 +181,7 @@ if ! certbot --nginx --non-interactive --agree-tos --register-unsafely-without-e
   exit 1
 fi
 
-/opt/krit-bot/deploy/krit_nginx_configure.py "${KRIT_HOSTNAME}"
+"${PYTHON_BIN}" /opt/krit-bot/deploy/krit_nginx_configure.py "${KRIT_HOSTNAME}"
 nginx -t
 systemctl reload nginx
 systemctl restart krit-bot.service
