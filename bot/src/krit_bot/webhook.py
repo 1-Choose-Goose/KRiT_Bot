@@ -225,6 +225,7 @@ class PersonPayload(BaseModel):
     roles: list[str] = Field(default_factory=list, min_length=1)
     active: bool = True
     bot_access_enabled: bool | None = None
+    max_user_id: int | None = Field(default=None, gt=0)
 
 
 class ArchivePersonPayload(BaseModel):
@@ -1197,6 +1198,55 @@ def create_app(
     async def create_person(payload: PersonPayload) -> PersonView:
         roles, phone, max_auth_phone = normalized_person_data(payload)
         async with sessions() as session:
+            attempt = (
+                await session.get(AccessAttempt, payload.max_user_id)
+                if payload.max_user_id is not None
+                else None
+            )
+            if payload.max_user_id is not None and attempt is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Запрос авторизации уже обработан или удалён. Обновите список.",
+                )
+            if attempt is not None:
+                if not attempt.verified_phone:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Пользователь должен повторно отправить номер телефона в боте.",
+                    )
+                max_auth_phone = normalize_phone(attempt.verified_phone)
+                existing_person = await session.scalar(
+                    select(Person)
+                    .where(
+                        Person.max_auth_phone == max_auth_phone,
+                        Person.active.is_(True),
+                        Person.archived_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+                if existing_person is not None:
+                    if existing_person.max_identity is not None:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Этот клиент уже связан с другим аккаунтом MAX.",
+                        )
+                    existing_person.max_identity = PersonMaxIdentity(
+                        verified_phone=max_auth_phone,
+                        max_user_id=attempt.max_user_id,
+                        verified_at=utcnow(),
+                    )
+                    existing_person.bot_access_enabled = True
+                    existing_person.updated_at = utcnow()
+                    await session.delete(attempt)
+                    try:
+                        await session.commit()
+                    except IntegrityError as exc:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Этот аккаунт MAX уже связан с другим клиентом.",
+                        ) from exc
+                    await session.refresh(existing_person)
+                    return as_person_view(existing_person)
             person = Person(
                 full_name=" ".join(payload.full_name.split()),
                 phone=phone,
@@ -1215,6 +1265,13 @@ def create_app(
             for role in roles:
                 if role not in current_roles:
                     person.role_links.append(PersonRole(role=role))
+            if attempt is not None:
+                person.max_identity = PersonMaxIdentity(
+                    verified_phone=max_auth_phone,
+                    max_user_id=attempt.max_user_id,
+                    verified_at=utcnow(),
+                )
+                await session.delete(attempt)
             session.add(person)
             try:
                 await session.commit()

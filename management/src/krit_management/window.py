@@ -1069,13 +1069,19 @@ class MainWindow(QMainWindow):
 
     def add_from_attempt(self, attempt: dict[str, Any]) -> None:
         dialog = PersonDialog(
-            {"full_name": attempt.get("display_name") or "", "active": True},
+            {
+                "full_name": attempt.get("display_name") or "",
+                "phone": attempt.get("verified_phone") or "",
+                "active": True,
+            },
             self,
             available_people=self.people,
             open_related=self.edit_person,
         )
         if dialog.exec():
-            self._run(lambda: self.api.create_person(dialog.payload()), lambda _: self.refresh())
+            payload = dialog.payload()
+            payload["max_user_id"] = int(attempt["max_user_id"])
+            self._run(lambda: self.api.create_person(payload), lambda _: self.refresh())
 
     def edit_selected_person(self, role_filter: str, table: QTableWidget) -> None:
         row = table.currentRow()

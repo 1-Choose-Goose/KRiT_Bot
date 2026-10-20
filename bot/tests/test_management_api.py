@@ -54,6 +54,115 @@ async def _login(client: httpx.AsyncClient, username: str, password: str) -> dic
 
 
 @pytest.mark.asyncio
+async def test_create_person_from_access_attempt_links_max_and_removes_request(
+    tmp_path,
+) -> None:
+    database_path = (tmp_path / "create-from-attempt.db").as_posix()
+    settings = _settings(database_path)
+    app = create_app(settings)
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            token = await _login(client, "admin", "admin")
+            headers = {"Authorization": f"Bearer {token['access_token']}"}
+            engine = build_engine(settings.database_url)
+            sessions = build_session_factory(engine)
+            async with sessions() as session:
+                session.add(
+                    AccessAttempt(
+                        max_user_id=20_067_728,
+                        display_name="ChooseGoose",
+                        verified_phone="+79507220600",
+                    )
+                )
+                await session.commit()
+
+            created = await client.post(
+                "/api/v1/people",
+                headers=headers,
+                json={
+                    "full_name": "Куц Олег Олегович",
+                    "phone": "+79507220600",
+                    "roles": ["student"],
+                    "active": True,
+                    "bot_access_enabled": True,
+                    "max_user_id": 20_067_728,
+                },
+            )
+
+            assert created.status_code == 201, created.text
+            assert created.json()["max_user_id"] == 20_067_728
+            assert (await client.get("/api/v1/access-attempts", headers=headers)).json() == []
+            async with sessions() as session:
+                identity = await session.scalar(
+                    select(PersonMaxIdentity).where(
+                        PersonMaxIdentity.max_user_id == 20_067_728
+                    )
+                )
+                assert identity is not None
+                assert identity.verified_phone == "+79507220600"
+                assert identity.verified_at is not None
+                assert await session.get(AccessAttempt, 20_067_728) is None
+            await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retry_after_old_client_creation_links_existing_person(tmp_path) -> None:
+    database_path = (tmp_path / "retry-create-from-attempt.db").as_posix()
+    settings = _settings(database_path)
+    app = create_app(settings)
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            token = await _login(client, "admin", "admin")
+            headers = {"Authorization": f"Bearer {token['access_token']}"}
+            first = await client.post(
+                "/api/v1/people",
+                headers=headers,
+                json={
+                    "full_name": "Куц Олег Олегович",
+                    "phone": "+79507220600",
+                    "max_auth_phone": "+79507220600",
+                    "roles": ["student"],
+                },
+            )
+            assert first.status_code == 201, first.text
+
+            engine = build_engine(settings.database_url)
+            sessions = build_session_factory(engine)
+            async with sessions() as session:
+                session.add(
+                    AccessAttempt(
+                        max_user_id=20_067_728,
+                        display_name="ChooseGoose",
+                        verified_phone="+79507220600",
+                    )
+                )
+                await session.commit()
+
+            retried = await client.post(
+                "/api/v1/people",
+                headers=headers,
+                json={
+                    "full_name": "Куц Олег Олегович",
+                    "phone": "+79507220600",
+                    "roles": ["student"],
+                    "max_user_id": 20_067_728,
+                },
+            )
+
+            assert retried.status_code == 201, retried.text
+            assert retried.json()["id"] == first.json()["id"]
+            assert retried.json()["max_user_id"] == 20_067_728
+            async with sessions() as session:
+                assert len((await session.scalars(select(Person))).all()) == 1
+                assert await session.get(AccessAttempt, 20_067_728) is None
+            await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_archive_hides_and_blocks_pending_authorization_request(tmp_path) -> None:
     database_path = (tmp_path / "archive-registration.db").as_posix()
     settings = _settings(database_path)

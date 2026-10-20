@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 import krit_management.administration_page as administration_module
+import krit_management.window as window_module
 from krit_management.administration_page import AdministrationPage, RestoreServerDialog
 from krit_management.dialogs import ChangePasswordDialog, LoginDialog
 from krit_management.main import load_last_username, save_last_username
@@ -112,6 +113,60 @@ class FakeAdministrationApi:
 
     def close(self) -> None:
         pass
+
+
+def test_create_client_from_authorization_request_keeps_max_identity(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    captured: dict[str, object] = {}
+
+    class AcceptedPersonDialog:
+        def __init__(self, person: dict, *_args, **_kwargs) -> None:
+            captured["initial"] = person
+
+        def exec(self) -> bool:
+            return True
+
+        def payload(self) -> dict[str, object]:
+            return {
+                "full_name": "Куц Олег Олегович",
+                "phone": "+79507220600",
+                "max_auth_phone": "+79507220600",
+                "roles": ["student"],
+                "active": True,
+                "bot_access_enabled": True,
+            }
+
+    monkeypatch.setattr(window_module, "PersonDialog", AcceptedPersonDialog)
+    api = FakeAdministrationApi("superadmin")
+
+    def create_person(payload: dict[str, object]) -> dict[str, object]:
+        captured["payload"] = payload
+        return {"id": 1, **payload}
+
+    api.create_person = create_person  # type: ignore[attr-defined]
+    window = MainWindow(api)  # type: ignore[arg-type]
+    window.pool.waitForDone(5_000)
+    app.processEvents()
+    window._run = lambda task, success: success(task())  # type: ignore[method-assign]
+    window.refresh = lambda: captured.update(refreshed=True)  # type: ignore[method-assign]
+
+    window.add_from_attempt(
+        {
+            "max_user_id": 20_067_728,
+            "display_name": "ChooseGoose",
+            "verified_phone": "+79507220600",
+        }
+    )
+
+    assert captured["initial"] == {
+        "full_name": "ChooseGoose",
+        "phone": "+79507220600",
+        "active": True,
+    }
+    assert captured["payload"]["max_user_id"] == 20_067_728  # type: ignore[index]
+    assert captured["refreshed"] is True
+    window.close()
+    app.processEvents()
 
 
 def _labels(window: MainWindow) -> list[str]:
