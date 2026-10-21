@@ -328,7 +328,14 @@ class CommunicationMessage(Base):
 
 class MaxRegistrationPending(Base):
     __tablename__ = "max_registration_pending"
-    __table_args__ = (Index("ix_max_registration_pending_expiry", "expires_at"),)
+    __table_args__ = (
+        Index("ix_max_registration_pending_expiry", "expires_at"),
+        Index(
+            "ix_max_registration_pending_automatic_check",
+            "status",
+            "next_automatic_check_at",
+        ),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     person_id: Mapped[int] = mapped_column(
         ForeignKey("persons.id", ondelete="CASCADE"), nullable=False, index=True
@@ -340,3 +347,7 @@ class MaxRegistrationPending(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    automatic_check_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_automatic_check_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )

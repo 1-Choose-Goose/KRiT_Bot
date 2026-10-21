@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -40,6 +41,10 @@ ARCHIVED_ACCESS_MESSAGE = (
     "Доступ к боту приостановлен. Обратитесь к администратору «КРиТ»."
 )
 ARCHIVED_ACCESS_NOTIFICATION = "Доступ к боту приостановлен"
+REGISTRATION_SUCCESS_MESSAGE = "Авторизация завершена. Добро пожаловать в «КРиТ»!"
+REGISTRATION_AUTOMATIC_CHECK_OFFSETS = tuple(
+    timedelta(minutes=minutes) for minutes in (1, 2, 5, 10, 15)
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,13 +194,14 @@ class EchoHandler:
         self._required_channel_link = required_channel_link
 
     async def _registration_context(
-        self, session: AsyncSession, user_id: int
+        self, session: AsyncSession, user_id: int, *, lock_pending: bool = False
     ) -> tuple[MaxRegistrationPending | None, Person | None]:
-        pending = await session.scalar(
-            select(MaxRegistrationPending).where(
-                MaxRegistrationPending.max_user_id == user_id
-            )
+        pending_statement = select(MaxRegistrationPending).where(
+            MaxRegistrationPending.max_user_id == user_id
         )
+        if lock_pending:
+            pending_statement = pending_statement.with_for_update()
+        pending = await session.scalar(pending_statement)
         person = await session.get(Person, pending.person_id) if pending is not None else None
         if person is None:
             person = await session.scalar(
@@ -208,6 +214,155 @@ class EchoHandler:
                 select(Person).where(Person.max_user_id == user_id)
             )
         return pending, person
+
+    async def _finalize_pending_registration(
+        self,
+        session: AsyncSession,
+        pending: MaxRegistrationPending,
+        user_id: int,
+    ) -> bool:
+        if pending.status != "pending":
+            return False
+        result = await bind_max_user_by_phone(
+            session,
+            phone=pending.verified_phone,
+            max_user_id=user_id,
+        )
+        if result not in {"linked", "already_linked"}:
+            pending.status = "failed"
+            pending.next_automatic_check_at = None
+            return False
+        pending.status = "completed"
+        pending.next_automatic_check_at = None
+        identity = await session.get(PersonMaxIdentity, pending.person_id)
+        if identity is not None:
+            identity.channel_subscription_status = "member"
+            identity.channel_subscription_checked_at = utcnow()
+        return True
+
+    async def _complete_pending_from_membership_event(self, user_id: int) -> bool:
+        async with self._sessions() as session:
+            pending, _ = await self._registration_context(
+                session, user_id, lock_pending=True
+            )
+            if pending is None or pending.status != "pending":
+                identity = await session.scalar(
+                    select(PersonMaxIdentity).where(
+                        PersonMaxIdentity.max_user_id == user_id
+                    )
+                )
+                if identity is not None:
+                    identity.channel_subscription_status = "member"
+                    identity.channel_subscription_checked_at = utcnow()
+                    await session.commit()
+                return False
+            completed = await self._finalize_pending_registration(
+                session, pending, user_id
+            )
+            await session.commit()
+        if completed:
+            await self._api.send_text(
+                user_id=user_id,
+                text=REGISTRATION_SUCCESS_MESSAGE,
+            )
+            log.info("user_authorized_from_channel_event", max_user_id=user_id)
+        return completed
+
+    async def process_due_registration_checks(
+        self, *, now: datetime | None = None, limit: int = 50
+    ) -> int:
+        if self._required_channel_id is None:
+            return 0
+        checked_at = now or utcnow()
+        async with self._sessions() as session:
+            due_user_ids = list(
+                await session.scalars(
+                    select(MaxRegistrationPending.max_user_id)
+                    .where(
+                        MaxRegistrationPending.status == "pending",
+                        MaxRegistrationPending.next_automatic_check_at.is_not(None),
+                        MaxRegistrationPending.next_automatic_check_at <= checked_at,
+                    )
+                    .order_by(MaxRegistrationPending.next_automatic_check_at)
+                    .limit(limit)
+                )
+            )
+
+        processed = 0
+        for user_id in due_user_ids:
+            try:
+                is_member = await self._is_channel_member(user_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception(
+                    "registration_automatic_membership_check_failed",
+                    max_user_id=user_id,
+                )
+                continue
+
+            async with self._sessions() as session:
+                pending, _ = await self._registration_context(
+                    session, user_id, lock_pending=True
+                )
+                next_check_at = (
+                    pending.next_automatic_check_at if pending is not None else None
+                )
+                if next_check_at is not None and next_check_at.tzinfo is None:
+                    next_check_at = next_check_at.replace(tzinfo=UTC)
+                if (
+                    pending is None
+                    or pending.status != "pending"
+                    or next_check_at is None
+                    or next_check_at > checked_at
+                ):
+                    continue
+                expires_at = pending.expires_at
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=UTC)
+                if expires_at < checked_at:
+                    pending.status = "expired"
+                    pending.next_automatic_check_at = None
+                    await session.commit()
+                    continue
+                pending.automatic_check_count += 1
+                pending.last_checked_at = checked_at
+                if is_member:
+                    await self._finalize_pending_registration(session, pending, user_id)
+                elif pending.automatic_check_count < len(
+                    REGISTRATION_AUTOMATIC_CHECK_OFFSETS
+                ):
+                    created_at = pending.created_at
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=UTC)
+                    pending.next_automatic_check_at = (
+                        created_at
+                        + REGISTRATION_AUTOMATIC_CHECK_OFFSETS[
+                            pending.automatic_check_count
+                        ]
+                    )
+                else:
+                    pending.next_automatic_check_at = None
+                completed = pending.status == "completed"
+                await session.commit()
+            processed += 1
+            if completed:
+                await self._api.send_text(
+                    user_id=user_id,
+                    text=REGISTRATION_SUCCESS_MESSAGE,
+                )
+                log.info("user_authorized_automatically", max_user_id=user_id)
+        return processed
+
+    async def run_registration_checks(self, *, poll_seconds: float = 15.0) -> None:
+        while True:
+            try:
+                await self.process_due_registration_checks()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("registration_automatic_check_iteration_failed")
+            await asyncio.sleep(poll_seconds)
 
     async def _send_subscription_prompt(self, user_id: int) -> None:
         buttons = []
@@ -273,7 +428,9 @@ class EchoHandler:
     async def _handle_known_registration_state(
         self, session: AsyncSession, user_id: int
     ) -> bool:
-        pending, person = await self._registration_context(session, user_id)
+        pending, person = await self._registration_context(
+            session, user_id, lock_pending=True
+        )
         if person is not None and person.archived_at is not None:
             await session.execute(
                 delete(AccessAttempt).where(AccessAttempt.max_user_id == user_id)
@@ -308,28 +465,27 @@ class EchoHandler:
             await session.commit()
             await self._send_subscription_prompt(user_id)
             return True
-        result = await bind_max_user_by_phone(
-            session,
-            phone=pending.verified_phone,
-            max_user_id=user_id,
-        )
-        if result not in {"linked", "already_linked"}:
-            pending.status = "failed"
+        if not await self._finalize_pending_registration(session, pending, user_id):
             await session.commit()
             return False
-        pending.status = "completed"
-        identity = await session.get(PersonMaxIdentity, pending.person_id)
-        if identity is not None:
-            identity.channel_subscription_status = "member"
-            identity.channel_subscription_checked_at = utcnow()
         await session.commit()
         await self._api.send_text(
             user_id=user_id,
-            text="Авторизация завершена. Добро пожаловать в «КРиТ»!",
+            text=REGISTRATION_SUCCESS_MESSAGE,
         )
         return True
 
     async def handle(self, update: dict[str, Any]) -> None:
+        if (
+            update.get("update_type") == "user_added"
+            and self._required_channel_id is not None
+            and update.get("chat_id") == self._required_channel_id
+        ):
+            user = update.get("user") or update.get("recipient") or {}
+            user_id = update.get("user_id") or user.get("user_id")
+            if isinstance(user_id, int):
+                await self._complete_pending_from_membership_event(user_id)
+            return
         if (
             update.get("update_type") == "user_removed"
             and self._required_channel_id is not None
@@ -502,19 +658,32 @@ class EchoHandler:
                             )
                         )
                         if pending is None:
+                            created_at = utcnow()
                             pending = MaxRegistrationPending(
                                 person_id=candidate.id,
                                 max_user_id=incoming.user_id,
                                 verified_phone=phone,
                                 required_channel_id=self._required_channel_id,
-                                expires_at=utcnow() + timedelta(days=7),
+                                created_at=created_at,
+                                expires_at=created_at + timedelta(days=7),
+                                automatic_check_count=0,
+                                next_automatic_check_at=(
+                                    created_at
+                                    + REGISTRATION_AUTOMATIC_CHECK_OFFSETS[0]
+                                ),
                             )
                             session.add(pending)
                         else:
+                            created_at = utcnow()
                             pending.person_id = candidate.id
                             pending.verified_phone = phone
                             pending.status = "pending"
-                            pending.expires_at = utcnow() + timedelta(days=7)
+                            pending.created_at = created_at
+                            pending.expires_at = created_at + timedelta(days=7)
+                            pending.automatic_check_count = 0
+                            pending.next_automatic_check_at = (
+                                created_at + REGISTRATION_AUTOMATIC_CHECK_OFFSETS[0]
+                            )
                         await session.commit()
                         await self._send_subscription_prompt(incoming.user_id)
                         return
@@ -534,7 +703,7 @@ class EchoHandler:
                     await session.commit()
                     await self._api.send_text(
                         user_id=incoming.user_id,
-                        text="Авторизация завершена. Добро пожаловать в «КРиТ»!",
+                        text=REGISTRATION_SUCCESS_MESSAGE,
                     )
                     log.info("user_authorized", max_user_id=incoming.user_id)
                     return
@@ -613,7 +782,9 @@ class EchoHandler:
                     notification="Сначала подтвердите подписку на канал",
                 )
                 return
-            pending, person = await self._registration_context(session, callback.user_id)
+            pending, person = await self._registration_context(
+                session, callback.user_id, lock_pending=True
+            )
             if person is not None and person.archived_at is not None:
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
@@ -1005,24 +1176,15 @@ class EchoHandler:
                 )
                 await self._send_subscription_prompt(callback.user_id)
                 return
-            result = await bind_max_user_by_phone(
-                session,
-                phone=pending.verified_phone,
-                max_user_id=callback.user_id,
-            )
-            if result not in {"linked", "already_linked"}:
-                pending.status = "failed"
+            if not await self._finalize_pending_registration(
+                session, pending, callback.user_id
+            ):
                 await session.commit()
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
                     notification="Не удалось завершить регистрацию",
                 )
                 return
-            pending.status = "completed"
-            identity = await session.get(PersonMaxIdentity, pending.person_id)
-            if identity is not None:
-                identity.channel_subscription_status = "member"
-                identity.channel_subscription_checked_at = utcnow()
             await session.commit()
         await self._api.answer_callback(
             callback_id=callback.callback_id,
@@ -1030,5 +1192,5 @@ class EchoHandler:
         )
         await self._api.send_text(
             user_id=callback.user_id,
-            text="Авторизация завершена. Добро пожаловать в «КРиТ»!",
+            text=REGISTRATION_SUCCESS_MESSAGE,
         )

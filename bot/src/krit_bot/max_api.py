@@ -18,6 +18,7 @@ WEBHOOK_UPDATE_TYPES = [
     "bot_started",
     "bot_stopped",
     "bot_removed",
+    "user_added",
     "user_removed",
 ]
 
@@ -71,7 +72,10 @@ class MaxApiClient:
         params: dict[str, Any] = {
             "timeout": poll_timeout,
             "limit": limit,
-            "types": "message_created,message_callback,bot_started,bot_stopped,user_removed",
+            "types": (
+                "message_created,message_callback,bot_started,bot_stopped,"
+                "user_added,user_removed"
+            ),
         }
         if marker is not None:
             params["marker"] = marker

@@ -248,6 +248,7 @@ async def test_webhook_startup_subscribes_to_button_callbacks() -> None:
         }
     ]
     assert "message_callback" in api.calls[0]["update_types"]
+    assert "user_added" in api.calls[0]["update_types"]
 
 
 async def test_webhook_subscription_retries_in_one_bounded_background_loop() -> None:
@@ -687,6 +688,132 @@ async def test_registration_waits_for_required_channel_membership() -> None:
         assert identity.channel_subscription_status == "member"
         assert pending is not None and pending.status == "completed"
     assert api.callback_answers[-1] == ("cb-member", "Регистрация завершена", None)
+    await engine.dispose()
+
+
+async def test_user_added_to_required_channel_completes_pending_registration() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(
+            full_name="Иван Иванов",
+            phone="+79990000000",
+            max_auth_phone="+79990000000",
+            role_links=[PersonRole(role="student")],
+            active=True,
+        )
+        session.add(person)
+        await session.commit()
+        person_id = person.id
+    api = FakeApi()
+    handler = EchoHandler(
+        sessions=sessions,
+        api=api,  # type: ignore[arg-type]
+        required_channel_id=-100500,
+        required_channel_link="https://max.ru/channel",
+    )
+
+    await handler.handle(contact_update(42, "79990000000"))
+    await handler.handle(
+        {
+            "update_type": "user_added",
+            "chat_id": -100500,
+            "user": {"user_id": 42, "name": "Иван Иванов"},
+        }
+    )
+    await handler.handle(
+        {
+            "update_type": "user_added",
+            "chat_id": -100500,
+            "user_id": 42,
+        }
+    )
+
+    async with sessions() as session:
+        identity = await session.get(PersonMaxIdentity, person_id)
+        pending = await session.scalar(select(MaxRegistrationPending))
+        assert identity is not None
+        assert identity.max_user_id == 42
+        assert identity.channel_subscription_status == "member"
+        assert pending is not None and pending.status == "completed"
+        assert pending.next_automatic_check_at is None
+    assert api.sent[-1] == (42, "Авторизация завершена. Добро пожаловать в «КРиТ»!")
+    assert api.sent.count(
+        (42, "Авторизация завершена. Добро пожаловать в «КРиТ»!")
+    ) == 1
+    await engine.dispose()
+
+
+async def test_pending_registration_automatic_checks_follow_required_schedule() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(
+            full_name="Иван Иванов",
+            phone="+79990000000",
+            max_auth_phone="+79990000000",
+            role_links=[PersonRole(role="student")],
+            active=True,
+        )
+        session.add(person)
+        await session.commit()
+        person_id = person.id
+    api = FakeApi()
+    handler = EchoHandler(
+        sessions=sessions,
+        api=api,  # type: ignore[arg-type]
+        required_channel_id=-100500,
+        required_channel_link="https://max.ru/channel",
+    )
+
+    await handler.handle(contact_update(42, "79990000000"))
+    async with sessions() as session:
+        pending = await session.scalar(select(MaxRegistrationPending))
+        assert pending is not None
+        created_at = pending.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=utcnow().tzinfo)
+        pending.created_at = created_at
+        pending.next_automatic_check_at = created_at + timedelta(minutes=1)
+        await session.commit()
+
+    for check_number, minute, next_minute in (
+        (1, 1, 2),
+        (2, 2, 5),
+        (3, 5, 10),
+        (4, 10, 15),
+    ):
+        assert await handler.process_due_registration_checks(
+            now=created_at + timedelta(minutes=minute)
+        ) == 1
+        async with sessions() as session:
+            pending = await session.scalar(select(MaxRegistrationPending))
+            assert pending is not None
+            assert pending.automatic_check_count == check_number
+            expected = created_at + timedelta(minutes=next_minute)
+            actual = pending.next_automatic_check_at
+            assert actual is not None
+            if actual.tzinfo is None:
+                actual = actual.replace(tzinfo=expected.tzinfo)
+            assert actual == expected
+
+    api.members.add(42)
+    assert await handler.process_due_registration_checks(
+        now=created_at + timedelta(minutes=15)
+    ) == 1
+    async with sessions() as session:
+        pending = await session.scalar(select(MaxRegistrationPending))
+        identity = await session.get(PersonMaxIdentity, person_id)
+        assert pending is not None
+        assert pending.automatic_check_count == 5
+        assert pending.next_automatic_check_at is None
+        assert pending.status == "completed"
+        assert identity is not None and identity.max_user_id == 42
+    assert api.member_checks[-5:] == [(-100500, [42])] * 5
     await engine.dispose()
 
 

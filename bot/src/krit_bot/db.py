@@ -49,7 +49,7 @@ class Base(DeclarativeBase):
     pass
 
 
-EXPECTED_ALEMBIC_REVISION = "20261020_access_phone_v10"
+EXPECTED_ALEMBIC_REVISION = "20261021_auth_rechecks_v11"
 ADMIN_ROLES = frozenset({"superadmin", "director", "administrator"})
 PROTECTED_ADMIN_USERNAME = "choose_goose"
 

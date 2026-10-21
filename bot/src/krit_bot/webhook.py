@@ -493,6 +493,7 @@ def create_app(
     vk_long_poll_task: asyncio.Task[None] | None = None
     learning_notifications_task: asyncio.Task[None] | None = None
     communications_task: asyncio.Task[None] | None = None
+    registration_checks_task: asyncio.Task[None] | None = None
     max_subscription_task: asyncio.Task[bool] | None = None
     online_maintenance_task: asyncio.Task[None] | None = None
     syndication_worker: SyndicationWorker | None = None
@@ -582,13 +583,14 @@ def create_app(
 
     async def stop_max_workers() -> None:
         nonlocal polling_task, learning_notifications_task, communications_task
-        nonlocal max_subscription_task
+        nonlocal max_subscription_task, registration_checks_task
         tasks = [
             task
             for task in (
                 polling_task,
                 learning_notifications_task,
                 communications_task,
+                registration_checks_task,
                 max_subscription_task,
             )
             if task is not None
@@ -600,11 +602,12 @@ def create_app(
         polling_task = None
         learning_notifications_task = None
         communications_task = None
+        registration_checks_task = None
         max_subscription_task = None
 
     async def start_max_workers() -> None:
         nonlocal polling_task, learning_notifications_task, communications_task
-        nonlocal max_subscription_task
+        nonlocal max_subscription_task, registration_checks_task
         if settings.bot_mode == "webhook" and (
             max_subscription_task is None or max_subscription_task.done()
         ):
@@ -622,6 +625,11 @@ def create_app(
             ),
             name="communications-maintenance",
         )
+        if settings.max_required_channel_id is not None:
+            registration_checks_task = asyncio.create_task(
+                handler.run_registration_checks(),
+                name="max-registration-checks",
+            )
         if settings.bot_mode == "polling":
             me = await api.get_me()
             log.info(
