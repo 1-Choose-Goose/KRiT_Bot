@@ -12,6 +12,7 @@ from krit_bot.communication_models import (
     InteractionRequest,
     InteractionResponse,
     MaxRegistrationPending,
+    MaxSubscriptionPrompt,
 )
 from krit_bot.config import Settings
 from krit_bot.db import (
@@ -41,11 +42,18 @@ class FakeApi:
         self.member_checks: list[tuple[int, list[int]]] = []
         self.chat_link: str | None = None
         self.callback_answers: list[tuple[str, str, dict | None]] = []
+        self.edited_messages: list[tuple[str, str, list[dict]]] = []
 
     async def send_text(self, *, user_id: int, text: str, attachments=None) -> dict:
         self.sent.append((user_id, text))
         self.sent_attachments.append(attachments)
-        return {}
+        return {"message": {"body": {"mid": f"sent-{len(self.sent)}"}}}
+
+    async def edit_message(
+        self, *, message_id: str, text: str, attachments: list[dict]
+    ) -> dict:
+        self.edited_messages.append((message_id, text, attachments))
+        return {"success": True}
 
     async def request_contact(self, *, user_id: int, text: str) -> dict:
         self.contact_requests.append(user_id)
@@ -121,10 +129,11 @@ def callback_update(
     payload: str,
     callback_id: str = "cb-1",
     message_text: str = "Исходный текст опроса",
+    message_id: str = "callback-message",
 ) -> dict:
     return {
         "update_type": "message_callback",
-        "message": {"body": {"text": message_text}},
+        "message": {"body": {"mid": message_id, "text": message_text}},
         "callback": {
             "callback_id": callback_id,
             "payload": payload,
@@ -672,6 +681,8 @@ async def test_registration_waits_for_required_channel_membership() -> None:
         assert pending is not None
         assert pending.person_id == person_id
         assert pending.status == "pending"
+        prompt = await session.get(MaxSubscriptionPrompt, 42)
+        assert prompt is not None and prompt.message_id == "sent-1"
         assert await session.get(PersonMaxIdentity, person_id) is None
     assert "подпишитесь на канал" in api.sent[-1][1]
 
@@ -687,7 +698,18 @@ async def test_registration_waits_for_required_channel_membership() -> None:
         assert identity.max_user_id == 42
         assert identity.channel_subscription_status == "member"
         assert pending is not None and pending.status == "completed"
-    assert api.callback_answers[-1] == ("cb-member", "Регистрация завершена", None)
+    assert api.callback_answers[-1] == (
+        "cb-member",
+        "Регистрация завершена",
+        {
+            "text": "Подписка подтверждена. Авторизация завершена.",
+            "attachments": [],
+        },
+    )
+    async with sessions() as session:
+        pending = await session.scalar(select(MaxRegistrationPending))
+        assert pending is not None
+        assert await session.get(MaxSubscriptionPrompt, 42) is None
     await engine.dispose()
 
 
@@ -739,10 +761,18 @@ async def test_user_added_to_required_channel_completes_pending_registration() -
         assert identity.channel_subscription_status == "member"
         assert pending is not None and pending.status == "completed"
         assert pending.next_automatic_check_at is None
+        assert await session.get(MaxSubscriptionPrompt, 42) is None
     assert api.sent[-1] == (42, "Авторизация завершена. Добро пожаловать в «КРиТ»!")
     assert api.sent.count(
         (42, "Авторизация завершена. Добро пожаловать в «КРиТ»!")
     ) == 1
+    assert api.edited_messages == [
+        (
+            "sent-1",
+            "Подписка подтверждена. Авторизация завершена.",
+            [],
+        )
+    ]
     await engine.dispose()
 
 
@@ -814,6 +844,13 @@ async def test_pending_registration_automatic_checks_follow_required_schedule() 
         assert pending.status == "completed"
         assert identity is not None and identity.max_user_id == 42
     assert api.member_checks[-5:] == [(-100500, [42])] * 5
+    assert api.edited_messages == [
+        (
+            "sent-1",
+            "Подписка подтверждена. Авторизация завершена.",
+            [],
+        )
+    ]
     await engine.dispose()
 
 
@@ -860,6 +897,56 @@ async def test_unsubscribed_registration_repeats_prompt_for_every_interaction() 
         "Подписка пока не найдена",
         None,
     )
+    assert [message_id for message_id, _, _ in api.edited_messages] == [
+        "sent-1",
+        "sent-2",
+        "sent-3",
+    ]
+    await engine.dispose()
+
+
+async def test_stale_subscription_callback_also_clears_latest_prompt() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        session.add(
+            Person(
+                full_name="Иван Иванов",
+                phone="+79990000000",
+                max_auth_phone="+79990000000",
+                role_links=[PersonRole(role="student")],
+                active=True,
+            )
+        )
+        await session.commit()
+    api = FakeApi()
+    handler = EchoHandler(
+        sessions=sessions,
+        api=api,  # type: ignore[arg-type]
+        required_channel_id=-100500,
+        required_channel_link="https://max.ru/channel",
+    )
+
+    await handler.handle(contact_update(42, "79990000000"))
+    await handler.handle(update(42, "Ещё сообщение", "message-after-contact"))
+    api.members.add(42)
+    await handler.handle(
+        callback_update(
+            42,
+            "registration:check",
+            "cb-stale",
+            message_id="sent-1",
+        )
+    )
+
+    assert [message_id for message_id, _, _ in api.edited_messages] == [
+        "sent-1",
+        "sent-2",
+    ]
+    async with sessions() as session:
+        assert await session.get(MaxSubscriptionPrompt, 42) is None
     await engine.dispose()
 
 
@@ -913,7 +1000,10 @@ async def test_authorized_user_must_restore_subscription_before_interacting() ->
     assert api.callback_answers[-1] == (
         "cb-resubscribed",
         "Подписка подтверждена",
-        None,
+        {
+            "text": "Подписка подтверждена. Авторизация завершена.",
+            "attachments": [],
+        },
     )
     assert api.contact_requests == []
     async with sessions() as session:

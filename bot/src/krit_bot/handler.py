@@ -15,6 +15,7 @@ from .communication_models import (
     InteractionRequestLesson,
     InteractionResponse,
     MaxRegistrationPending,
+    MaxSubscriptionPrompt,
 )
 from .communications import record_message, save_interaction_response
 from .db import (
@@ -42,6 +43,11 @@ ARCHIVED_ACCESS_MESSAGE = (
 )
 ARCHIVED_ACCESS_NOTIFICATION = "Доступ к боту приостановлен"
 REGISTRATION_SUCCESS_MESSAGE = "Авторизация завершена. Добро пожаловать в «КРиТ»!"
+SUBSCRIPTION_PROMPT_TEXT = (
+    "Для завершения регистрации подпишитесь на канал КРиТ, "
+    "затем нажмите «Проверить подписку»."
+)
+SUBSCRIPTION_CONFIRMED_MESSAGE = "Подписка подтверждена. Авторизация завершена."
 REGISTRATION_AUTOMATIC_CHECK_OFFSETS = tuple(
     timedelta(minutes=minutes) for minutes in (1, 2, 5, 10, 15)
 )
@@ -63,6 +69,7 @@ class IncomingCallback:
     callback_id: str
     user_id: int
     payload: str
+    message_id: str | None
     message_text: str | None
 
 
@@ -111,9 +118,11 @@ def parse_message_callback(update: dict[str, Any]) -> IncomingCallback | None:
         return None
     message = update.get("message") or {}
     body = message.get("body") or {}
+    raw_message_id = body.get("mid")
+    message_id = raw_message_id if isinstance(raw_message_id, str) else None
     text = body.get("text")
     message_text = text if isinstance(text, str) else None
-    return IncomingCallback(str(callback_id), user_id, payload, message_text)
+    return IncomingCallback(str(callback_id), user_id, payload, message_id, message_text)
 
 
 def _callback_message_without_keyboard(callback: IncomingCallback) -> dict[str, Any]:
@@ -121,6 +130,17 @@ def _callback_message_without_keyboard(callback: IncomingCallback) -> dict[str, 
     if callback.message_text is not None:
         message["text"] = callback.message_text
     return message
+
+
+def _sent_message_id(response: dict[str, Any]) -> str | None:
+    message = response.get("message")
+    if not isinstance(message, dict):
+        return None
+    body = message.get("body")
+    if not isinstance(body, dict):
+        return None
+    message_id = body.get("mid")
+    return message_id if isinstance(message_id, str) and message_id else None
 
 
 def _positive_callback_id(value: str) -> int | None:
@@ -241,6 +261,7 @@ class EchoHandler:
         return True
 
     async def _complete_pending_from_membership_event(self, user_id: int) -> bool:
+        should_clear_prompt = False
         async with self._sessions() as session:
             pending, _ = await self._registration_context(
                 session, user_id, lock_pending=True
@@ -255,12 +276,16 @@ class EchoHandler:
                     identity.channel_subscription_status = "member"
                     identity.channel_subscription_checked_at = utcnow()
                     await session.commit()
+                    should_clear_prompt = True
+                if should_clear_prompt:
+                    await self._clear_subscription_prompt(user_id)
                 return False
             completed = await self._finalize_pending_registration(
                 session, pending, user_id
             )
             await session.commit()
         if completed:
+            await self._clear_subscription_prompt(user_id)
             await self._api.send_text(
                 user_id=user_id,
                 text=REGISTRATION_SUCCESS_MESSAGE,
@@ -347,6 +372,7 @@ class EchoHandler:
                 await session.commit()
             processed += 1
             if completed:
+                await self._clear_subscription_prompt(user_id)
                 await self._api.send_text(
                     user_id=user_id,
                     text=REGISTRATION_SUCCESS_MESSAGE,
@@ -363,6 +389,47 @@ class EchoHandler:
             except Exception:
                 log.exception("registration_automatic_check_iteration_failed")
             await asyncio.sleep(poll_seconds)
+
+    async def _deactivate_subscription_prompt(self, message_id: str) -> bool:
+        try:
+            result = await self._api.edit_message(
+                message_id=message_id,
+                text=SUBSCRIPTION_CONFIRMED_MESSAGE,
+                attachments=[],
+            )
+        except MaxApiError:
+            log.exception(
+                "subscription_prompt_cleanup_failed",
+                message_id=message_id,
+            )
+            return False
+        if result.get("success") is not True:
+            log.warning(
+                "subscription_prompt_cleanup_rejected",
+                message_id=message_id,
+                response_message=result.get("message"),
+            )
+            return False
+        return True
+
+    async def _clear_subscription_prompt(
+        self, user_id: int, *, updated_message_id: str | None = None
+    ) -> None:
+        async with self._sessions() as session:
+            prompt = await session.scalar(
+                select(MaxSubscriptionPrompt)
+                .where(MaxSubscriptionPrompt.max_user_id == user_id)
+                .with_for_update()
+            )
+            if prompt is None:
+                return
+            should_edit = prompt.message_id != updated_message_id
+            if should_edit and not await self._deactivate_subscription_prompt(
+                prompt.message_id
+            ):
+                return
+            await session.delete(prompt)
+            await session.commit()
 
     async def _send_subscription_prompt(self, user_id: int) -> None:
         buttons = []
@@ -386,19 +453,46 @@ class EchoHandler:
                 }
             ]
         )
-        await self._api.send_text(
-            user_id=user_id,
-            text=(
-                "Для завершения регистрации подпишитесь на канал КРиТ, "
-                "затем нажмите «Проверить подписку»."
-            ),
-            attachments=[
-                {
-                    "type": "inline_keyboard",
-                    "payload": {"buttons": buttons},
-                }
-            ],
-        )
+        async with self._sessions() as session:
+            prompt = await session.scalar(
+                select(MaxSubscriptionPrompt)
+                .where(MaxSubscriptionPrompt.max_user_id == user_id)
+                .with_for_update()
+            )
+            if prompt is not None and not await self._deactivate_subscription_prompt(
+                prompt.message_id
+            ):
+                return
+            result = await self._api.send_text(
+                user_id=user_id,
+                text=SUBSCRIPTION_PROMPT_TEXT,
+                attachments=[
+                    {
+                        "type": "inline_keyboard",
+                        "payload": {"buttons": buttons},
+                    }
+                ],
+            )
+            message_id = _sent_message_id(result)
+            if message_id is None:
+                log.warning(
+                    "subscription_prompt_message_id_missing",
+                    max_user_id=user_id,
+                )
+                if prompt is not None:
+                    await session.delete(prompt)
+                await session.commit()
+                return
+            if prompt is None:
+                prompt = MaxSubscriptionPrompt(
+                    max_user_id=user_id,
+                    message_id=message_id,
+                )
+                session.add(prompt)
+            else:
+                prompt.message_id = message_id
+                prompt.updated_at = utcnow()
+            await session.commit()
 
     async def _authorized_subscription_is_valid(
         self, session: AsyncSession, user_id: int
@@ -423,6 +517,8 @@ class EchoHandler:
         await session.commit()
         if not subscribed:
             await self._send_subscription_prompt(user_id)
+        else:
+            await self._clear_subscription_prompt(user_id)
         return subscribed
 
     async def _handle_known_registration_state(
@@ -469,6 +565,7 @@ class EchoHandler:
             await session.commit()
             return False
         await session.commit()
+        await self._clear_subscription_prompt(user_id)
         await self._api.send_text(
             user_id=user_id,
             text=REGISTRATION_SUCCESS_MESSAGE,
@@ -1133,6 +1230,14 @@ class EchoHandler:
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
                     notification="Подписка подтверждена",
+                    message={
+                        "text": SUBSCRIPTION_CONFIRMED_MESSAGE,
+                        "attachments": [],
+                    },
+                )
+                await self._clear_subscription_prompt(
+                    callback.user_id,
+                    updated_message_id=callback.message_id,
                 )
                 return
             pending, person = await self._registration_context(session, callback.user_id)
@@ -1189,6 +1294,14 @@ class EchoHandler:
         await self._api.answer_callback(
             callback_id=callback.callback_id,
             notification="Регистрация завершена",
+            message={
+                "text": SUBSCRIPTION_CONFIRMED_MESSAGE,
+                "attachments": [],
+            },
+        )
+        await self._clear_subscription_prompt(
+            callback.user_id,
+            updated_message_id=callback.message_id,
         )
         await self._api.send_text(
             user_id=callback.user_id,

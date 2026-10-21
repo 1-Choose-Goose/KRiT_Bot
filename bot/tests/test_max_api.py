@@ -6,6 +6,37 @@ import pytest
 from krit_bot.max_api import MaxApiClient, MaxApiError
 
 
+async def test_edit_message_removes_keyboard_without_notification() -> None:
+    requests: list[httpx.Request] = []
+
+    async def edited(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"success": True})
+
+    api = MaxApiClient(token="secret", base_url="https://platform-api2.max.ru")
+    await api._client.aclose()
+    api._client = httpx.AsyncClient(
+        base_url="https://platform-api2.max.ru",
+        transport=httpx.MockTransport(edited),
+        headers={"Authorization": "secret"},
+    )
+
+    result = await api.edit_message(
+        message_id="mid.123",
+        text="Подписка подтверждена. Авторизация завершена.",
+        attachments=[],
+    )
+
+    assert result == {"success": True}
+    assert requests[0].method == "PUT"
+    assert requests[0].url.params["message_id"] == "mid.123"
+    assert requests[0].read().decode() == (
+        '{"text":"Подписка подтверждена. Авторизация завершена.",'
+        '"attachments":[],"notify":false}'
+    )
+    await api.close()
+
+
 async def test_read_timeout_is_classified_as_transient_max_error() -> None:
     async def fail(_request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("MAX did not respond")

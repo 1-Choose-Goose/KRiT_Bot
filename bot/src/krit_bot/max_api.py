@@ -94,6 +94,20 @@ class MaxApiClient:
             json=body,
         )
 
+    async def edit_message(
+        self,
+        *,
+        message_id: str,
+        text: str,
+        attachments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return await self._request(
+            "PUT",
+            "/messages",
+            params={"message_id": message_id},
+            json={"text": text, "attachments": attachments, "notify": False},
+        )
+
     async def get_chat(self, *, chat_id: int) -> dict[str, Any]:
         return await self._request("GET", f"/chats/{chat_id}")
 

@@ -351,3 +351,14 @@ class MaxRegistrationPending(Base):
     next_automatic_check_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+
+
+class MaxSubscriptionPrompt(Base):
+    """The one subscription keyboard that may still be used by a MAX user."""
+
+    __tablename__ = "max_subscription_prompts"
+    max_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    message_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
