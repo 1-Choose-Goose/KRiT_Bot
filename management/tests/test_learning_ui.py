@@ -274,7 +274,7 @@ def test_person_action_buttons_fit_actions_column_without_duplicate_learning_act
         }
     ]
     window._render_people()
-    actions = window.people_tables["student"].cellWidget(0, 3)
+    actions = window.people_tables["student"].cellWidget(0, 4)
     layout = actions.layout()
     buttons = actions.findChildren(QPushButton)
     occupied_width = (
@@ -287,6 +287,40 @@ def test_person_action_buttons_fit_actions_column_without_duplicate_learning_act
     assert occupied_width <= 330
     assert [button.text() for button in buttons] == ["В архив"]
     assert all(button.text() != "Обучение" for button in buttons)
+    window.close()
+    app.processEvents()
+
+
+def test_client_table_shows_bot_connection_status() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeApi())  # type: ignore[arg-type]
+    assert window.pool.waitForDone(3_000)
+    window.people = [
+        {
+            "id": 1,
+            "full_name": "Подключённый Клиент",
+            "phone": "+79000000001",
+            "roles": ["student"],
+            "active": True,
+            "max_user_id": 123,
+        },
+        {
+            "id": 2,
+            "full_name": "Неподключённый Клиент",
+            "phone": "+79000000002",
+            "roles": ["student"],
+            "active": True,
+            "max_user_id": None,
+        },
+    ]
+
+    window._render_people()
+    table = window.people_tables["student"]
+
+    assert table.horizontalHeaderItem(3).text() == "Связь с ботом"
+    assert table.item(0, 3).text() == "Подключён"
+    assert table.item(1, 3).text() == "Не подключён"
+    assert table.cellWidget(0, 4) is not None
     window.close()
     app.processEvents()
 

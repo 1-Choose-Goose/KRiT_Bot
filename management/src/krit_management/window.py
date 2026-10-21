@@ -642,7 +642,11 @@ class MainWindow(QMainWindow):
         actions.addStretch(1)
         actions.addWidget(add_button)
         layout.addLayout(actions)
-        table = self._table(["ФИО", "Роли", "Телефон", "Действия"])
+        table = self._table(["ФИО", "Роли", "Телефон", "Связь с ботом", "Действия"])
+        header = table.horizontalHeader()
+        for column, width in ((1, 140), (2, 170), (3, 140), (4, 160)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            table.setColumnWidth(column, width)
         table.doubleClicked.connect(
             lambda _index, key=role_filter, widget=table: self.edit_selected_person(key, widget)
         )
@@ -913,11 +917,24 @@ class MainWindow(QMainWindow):
                         person.get("full_name", ""),
                         ", ".join(ROLE_LABELS.get(role, role) for role in roles),
                         format_phone(person.get("phone")),
+                        (
+                            "Подключён"
+                            if person.get("max_user_id") is not None
+                            else "Не подключён"
+                        ),
                     ],
+                )
+                connection_item = table.item(row, 3)
+                connected = person.get("max_user_id") is not None
+                connection_item.setForeground(QColor("#16803c" if connected else "#64748b"))
+                connection_item.setToolTip(
+                    "Аккаунт MAX привязан к клиенту"
+                    if connected
+                    else "Аккаунт MAX пока не привязан"
                 )
                 table.setCellWidget(
                     row,
-                    3,
+                    4,
                     self._actions(
                         [
                             (
