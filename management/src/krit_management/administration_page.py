@@ -716,14 +716,21 @@ class AdministrationPage(QWidget):
             ("Схема базы", database.get("revision", "Недоступно")),
             ("Активные подключения", database.get("active_connections", "Недоступно")),
         ]
-        for item in database.get("databases") or []:
-            if isinstance(item, dict):
-                database_values.append(
-                    (
-                        f"База {item.get('name', 'без имени')}",
-                        self._format_bytes(item.get("size_bytes")),
-                    )
+        database_items = sorted(
+            (
+                item
+                for item in database.get("databases") or []
+                if isinstance(item, dict)
+            ),
+            key=lambda item: str(item.get("name") or "без имени").casefold(),
+        )
+        for item in database_items:
+            database_values.append(
+                (
+                    f"База {item.get('name') or 'без имени'}",
+                    self._format_bytes(item.get("size_bytes")),
                 )
+            )
         self._add_status_group("PostgreSQL", database_values)
         self._add_status_group(
             "API",

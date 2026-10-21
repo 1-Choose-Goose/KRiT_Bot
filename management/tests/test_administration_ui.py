@@ -597,6 +597,35 @@ def test_administration_renders_complete_server_information() -> None:
     app.processEvents()
 
 
+def test_administration_renders_databases_alphabetically() -> None:
+    app = QApplication.instance() or QApplication([])
+    api = FakeAdministrationApi("superadmin")
+    page = AdministrationPage(api)  # type: ignore[arg-type]
+    payload = api.system_status()
+    payload["database"]["databases"] = [
+        {"name": "zeta", "size_bytes": 3},
+        {"name": "Beta", "size_bytes": 2},
+        {"name": "alpha", "size_bytes": 1},
+    ]
+
+    page._render_status(payload)
+
+    postgresql = next(
+        page.status_details.topLevelItem(index)
+        for index in range(page.status_details.topLevelItemCount())
+        if page.status_details.topLevelItem(index).text(0) == "PostgreSQL"
+    )
+    database_labels = [
+        postgresql.child(index).text(0)
+        for index in range(postgresql.childCount())
+        if postgresql.child(index).text(0).startswith("База ")
+    ]
+    assert database_labels == ["База alpha", "База Beta", "База zeta"]
+
+    page.shutdown()
+    app.processEvents()
+
+
 def test_suspicious_backup_requires_superadmin_decision(monkeypatch, tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
     archive_one = tmp_path / "first.backup"
