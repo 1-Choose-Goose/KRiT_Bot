@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "krit-max-bot"
-version = "1.0.1"
+version = "1.1.0"
 description = "MAX notification bot for KRiT education center"
 requires-python = ">=3.11"
 dependencies = [
