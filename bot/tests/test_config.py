@@ -19,3 +19,12 @@ def test_database_names_accept_json_environment_value(monkeypatch) -> None:
     settings = Settings(_env_file=None)
 
     assert settings.krit_database_names == ("krit_bot",)
+
+
+def test_online_upload_limit_defaults_to_50_mib(monkeypatch) -> None:
+    monkeypatch.setenv("MAX_BOT_TOKEN", "test-token")
+    monkeypatch.delenv("ONLINE_UPLOAD_LIMIT_BYTES", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.online_upload_limit_bytes == 50 * 1024 * 1024

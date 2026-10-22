@@ -811,7 +811,8 @@ def create_online_router(
         nonlocal pending_total_bytes
         reserved = max(1, declared_size)
         if reserved > settings.online_upload_limit_bytes:
-            raise HTTPException(413, "Файл превышает лимит 15 МБ")
+            limit_mib = settings.online_upload_limit_bytes // (1024 * 1024)
+            raise HTTPException(413, f"Файл превышает лимит {limit_mib} МБ")
         async with upload_lock:
             settings.online_upload_root.mkdir(parents=True, exist_ok=True)
             async with sessions() as session:

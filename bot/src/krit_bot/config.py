@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     online_allowed_origins: Annotated[tuple[str, ...], NoDecode] = ()
     online_upload_root: Path = Path("./data/online-assets")
     online_upload_limit_bytes: int = Field(
-        default=15 * 1024 * 1024, ge=1024, le=250 * 1024 * 1024
+        default=50 * 1024 * 1024, ge=1024, le=250 * 1024 * 1024
     )
     online_room_storage_limit_bytes: int = Field(
         default=100 * 1024 * 1024, ge=1024 * 1024, le=2 * 1024 * 1024 * 1024
