@@ -27,7 +27,7 @@ ONLINE_COOKIE_SECURE=true
 ONLINE_SESSION_HOURS=12
 ONLINE_OTP_PEPPER=<отдельный случайный секрет>
 ONLINE_UPLOAD_ROOT=/opt/krit-bot/data/online-assets
-ONLINE_UPLOAD_LIMIT_BYTES=15728640
+ONLINE_UPLOAD_LIMIT_BYTES=52428800
 ONLINE_ROOM_STORAGE_LIMIT_BYTES=104857600
 ONLINE_TOTAL_STORAGE_LIMIT_BYTES=314572800
 ONLINE_MIN_FREE_DISK_BYTES=1073741824
@@ -52,7 +52,7 @@ downgrade на одну ревизию и верните прошлый паке
 
 ## Временное хранение и очистка
 
-Каждая комната пишет только в `ONLINE_UPLOAD_ROOT/<room_id>`. Один файл ограничен 15 МБ, комната
+Каждая комната пишет только в `ONLINE_UPLOAD_ROOT/<room_id>`. Один файл ограничен 50 МБ, комната
 100 МБ, весь модуль 300 МБ; дополнительно всегда сохраняется не менее 1 ГБ свободного диска.
 Размер известного multipart-файла резервируется до записи, поэтому параллельные загрузки не обходят
 квоту. Прерванный или не прошедший сигнатурную проверку файл удаляется сразу.
