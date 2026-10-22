@@ -811,10 +811,12 @@ class ManagementApi:
         teacher_id: int | None,
         room_id: int | None,
         student_ids: list[int],
+        delivery_mode: str = "offline",
     ) -> list[dict[str, Any]]:
         params: list[tuple[str, Any]] = [
             ("day", day),
             ("duration_minutes", duration_minutes),
+            ("delivery_mode", delivery_mode),
         ]
         if teacher_id is not None:
             params.append(("teacher_id", teacher_id))

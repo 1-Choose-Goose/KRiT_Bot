@@ -11,6 +11,176 @@ from krit_bot.webhook import create_app
 
 
 @pytest.mark.asyncio
+async def test_online_lessons_ignore_rooms_but_keep_people_conflicts(tmp_path) -> None:
+    settings = Settings(
+        database_url=f"sqlite+aiosqlite:///{(tmp_path / 'online-lessons.db').as_posix()}",
+        max_bot_token=SecretStr("test-token"),
+        jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
+        bot_mode="webhook",
+        vk_syndication_enabled=False,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            login = await client.post(
+                "/api/v1/auth/login", json={"username": "admin", "password": "admin"}
+            )
+            headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+            async def person(name: str, phone: str, roles: list[str]) -> int:
+                response = await client.post(
+                    "/api/v1/people",
+                    headers=headers,
+                    json={"full_name": name, "phone": phone, "roles": roles, "active": True},
+                )
+                assert response.status_code == 201, response.text
+                return int(response.json()["id"])
+
+            teacher_one = await person("Учитель Первый", "+79000001001", ["teacher"])
+            teacher_two = await person("Учитель Второй", "+79000001002", ["teacher"])
+            student_one = await person("Ученик Первый", "+79000001003", ["student"])
+            student_two = await person("Ученик Второй", "+79000001004", ["student"])
+            student_three = await person("Ученик Третий", "+79000001005", ["student"])
+            subject_response = await client.post(
+                "/api/v1/learning/subjects",
+                headers=headers,
+                json={
+                    "name": "Онлайн-предмет",
+                    "color": "#2563eb",
+                    "teacher_ids": [teacher_one, teacher_two],
+                },
+            )
+            room_response = await client.post(
+                "/api/v1/learning/rooms",
+                headers=headers,
+                json={"name": "Малый кабинет", "capacity": 1},
+            )
+            subject_id = int(subject_response.json()["id"])
+            room_id = int(room_response.json()["id"])
+            start = datetime.now(UTC) + timedelta(days=1)
+            end = start + timedelta(hours=1)
+            online_payload = {
+                "subject_id": subject_id,
+                "teacher_id": teacher_one,
+                "room_id": None,
+                "delivery_mode": "online",
+                "start_at": start.isoformat(),
+                "end_at": end.isoformat(),
+                "participant_ids": [student_one, student_two],
+            }
+
+            created = await client.post(
+                "/api/v1/learning/lessons", headers=headers, json=online_payload
+            )
+            assert created.status_code == 201, created.text
+            assert created.json()["delivery_mode"] == "online"
+            assert created.json()["room_id"] is None
+            assert created.json()["room_name_snapshot"] == "Онлайн"
+            lesson_id = int(created.json()["id"])
+            added = await client.post(
+                f"/api/v1/learning/lessons/{lesson_id}/participants/{student_three}",
+                headers=headers,
+            )
+            assert added.status_code == 201, added.text
+
+            offline_parallel = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **online_payload,
+                    "teacher_id": teacher_two,
+                    "room_id": room_id,
+                    "delivery_mode": "offline",
+                    "participant_ids": [],
+                },
+            )
+            assert offline_parallel.status_code == 201, offline_parallel.text
+
+            teacher_conflict = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **online_payload,
+                    "room_id": room_id,
+                    "delivery_mode": "offline",
+                    "participant_ids": [],
+                },
+            )
+            assert teacher_conflict.status_code == 409
+            assert any(
+                item["kind"] == "teacher"
+                for item in teacher_conflict.json()["detail"]["conflicts"]
+            )
+
+            student_conflict = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    **online_payload,
+                    "teacher_id": teacher_two,
+                    "participant_ids": [student_one],
+                },
+            )
+            assert student_conflict.status_code == 409
+            assert any(
+                item["kind"] == "student"
+                for item in student_conflict.json()["detail"]["conflicts"]
+            )
+
+            missing_room = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={**online_payload, "delivery_mode": "offline", "room_id": None},
+            )
+            assert missing_room.status_code == 422
+
+            slots = await client.get(
+                "/api/v1/learning/free-slots",
+                headers=headers,
+                params={
+                    "day": start.date().isoformat(),
+                    "duration_minutes": 60,
+                    "delivery_mode": "online",
+                },
+            )
+            assert slots.status_code == 200, slots.text
+            assert slots.json()
+            assert all(
+                item["room_id"] is None
+                and item["room_name"] == "Онлайн"
+                and item["delivery_mode"] == "online"
+                for item in slots.json()
+            )
+
+            series_start = start + timedelta(days=2)
+            series = await client.post(
+                "/api/v1/learning/series",
+                headers=headers,
+                json={
+                    "subject_id": subject_id,
+                    "teacher_id": teacher_one,
+                    "room_id": None,
+                    "delivery_mode": "online",
+                    "starts_at": series_start.isoformat(),
+                    "duration_minutes": 60,
+                    "interval_weeks": 1,
+                    "occurrences": 2,
+                    "participant_ids": [student_one],
+                },
+            )
+            assert series.status_code == 201, series.text
+            for series_lesson_id in series.json()["lesson_ids"]:
+                item = await client.get(
+                    f"/api/v1/learning/lesson/{series_lesson_id}", headers=headers
+                )
+                assert item.status_code == 200, item.text
+                assert item.json()["delivery_mode"] == "online"
+                assert item.json()["room_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> None:
     settings = Settings(
         database_url=f"sqlite+aiosqlite:///{(tmp_path / 'learning.db').as_posix()}",
@@ -494,10 +664,10 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
                 f"/api/v1/learning/history/person/{student_one}", headers=headers
             )
             assert archived_history.status_code == 200
-            cannot_delete_history = await client.delete(
+            deleted_with_history = await client.delete(
                 f"/api/v1/people/{student_one}", headers=headers
             )
-            assert cannot_delete_history.status_code == 409
+            assert deleted_with_history.status_code == 200
 
             deleted_group = await client.delete(
                 f"/api/v1/learning/groups/{group_id}", headers=headers

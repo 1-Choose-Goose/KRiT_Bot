@@ -47,7 +47,7 @@ def test_alembic_builds_empty_database(tmp_path, monkeypatch) -> None:
         assert "learning_lesson_teacher_segments" in tables
         assert "learning_subject_teachers" in tables
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20261021_prompt_cleanup_v12",
+            "20261021_online_lessons_v13",
         )
         attempt_columns = {
             item[1] for item in connection.execute("PRAGMA table_info(access_attempts)")
@@ -65,6 +65,17 @@ def test_alembic_builds_empty_database(tmp_path, monkeypatch) -> None:
             for item in connection.execute("PRAGMA table_info(max_subscription_prompts)")
         }
         assert {"max_user_id", "message_id", "updated_at"} <= prompt_columns
+        lesson_columns = {
+            item[1]: item for item in connection.execute("PRAGMA table_info(learning_lessons)")
+        }
+        series_columns = {
+            item[1]: item
+            for item in connection.execute("PRAGMA table_info(learning_lesson_series)")
+        }
+        assert lesson_columns["delivery_mode"][3] == 1
+        assert lesson_columns["room_id"][3] == 0
+        assert series_columns["delivery_mode"][3] == 1
+        assert series_columns["room_id"][3] == 0
         admin_columns = {
             item[1]: item for item in connection.execute("PRAGMA table_info(admin_users)")
         }
@@ -152,7 +163,7 @@ def test_alembic_adopts_known_legacy_database(tmp_path, monkeypatch) -> None:
             "SELECT person_id, max_user_id FROM person_max_identities WHERE person_id = 7"
         ).fetchone() == (7, 700000007)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20261021_prompt_cleanup_v12",
+            "20261021_online_lessons_v13",
         )
         assert connection.execute(
             "SELECT COUNT(*) FROM learning_admin_notifications "

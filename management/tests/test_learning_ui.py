@@ -1950,6 +1950,52 @@ def test_lesson_dialog_uses_manual_duration_and_calculates_end_time() -> None:
     dialog.deleteLater()
 
 
+def test_lesson_dialog_serializes_online_mode_without_room() -> None:
+    app = QApplication.instance() or QApplication([])
+    references = {
+        "subjects": [{"id": 1, "name": "Математика"}],
+        "teachers": [{"id": 2, "full_name": "Иванов Иван Иванович"}],
+        "rooms": [{"id": 3, "name": "Кабинет 2"}],
+        "groups": [],
+        "students": [],
+    }
+    dialog = LessonDialog(references)
+    dialog.subject.setCurrentIndex(dialog.subject.findData(1))
+    dialog.teacher.setCurrentIndex(dialog.teacher.findData(2))
+    dialog.room.setCurrentIndex(dialog.room.findData("online"))
+    dialog.duration.setText("75")
+
+    payload = dialog.payload()
+    series_payload = dialog.series_payload()
+
+    assert dialog.room.currentText() == "Онлайн"
+    assert payload["delivery_mode"] == "online"
+    assert payload["room_id"] is None
+    assert series_payload["delivery_mode"] == "online"
+    assert series_payload["duration_minutes"] == 75
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_free_slot_dialog_requests_online_slots_without_room() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = FreeSlotDialog(
+        {
+            "teachers": [{"id": 2, "full_name": "Иванов Иван Иванович"}],
+            "rooms": [{"id": 3, "name": "Кабинет 2"}],
+            "students": [],
+        }
+    )
+    dialog.room.setCurrentIndex(dialog.room.findData("online"))
+
+    criteria = dialog.criteria()
+
+    assert criteria["delivery_mode"] == "online"
+    assert criteria["room_id"] is None
+    dialog.deleteLater()
+    app.processEvents()
+
+
 def test_lesson_dialog_keeps_selected_students_at_top() -> None:
     app = QApplication.instance() or QApplication([])
     references = {

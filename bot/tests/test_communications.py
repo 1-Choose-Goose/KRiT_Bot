@@ -607,19 +607,19 @@ async def test_teacher_bundle_exists_when_lesson_has_no_students(tmp_path) -> No
     async with sessions() as session:
         teacher = Person(full_name="Учитель без группы", phone="+79000000231")
         subject = Subject(name="Информатика", color="#2563eb")
-        room = Room(name="Кабинет", capacity=10)
-        session.add_all([teacher, subject, room])
+        session.add_all([teacher, subject])
         await session.flush()
         start = datetime(2026, 10, 6, 10, 0, tzinfo=timezone)
         session.add(
             Lesson(
                 subject_id=subject.id,
                 teacher_id=teacher.id,
-                room_id=room.id,
+                room_id=None,
+                delivery_mode="online",
                 start_at=start.astimezone(UTC),
                 end_at=(start + timedelta(hours=1)).astimezone(UTC),
                 teacher_name_snapshot=teacher.full_name,
-                room_name_snapshot=room.name,
+                room_name_snapshot="Онлайн",
                 subject_name_snapshot=subject.name,
             )
         )
@@ -635,7 +635,9 @@ async def test_teacher_bundle_exists_when_lesson_has_no_students(tmp_path) -> No
         assert len(bundles) == 1
         assert bundles[0].recipient_context == "teacher"
         assert bundles[0].lessons[0].students == ()
-        assert "Ученики пока не назначены" in render_bundle(bundles[0])
+        rendered = render_bundle(bundles[0])
+        assert "Онлайн" in rendered
+        assert "Ученики пока не назначены" in rendered
     await engine.dispose()
 
 

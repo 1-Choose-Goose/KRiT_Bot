@@ -214,7 +214,8 @@ async def test_teacher_controls_server_enforced_board_permission(tmp_path, monke
             lesson = Lesson(
                 subject_id=subject.id,
                 teacher_id=teacher_id,
-                room_id=room.id,
+                room_id=None,
+                delivery_mode="online",
                 start_at=start,
                 end_at=start + timedelta(hours=1),
                 status="scheduled",
@@ -233,6 +234,21 @@ async def test_teacher_controls_server_enforced_board_permission(tmp_path, monke
             )
             await session.commit()
             lesson_id = lesson.id
+            offline_lesson = Lesson(
+                subject_id=subject.id,
+                teacher_id=teacher_id,
+                room_id=room.id,
+                delivery_mode="offline",
+                start_at=start + timedelta(hours=2),
+                end_at=start + timedelta(hours=3),
+                status="planned",
+                teacher_name_snapshot="Мария Иванова",
+                room_name_snapshot="Кабинет 1",
+                subject_name_snapshot="Математика",
+            )
+            session.add(offline_lesson)
+            await session.commit()
+            offline_lesson_id = offline_lesson.id
 
         async with (
             httpx.AsyncClient(
@@ -253,6 +269,12 @@ async def test_teacher_controls_server_enforced_board_permission(tmp_path, monke
             student_lessons = await student_client.get("/api/v1/online/lessons")
             assert teacher_lessons.json()["data"][0]["role"] == "teacher"
             assert student_lessons.json()["data"][0]["role"] == "student"
+            assert teacher_lessons.json()["data"][0]["delivery_mode"] == "online"
+            assert [item["id"] for item in teacher_lessons.json()["data"]] == [lesson_id]
+            unavailable = await teacher_client.post(
+                f"/api/v1/online/lessons/{offline_lesson_id}/room"
+            )
+            assert unavailable.status_code == 409
 
             created = await teacher_client.post(f"/api/v1/online/lessons/{lesson_id}/room")
             assert created.status_code == 201, created.text

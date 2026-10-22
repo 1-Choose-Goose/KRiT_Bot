@@ -616,6 +616,10 @@ class LessonDialog(QDialog):
         self.subject = self._combo(references.get("subjects", []), "name")
         self.teacher = self._combo([], "full_name", empty="Выберите преподавателя")
         self.room = self._combo(references.get("rooms", []), "name")
+        self.room.insertItem(0, "Онлайн", "online")
+        self.room.setToolTip(
+            "Для онлайн-занятия кабинет и его вместимость не учитываются"
+        )
         self.group = self._combo(references.get("groups", []), "name", empty="Без группы")
         now = now_center().replace(second=0, microsecond=0)
         rounded = now + timedelta(minutes=(30 - now.minute % 30) % 30)
@@ -714,7 +718,14 @@ class LessonDialog(QDialog):
         self._select(self.subject, self.lesson.get("subject_id"))
         self._reload_lesson_teachers(preferred=self.lesson.get("teacher_id"))
         self.subject.currentIndexChanged.connect(self._reload_lesson_teachers)
-        self._select(self.room, self.lesson.get("room_id"))
+        self._select(
+            self.room,
+            (
+                "online"
+                if self.lesson.get("delivery_mode") == "online"
+                else self.lesson.get("room_id")
+            ),
+        )
         self._select(self.group, self.lesson.get("group_id"))
         if self.lesson.get("start_at"):
             self.set_period(self.lesson["start_at"], self.lesson["end_at"])
@@ -1026,7 +1037,6 @@ class LessonDialog(QDialog):
         for label, field in (
             ("предмет", self.subject),
             ("преподавателя", self.teacher),
-            ("кабинет", self.room),
         ):
             if field.currentData() is None:
                 missing.append(label)
@@ -1082,10 +1092,13 @@ class LessonDialog(QDialog):
         teacher_id = self.teacher.currentData()
         if teacher_id is not None and int(teacher_id) in self._group_member_ids:
             excluded_participant_ids.add(int(teacher_id))
+        room_value = self.room.currentData()
+        delivery_mode = "online" if room_value == "online" else "offline"
         return {
             "subject_id": self.subject.currentData(),
             "teacher_id": self.teacher.currentData(),
-            "room_id": self.room.currentData(),
+            "room_id": None if delivery_mode == "online" else room_value,
+            "delivery_mode": delivery_mode,
             "group_id": self.group.currentData(),
             "start_at": start.isoformat(),
             "end_at": end.isoformat(),
@@ -1100,9 +1113,10 @@ class LessonDialog(QDialog):
             "subject_id": payload["subject_id"],
             "teacher_id": payload["teacher_id"],
             "room_id": payload["room_id"],
+            "delivery_mode": payload["delivery_mode"],
             "group_id": payload["group_id"],
             "starts_at": payload["start_at"],
-            "duration_minutes": self.duration.value(),
+            "duration_minutes": self._duration_minutes() or 60,
             "interval_weeks": 1,
             "occurrences": self.occurrences.value(),
             "participant_ids": payload["participant_ids"],
@@ -1687,6 +1701,7 @@ class FreeSlotDialog(QDialog):
             include_inactive=True,
         )
         self.room = LessonDialog._combo(references.get("rooms", []), "name", empty="Любой кабинет")
+        self.room.insertItem(1, "Онлайн", "online")
         form.addRow("Дата", self.day)
         form.addRow("Продолжительность", self.duration)
         form.addRow("Преподаватель", self.teacher)
@@ -1788,11 +1803,14 @@ class FreeSlotDialog(QDialog):
             check = self.students.cellWidget(row, 0)
             if isinstance(check, QCheckBox) and check.isChecked():
                 student_ids.append(int(check.property("person_id")))
+        room_value = self.room.currentData()
+        delivery_mode = "online" if room_value == "online" else "offline"
         return {
             "day": self.day.date().toString(Qt.DateFormat.ISODate),
             "duration_minutes": self.duration.value(),
             "teacher_id": self.teacher.currentData(),
-            "room_id": self.room.currentData(),
+            "room_id": None if delivery_mode == "online" else room_value,
+            "delivery_mode": delivery_mode,
             "student_ids": student_ids,
         }
 
@@ -2732,7 +2750,10 @@ class LearningPage(QWidget):
         criteria = dialog.criteria()
         lesson = LessonDialog(self.references, parent=self)
         LessonDialog._select(lesson.teacher, criteria.get("teacher_id"))
-        LessonDialog._select(lesson.room, slot.get("room_id"))
+        LessonDialog._select(
+            lesson.room,
+            "online" if slot.get("delivery_mode") == "online" else slot.get("room_id"),
+        )
         lesson.set_period(slot["start_at"], slot["end_at"])
         selected_students = set(criteria.get("student_ids", []))
         for row in range(lesson.students.rowCount()):
@@ -2750,7 +2771,10 @@ class LearningPage(QWidget):
         dialog.day.setDate(QDate(start.year, start.month, start.day))
         dialog.duration.setValue(max(5, int((end - start).total_seconds() // 60)))
         LessonDialog._select(dialog.teacher, lesson.get("teacher_id"))
-        LessonDialog._select(dialog.room, lesson.get("room_id"))
+        LessonDialog._select(
+            dialog.room,
+            "online" if lesson.get("delivery_mode") == "online" else lesson.get("room_id"),
+        )
         participant_ids = {
             int(item["person_id"])
             for item in lesson.get("participants", [])
@@ -2786,7 +2810,8 @@ class LearningPage(QWidget):
         payload = {
             "subject_id": int(lesson["subject_id"]),
             "teacher_id": int(dialog.teacher.currentData()),
-            "room_id": int(slot["room_id"]),
+            "room_id": int(slot["room_id"]) if slot.get("room_id") is not None else None,
+            "delivery_mode": slot.get("delivery_mode", "offline"),
             "group_id": lesson.get("group_id"),
             "start_at": slot["start_at"],
             "end_at": slot["end_at"],

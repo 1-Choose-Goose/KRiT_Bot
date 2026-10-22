@@ -76,7 +76,8 @@ class MembershipEndPayload(BaseModel):
 class LessonPayload(BaseModel):
     subject_id: int
     teacher_id: int
-    room_id: int
+    room_id: int | None = None
+    delivery_mode: Literal["offline", "online"] = "offline"
     group_id: int | None = None
     start_at: datetime
     end_at: datetime
@@ -88,13 +89,18 @@ class LessonPayload(BaseModel):
     def validate_period(self) -> LessonPayload:
         if self.end_at <= self.start_at:
             raise ValueError("Окончание должно быть позже начала")
+        if self.delivery_mode == "offline" and self.room_id is None:
+            raise ValueError("Для очного занятия необходимо выбрать кабинет")
+        if self.delivery_mode == "online":
+            self.room_id = None
         return self
 
 
 class SeriesPayload(BaseModel):
     subject_id: int
     teacher_id: int
-    room_id: int
+    room_id: int | None = None
+    delivery_mode: Literal["offline", "online"] = "offline"
     group_id: int | None = None
     starts_at: datetime
     duration_minutes: int = Field(ge=5, le=1440)
@@ -103,6 +109,14 @@ class SeriesPayload(BaseModel):
     participant_ids: list[int] = Field(default_factory=list)
     excluded_participant_ids: list[int] = Field(default_factory=list)
     notes: str | None = Field(default=None, max_length=4000)
+
+    @model_validator(mode="after")
+    def validate_room(self) -> SeriesPayload:
+        if self.delivery_mode == "offline" and self.room_id is None:
+            raise ValueError("Для очного занятия необходимо выбрать кабинет")
+        if self.delivery_mode == "online":
+            self.room_id = None
+        return self
 
 
 class SeriesUpdatePayload(SeriesPayload):
@@ -372,14 +386,14 @@ async def _participants_for(
 
 async def _references(
     session: AsyncSession, payload: LessonPayload | SeriesPayload
-) -> tuple[Subject, Person, Room, StudyGroup | None]:
+) -> tuple[Subject, Person, Room | None, StudyGroup | None]:
     subject = await session.get(Subject, payload.subject_id)
     teacher = await session.get(Person, payload.teacher_id)
-    room = await session.get(Room, payload.room_id)
+    room = await session.get(Room, payload.room_id) if payload.room_id is not None else None
     group = await session.get(StudyGroup, payload.group_id) if payload.group_id else None
     if subject is None or not subject.active:
         raise HTTPException(422, "Предмет недоступен")
-    if room is None or not room.active:
+    if payload.delivery_mode == "offline" and (room is None or not room.active):
         raise HTTPException(422, "Кабинет недоступен")
     if teacher is None or teacher.archived_at is not None:
         raise HTTPException(422, "Преподаватель недоступен")
@@ -434,7 +448,7 @@ async def _conflicts(
     start_at: datetime,
     end_at: datetime,
     teacher_id: int,
-    room_id: int,
+    room_id: int | None,
     participant_ids: set[int],
     exclude_lesson_id: int | None = None,
     exclude_lesson_ids: set[int] | None = None,
@@ -495,7 +509,7 @@ async def _conflicts(
             _db_utc(item.start_at) < end_at and _db_utc(item.end_at) > start_at
         )
         overlaps_fact = item.id in active_lesson_ids
-        if item.room_id == room_id:
+        if room_id is not None and item.room_id == room_id:
             result.append(
                 {
                     "kind": "room",
@@ -590,6 +604,7 @@ def _lesson_view(
             "subject_id",
             "teacher_id",
             "room_id",
+            "delivery_mode",
             "group_id",
             "start_at",
             "end_at",
@@ -1693,7 +1708,7 @@ def create_learning_router(
         start_at, end_at = _aware(payload.start_at), _aware(payload.end_at)
         subject, teacher, room, _ = await _references(session, payload)
         participants = await _participants_for(session, payload, start_at)
-        if len(participants) > room.capacity:
+        if room is not None and len(participants) > room.capacity:
             raise HTTPException(
                 409,
                 {
@@ -1708,7 +1723,7 @@ def create_learning_router(
             start_at=start_at,
             end_at=end_at,
             teacher_id=teacher.id,
-            room_id=room.id,
+            room_id=room.id if room is not None else None,
             participant_ids={p.id for p in participants},
             exclude_lesson_id=exclude_id,
             exclude_lesson_ids=conflict_exclude_ids,
@@ -1723,13 +1738,14 @@ def create_learning_router(
                 series_occurrence_index=series_occurrence_index,
                 subject_id=subject.id,
                 teacher_id=teacher.id,
-                room_id=room.id,
+                room_id=room.id if room is not None else None,
+                delivery_mode=payload.delivery_mode,
                 group_id=payload.group_id,
                 start_at=start_at,
                 end_at=end_at,
                 status="planned",
                 teacher_name_snapshot=teacher.full_name,
-                room_name_snapshot=room.name,
+                room_name_snapshot=room.name if room is not None else "Онлайн",
                 subject_name_snapshot=subject.name,
                 notes=payload.notes,
             )
@@ -1775,7 +1791,8 @@ def create_learning_router(
                 (
                     item.subject_id != subject.id,
                     item.teacher_id != teacher.id,
-                    item.room_id != room.id,
+                    item.room_id != (room.id if room is not None else None),
+                    item.delivery_mode != payload.delivery_mode,
                     item.group_id != payload.group_id,
                     _db_utc(item.start_at) != start_at,
                     _db_utc(item.end_at) != end_at,
@@ -1799,9 +1816,10 @@ def create_learning_router(
             item.subject_id, item.teacher_id, item.room_id, item.group_id = (
                 subject.id,
                 teacher.id,
-                room.id,
+                room.id if room is not None else None,
                 payload.group_id,
             )
+            item.delivery_mode = payload.delivery_mode
             item.start_at, item.end_at, item.notes, item.updated_at = (
                 start_at,
                 end_at,
@@ -1810,7 +1828,7 @@ def create_learning_router(
             )
             item.teacher_name_snapshot, item.room_name_snapshot, item.subject_name_snapshot = (
                 teacher.full_name,
-                room.name,
+                room.name if room is not None else "Онлайн",
                 subject.name,
             )
             current_by_person = {entry.person_id: entry for entry in current_participants}
@@ -1885,10 +1903,10 @@ def create_learning_router(
                 start_at=_aware(payload.start_at),
                 end_at=_aware(payload.end_at),
                 teacher_id=teacher.id,
-                room_id=room.id,
+                room_id=room.id if room is not None else None,
                 participant_ids={x.id for x in people},
             )
-            if len(people) > room.capacity:
+            if room is not None and len(people) > room.capacity:
                 conflicts.append(
                     {"kind": "capacity", "message": "Вместимость кабинета недостаточна"}
                 )
@@ -1941,6 +1959,7 @@ def create_learning_router(
                 "subject_id": existing.subject_id,
                 "teacher_id": existing.teacher_id,
                 "room_id": existing.room_id,
+                "delivery_mode": existing.delivery_mode,
                 "group_id": existing.group_id,
                 "start_at": existing.start_at.isoformat(),
                 "end_at": existing.end_at.isoformat(),
@@ -1960,6 +1979,7 @@ def create_learning_router(
                             "subject_id": payload.subject_id,
                             "teacher_id": payload.teacher_id,
                             "room_id": payload.room_id,
+                            "delivery_mode": payload.delivery_mode,
                             "group_id": payload.group_id,
                             "start_at": _aware(payload.start_at).isoformat(),
                             "end_at": _aware(payload.end_at).isoformat(),
@@ -1990,6 +2010,7 @@ def create_learning_router(
                 subject_id=payload.subject_id,
                 teacher_id=payload.teacher_id,
                 room_id=payload.room_id,
+                delivery_mode=payload.delivery_mode,
                 group_id=payload.group_id,
                 starts_at=_aware(payload.starts_at),
                 duration_minutes=payload.duration_minutes,
@@ -2005,6 +2026,7 @@ def create_learning_router(
                     subject_id=payload.subject_id,
                     teacher_id=payload.teacher_id,
                     room_id=payload.room_id,
+                    delivery_mode=payload.delivery_mode,
                     group_id=payload.group_id,
                     start_at=start,
                     end_at=start + timedelta(minutes=payload.duration_minutes),
@@ -2087,6 +2109,7 @@ def create_learning_router(
             series.subject_id = payload.subject_id
             series.teacher_id = payload.teacher_id
             series.room_id = payload.room_id
+            series.delivery_mode = payload.delivery_mode
             series.group_id = payload.group_id
             base_start = requested_start
             if payload.scope == "all" and anchor is not None and all_lessons:
@@ -2114,6 +2137,7 @@ def create_learning_router(
                     subject_id=payload.subject_id,
                     teacher_id=payload.teacher_id,
                     room_id=payload.room_id,
+                    delivery_mode=payload.delivery_mode,
                     group_id=payload.group_id,
                     start_at=start,
                     end_at=start + timedelta(minutes=payload.duration_minutes),
@@ -3009,8 +3033,14 @@ def create_learning_router(
                     LessonParticipant.attendance_status != "excused",
                 )
             )
-            room = await session.get(Room, lesson.room_id)
-            if room is None or int(count or 0) >= room.capacity:
+            room = (
+                await session.get(Room, lesson.room_id)
+                if lesson.delivery_mode == "offline"
+                else None
+            )
+            if lesson.delivery_mode == "offline" and (
+                room is None or int(count or 0) >= room.capacity
+            ):
                 raise HTTPException(409, "Вместимость кабинета недостаточна")
             conflicts = await _conflicts(
                 session,
@@ -3198,14 +3228,20 @@ def create_learning_router(
                 )
             elif state == "expected" and lesson is not None:
                 apply_attendance_state(participant, "expected")
-                room = await session.get(Room, lesson.room_id)
+                room = (
+                    await session.get(Room, lesson.room_id)
+                    if lesson.delivery_mode == "offline"
+                    else None
+                )
                 active_count = await session.scalar(
                     select(func.count(LessonParticipant.id)).where(
                         LessonParticipant.lesson_id == lesson_id,
                         LessonParticipant.attendance_status != "excused",
                     )
                 )
-                if room is None or int(active_count or 0) > room.capacity:
+                if lesson.delivery_mode == "offline" and (
+                    room is None or int(active_count or 0) > room.capacity
+                ):
                     raise HTTPException(409, "Вместимость кабинета недостаточна")
                 conflicts = await _conflicts(
                     session,
@@ -3776,6 +3812,7 @@ def create_learning_router(
                             "actual_end_at",
                             "status",
                             "cancelled_reason",
+                            "delivery_mode",
                             "subject_name_snapshot",
                             "teacher_name_snapshot",
                             "room_name_snapshot",
@@ -3841,6 +3878,7 @@ def create_learning_router(
                             "end_at",
                             "status",
                             "cancelled_reason",
+                            "delivery_mode",
                             "subject_name_snapshot",
                             "teacher_name_snapshot",
                             "room_name_snapshot",
@@ -3881,6 +3919,7 @@ def create_learning_router(
                         "actual_end_at",
                         "status",
                         "cancelled_reason",
+                        "delivery_mode",
                         "subject_name_snapshot",
                         "teacher_name_snapshot",
                         "room_name_snapshot",
@@ -3966,6 +4005,7 @@ def create_learning_router(
                         "actual_start_at",
                         "actual_end_at",
                         "status",
+                        "delivery_mode",
                         "subject_name_snapshot",
                         "teacher_name_snapshot",
                         "room_name_snapshot",
@@ -4042,6 +4082,7 @@ def create_learning_router(
         duration_minutes: int = Query(60, ge=5, le=480),
         teacher_id: int | None = None,
         room_id: int | None = None,
+        delivery_mode: Literal["offline", "online"] = "offline",
         student_ids: Annotated[list[int] | None, Query()] = None,
         timezone_offset_minutes: int = Query(default=300, ge=-720, le=840),
     ) -> list[dict[str, Any]]:
@@ -4053,10 +4094,13 @@ def create_learning_router(
         end = datetime.combine(day, time(21), tzinfo=tz).astimezone(UTC)
         now = utcnow()
         async with sessions() as session:
-            room_query = select(Room).where(Room.active.is_(True))
-            if room_id is not None:
-                room_query = room_query.where(Room.id == room_id)
-            rooms = list((await session.scalars(room_query.order_by(Room.name))).all())
+            if delivery_mode == "online":
+                rooms: list[Room | None] = [None]
+            else:
+                room_query = select(Room).where(Room.active.is_(True))
+                if room_id is not None:
+                    room_query = room_query.where(Room.id == room_id)
+                rooms = list((await session.scalars(room_query.order_by(Room.name))).all())
             busy = list(
                 (
                     await session.scalars(
@@ -4116,7 +4160,7 @@ def create_learning_router(
         while cursor + duration <= end:
             candidate_end = cursor + duration
             for room in rooms:
-                if room.capacity < len(selected_students):
+                if room is not None and room.capacity < len(selected_students):
                     continue
                 conflict = False
                 for lesson in busy:
@@ -4141,7 +4185,7 @@ def create_learning_router(
                     if not planned_overlap and not factual_overlap:
                         continue
                     lesson_people = participants_by_lesson.get(lesson.id, set())
-                    if lesson.room_id == room.id:
+                    if room is not None and lesson.room_id == room.id:
                         conflict = True
                     if teacher_id is not None and (
                         lesson.teacher_id == teacher_id
@@ -4162,8 +4206,9 @@ def create_learning_router(
                         {
                             "start_at": cursor,
                             "end_at": candidate_end,
-                            "room_id": room.id,
-                            "room_name": room.name,
+                            "room_id": room.id if room is not None else None,
+                            "room_name": room.name if room is not None else "Онлайн",
+                            "delivery_mode": delivery_mode,
                         }
                     )
             cursor += timedelta(minutes=30)

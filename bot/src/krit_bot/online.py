@@ -312,10 +312,18 @@ async def _lesson_role(
             LessonParticipant.lesson_id == lesson.id,
             LessonParticipant.person_id == person_id,
             LessonParticipant.cancelled_at.is_(None),
+            LessonParticipant.attendance_status != "excused",
         )
     )
     if participant is not None:
         return "student"
+    participant_count = await session.scalar(
+        select(func.count(LessonParticipant.id)).where(
+            LessonParticipant.lesson_id == lesson.id
+        )
+    )
+    if int(participant_count or 0) > 0:
+        return None
     if lesson.group_id is None:
         return None
     at = _aware(lesson.start_at)
@@ -337,7 +345,11 @@ async def _room_access(
     if room is None:
         raise HTTPException(404, "Онлайн-занятие не найдено")
     lesson = await session.get(Lesson, room.lesson_id)
-    if lesson is None:
+    if (
+        lesson is None
+        or lesson.delivery_mode != "online"
+        or lesson.status == "cancelled"
+    ):
         raise HTTPException(404, "Занятие не найдено")
     role = await _lesson_role(session, principal.person.id, lesson)
     if role is None:
@@ -1077,6 +1089,8 @@ def create_online_router(
             .where(
                 Lesson.start_at >= start,
                 Lesson.start_at < end,
+                Lesson.delivery_mode == "online",
+                Lesson.status != "cancelled",
                 or_(Lesson.teacher_id == current.person.id, Lesson.id.in_(participant_lessons)),
             )
             .order_by(Lesson.start_at)
@@ -1105,6 +1119,7 @@ def create_online_router(
                     "start_at": item.start_at,
                     "end_at": item.end_at,
                     "status": item.status,
+                    "delivery_mode": item.delivery_mode,
                     "online_room": (
                         {"id": rooms[item.id].id, "status": rooms[item.id].status}
                         if item.id in rooms
@@ -1133,6 +1148,12 @@ def create_online_router(
             lesson_role = await _lesson_role(session, current.person.id, lesson) if lesson else None
             if lesson is None or lesson_role != "teacher":
                 raise HTTPException(404, "Занятие не найдено")
+            if lesson.delivery_mode != "online" or lesson.status not in {
+                "planned",
+                "scheduled",
+                "in_progress",
+            }:
+                raise HTTPException(409, "Онлайн-комната доступна только для онлайн-занятия")
             existing = await session.scalar(
                 select(OnlineLessonSession).where(OnlineLessonSession.lesson_id == lesson_id)
             )

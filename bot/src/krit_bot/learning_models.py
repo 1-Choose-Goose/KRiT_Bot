@@ -109,7 +109,12 @@ class GroupMembership(Base):
 
 class LessonSeries(Base):
     __tablename__ = "learning_lesson_series"
-    __table_args__ = (CheckConstraint("interval_weeks > 0", name="ck_series_interval_positive"),)
+    __table_args__ = (
+        CheckConstraint("interval_weeks > 0", name="ck_series_interval_positive"),
+        CheckConstraint(
+            "delivery_mode IN ('offline','online')", name="ck_series_delivery_mode"
+        ),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     subject_id: Mapped[int] = mapped_column(
         ForeignKey("learning_subjects.id", ondelete="RESTRICT"), index=True
@@ -117,8 +122,11 @@ class LessonSeries(Base):
     teacher_id: Mapped[int] = mapped_column(
         ForeignKey("persons.id", ondelete="RESTRICT"), index=True
     )
-    room_id: Mapped[int] = mapped_column(
+    room_id: Mapped[int | None] = mapped_column(
         ForeignKey("learning_rooms.id", ondelete="RESTRICT"), index=True
+    )
+    delivery_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="offline", server_default="offline"
     )
     group_id: Mapped[int | None] = mapped_column(
         ForeignKey("learning_groups.id", ondelete="SET NULL"), index=True
@@ -144,6 +152,9 @@ class Lesson(Base):
             "status IN ('planned','scheduled','in_progress','completed','cancelled')",
             name="ck_lesson_status",
         ),
+        CheckConstraint(
+            "delivery_mode IN ('offline','online')", name="ck_lesson_delivery_mode"
+        ),
         Index("ix_lesson_room_period", "room_id", "start_at", "end_at"),
         Index("ix_lesson_teacher_period", "teacher_id", "start_at", "end_at"),
         Index("ix_lesson_status_start", "status", "start_at"),
@@ -161,8 +172,11 @@ class Lesson(Base):
     teacher_id: Mapped[int] = mapped_column(
         ForeignKey("persons.id", ondelete="RESTRICT"), index=True
     )
-    room_id: Mapped[int] = mapped_column(
+    room_id: Mapped[int | None] = mapped_column(
         ForeignKey("learning_rooms.id", ondelete="RESTRICT"), index=True
+    )
+    delivery_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="offline", server_default="offline"
     )
     group_id: Mapped[int | None] = mapped_column(
         ForeignKey("learning_groups.id", ondelete="SET NULL"), index=True
