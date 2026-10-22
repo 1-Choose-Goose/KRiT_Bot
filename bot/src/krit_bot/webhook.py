@@ -27,7 +27,11 @@ from .administration import create_administration_router
 from .auth import AdminPrincipal, decode_access_token, issue_access_token, normalize_admin_username
 from .backup_exports import BackupExportService, create_backup_export_router
 from .communication_models import CommunicationMessage, MaxRegistrationPending
-from .communications import create_communications_router, run_communications_maintenance
+from .communications import (
+    create_communications_router,
+    ensure_default_rules,
+    run_communications_maintenance,
+)
 from .config import Settings
 from .db import (
     EXPECTED_ALEMBIC_REVISION,
@@ -806,6 +810,13 @@ def create_app(
         nonlocal online_maintenance_task
         await ensure_schema(engine)
         await ensure_bootstrap_admin()
+        # Seed notification rules before any background worker can reconcile
+        # reminders. Otherwise two startup transactions may both observe an
+        # empty table and a stale transaction can restore an old default after
+        # an administrator has already changed that rule.
+        async with sessions() as session:
+            await ensure_default_rules(session)
+            await session.commit()
         await start_max_workers()
         await reset_online_presence(sessions)
         online_maintenance_task = asyncio.create_task(
