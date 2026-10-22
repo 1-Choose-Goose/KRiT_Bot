@@ -122,7 +122,7 @@ async def test_online_auth_uses_verified_max_identity_and_one_time_code(
             )
             assert requested.status_code == 202
             assert requested.json()["expires_in"] == 300
-            assert "КРиТ — вход в онлайн-занятие" in sent[5001]
+            assert "🔐 Код для входа в онлайн-занятие" in sent[5001]
             code = re.search(r"\b(\d{6})\b", sent[5001]).group(1)
 
             wrong = await client.post(

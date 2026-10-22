@@ -340,6 +340,7 @@ async def test_start_and_finish_notifications_are_role_specific_without_self_cop
             for job in jobs
         )
         assert any("Занятие началось" in job.payload["text"] for job in jobs)
+        assert all("(а)" not in job.payload["text"] for job in jobs)
         assert sum(job.event_type == "lesson_participant_started" for job in jobs) == 2
         assert any(
             job.event_type == "lesson_participant_started"
@@ -347,5 +348,5 @@ async def test_start_and_finish_notifications_are_role_specific_without_self_cop
             and job.payload.get("subject_person_id") == child.id
             for job in jobs
         )
-        assert any("Фактически:" in job.payload["text"] for job in jobs)
+        assert any("Время занятия:" in job.payload["text"] for job in jobs)
     await engine.dispose()

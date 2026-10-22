@@ -429,28 +429,24 @@ def apply_quiet_hours(
 def render_bundle(bundle: DailyBundle, *, confirmation: bool = False) -> str:
     multiple_lessons = len(bundle.lessons) > 1
     if bundle.recipient_context == "teacher":
-        heading = "Ваши занятия КРиТ" if multiple_lessons else "Ваше занятие КРиТ"
+        heading = "📅 Ваши занятия в «КРиТ»" if multiple_lessons else "📅 Ваше занятие в «КРиТ»"
         confirmation_text = (
-            "Пожалуйста, подтвердите, сможете ли вы провести занятия."
+            "Пожалуйста, подтвердите, сможете ли вы провести эти занятия."
             if multiple_lessons
             else "Пожалуйста, подтвердите, сможете ли вы провести занятие."
         )
     elif bundle.recipient_context == "guardian":
-        heading = (
-            f"{bundle.subject_name} записан(а) на занятия КРиТ"
-            if multiple_lessons
-            else f"{bundle.subject_name} записан(а) на занятие КРиТ"
-        )
+        heading = f"📅 Расписание: {bundle.subject_name}"
         confirmation_text = (
-            "Пожалуйста, подтвердите посещение занятий ребёнком."
+            "Пожалуйста, подтвердите, сможет ли ребёнок прийти на эти занятия."
             if multiple_lessons
             else "Пожалуйста, подтвердите, сможет ли ребёнок прийти."
         )
     else:
         heading = (
-            "Вы записан(а) на занятия КРиТ"
+            "📅 Ваши занятия в «КРиТ»"
             if multiple_lessons
-            else "Вы записан(а) на занятие КРиТ"
+            else "📅 Ваше занятие в «КРиТ»"
         )
         confirmation_text = (
             "Пожалуйста, подтвердите, сможете ли вы прийти на занятия."
@@ -461,12 +457,12 @@ def render_bundle(bundle: DailyBundle, *, confirmation: bool = False) -> str:
     blocks = []
     for lesson in bundle.lessons:
         lines = [
-            f"{lesson.start_at:%H:%M}–{lesson.end_at:%H:%M}",
-            lesson.subject,
+            f"Время: {lesson.start_at:%H:%M}–{lesson.end_at:%H:%M}",
+            f"Предмет: {lesson.subject}",
         ]
         if bundle.recipient_context != "teacher":
-            lines.append(lesson.teacher)
-        lines.append(lesson.room)
+            lines.append(f"Преподаватель: {lesson.teacher}")
+        lines.append(f"Место: {lesson.room}")
         if bundle.recipient_context == "teacher":
             lines.append(
                 "Ученики: " + ", ".join(lesson.students)
@@ -887,12 +883,12 @@ async def reconcile_confirmation_requests(
             [
                 {
                     "type": "callback",
-                    "text": "Буду",
+                    "text": "Смогу",
                     "payload": f"interaction:{request.id}:yes",
                 },
                 {
                     "type": "callback",
-                    "text": "Не буду",
+                    "text": "Не смогу",
                     "payload": f"interaction:{request.id}:no",
                 },
             ]
@@ -902,7 +898,7 @@ async def reconcile_confirmation_requests(
                 [
                     {
                         "type": "callback",
-                        "text": "По занятиям",
+                        "text": "Ответить по каждому",
                         "payload": f"interaction:{request.id}:partial",
                     }
                 ]
@@ -982,7 +978,7 @@ async def _enqueue_confirmation_follow_up(
         scheduled_at=scheduled,
         interaction_request_id=request.id,
         payload={
-            "text": "Напоминание: ответ по занятиям ещё не получен.\n\n" + request.question,
+            "text": "🔔 Напоминаем: мы пока не получили ваш ответ.\n\n" + request.question,
             "keyboard": keyboard,
             "lesson_ids": [item.id for item in bundle.lessons],
             "follow_up": True,
@@ -1511,15 +1507,15 @@ async def save_interaction_response(
     reason: str | None = None,
 ) -> InteractionResponse:
     if request.status not in {"active", "answered"}:
-        raise ValueError("Запрос больше не принимает ответы")
+        raise ValueError("Ответить на это сообщение уже нельзя")
     expires_at = request.expires_at
     if expires_at is not None and expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
     if expires_at is not None and expires_at < utcnow():
         request.status = "expired"
-        raise ValueError("Срок ответа истёк")
+        raise ValueError("Время для ответа уже закончилось")
     if respondent_person_id != request.recipient_person_id:
-        raise PermissionError("Этот запрос предназначен другому получателю")
+        raise PermissionError("Эта кнопка доступна только получателю сообщения")
     lesson_map = lesson_answers or {}
     links = list(
         (
@@ -1549,7 +1545,7 @@ async def save_interaction_response(
             <= now
             for value in lesson_starts
         ):
-            raise ValueError("Занятие уже началось, ответ больше не принимается")
+            raise ValueError("Занятие уже началось, поэтому изменить ответ нельзя")
     current = await session.scalar(
         select(InteractionResponse).where(
             InteractionResponse.request_id == request.id,
@@ -1832,25 +1828,25 @@ def _schedule_text(
     changed_items: list[tuple[dict[str, Any], dict[str, Any]]] | None = None,
     timezone: ZoneInfo | None = None,
 ) -> str:
-    heading = "Изменения в расписании" if changed else "Расписание опубликовано"
+    heading = "📅 Расписание обновилось" if changed else "📅 Расписание опубликовано"
     if changed:
         zone = timezone or ZoneInfo("UTC")
         lines: list[str] = []
         labels = {
-            "subject": "предмет",
-            "teacher": "преподаватель",
-            "room": "кабинет",
+            "subject": "Предмет",
+            "teacher": "Преподаватель",
+            "room": "Место",
         }
         for snapshot in added or []:
             start = datetime.fromisoformat(str(snapshot["start_at"])).astimezone(zone)
             end = datetime.fromisoformat(str(snapshot["end_at"])).astimezone(zone)
             lines.extend(
                 [
-                    "Добавлено занятие",
+                    "Новое занятие",
                     f"{start:%d.%m %H:%M}–{end:%H:%M}",
                     str(snapshot.get("subject") or "—"),
                     f"Преподаватель: {snapshot.get('teacher') or '—'}",
-                    f"Кабинет: {snapshot.get('room') or '—'}",
+                    f"Место: {snapshot.get('room') or '—'}",
                     "",
                 ]
             )
@@ -1862,7 +1858,7 @@ def _schedule_text(
             new_end = datetime.fromisoformat(str(new["end_at"])).astimezone(zone)
             if (old_start, old_end) != (start, new_end):
                 lines.append(
-                    f"время: {old_start:%d.%m %H:%M}–{old_end:%H:%M} → "
+                    f"Время: {old_start:%d.%m %H:%M}–{old_end:%H:%M} → "
                     f"{start:%d.%m %H:%M}–{new_end:%H:%M}"
                 )
             for field, label in labels.items():
@@ -1871,13 +1867,13 @@ def _schedule_text(
             old_students = set(old.get("students") or [])
             new_students = set(new.get("students") or [])
             if added := sorted(new_students - old_students):
-                lines.append("добавлены ученики: " + ", ".join(added))
+                lines.append("Добавлены ученики: " + ", ".join(added))
             if removed_students := sorted(old_students - new_students):
-                lines.append("исключены ученики: " + ", ".join(removed_students))
+                lines.append("Больше не участвуют: " + ", ".join(removed_students))
             lines.append("")
         for snapshot in removed or []:
             start = datetime.fromisoformat(str(snapshot["start_at"])).astimezone(zone)
-            lines.extend([f"{start:%d.%m %H:%M} · {snapshot['subject']}", "занятие исключено", ""])
+            lines.extend([f"{start:%d.%m %H:%M} · {snapshot['subject']}", "Занятие отменено", ""])
         return heading + "\n\n" + "\n".join(lines).strip()
     blocks = [render_bundle(bundle) for bundle in bundles]
     return heading + "\n\n" + "\n\n".join(blocks)
@@ -3185,10 +3181,10 @@ def create_communications_router(
                 )
             local_start = _db_utc(start_at).astimezone(timezone)
             question = (
-                "Повторный запрос подтверждения занятия\n"
+                "📅 Пожалуйста, подтвердите занятие\n\n"
                 f"{local_start:%d.%m.%Y %H:%M} · {lesson.subject_name_snapshot}\n"
                 f"Преподаватель: {lesson.teacher_name_snapshot}\n"
-                f"Кабинет: {lesson.room_name_snapshot}"
+                f"Место: {lesson.room_name_snapshot}"
             )
             if payload.recipient_context == "guardian":
                 question += f"\nУченик: {target['subject_name']}"
@@ -3199,7 +3195,7 @@ def create_communications_router(
                     if item["recipient_context"] == "student"
                 ]
                 question += "\nУченики: " + (
-                    ", ".join(student_names) if student_names else "нет"
+                    ", ".join(student_names) if student_names else "пока не назначены"
                 )
             request = InteractionRequest(
                 request_type="lesson_confirmation",
@@ -3224,12 +3220,12 @@ def create_communications_router(
                 [
                     {
                         "type": "callback",
-                        "text": "Буду",
+                        "text": "Смогу",
                         "payload": f"interaction:{request.id}:yes",
                     },
                     {
                         "type": "callback",
-                        "text": "Не буду",
+                        "text": "Не смогу",
                         "payload": f"interaction:{request.id}:no",
                     },
                 ]

@@ -787,19 +787,19 @@ async def _queue_lesson_state_notifications(
         if event in {"started", "participant_started"}:
             student_text = (
                 (
-                    "Вы приступили к занятию\n\n"
+                    "▶️ Вы присоединились к занятию\n\n"
                     if event == "participant_started"
-                    else "Занятие началось\n\n"
+                    else "▶️ Занятие началось\n\n"
                 )
                 + f"Предмет: {lesson.subject_name_snapshot}\n"
                 f"Преподаватель: {lesson.teacher_name_snapshot}\n"
-                f"Кабинет: {lesson.room_name_snapshot}"
+                f"Место: {lesson.room_name_snapshot}"
             )
         else:
             heading = (
-                "Занятие завершено досрочно"
+                "✅ Занятие завершено раньше"
                 if lesson.completion_type == "early"
-                else "Занятие завершено"
+                else "✅ Занятие завершено"
             )
             public_comment = (
                 f"\nКомментарий: {lesson.completion_public_comment}"
@@ -808,27 +808,26 @@ async def _queue_lesson_state_notifications(
             )
             student_text = (
                 f"{heading}\n\n"
-                f"{lesson.subject_name_snapshot}\n"
+                f"Предмет: {lesson.subject_name_snapshot}\n"
                 f"Преподаватель: {lesson.teacher_name_snapshot}\n"
-                f"Фактически: {actual_start:%H:%M}–{actual_end:%H:%M}"
+                f"Время занятия: {actual_start:%H:%M}–{actual_end:%H:%M}"
                 f"{public_comment}"
             )
         jobs = [(f"student:{person.id}", person.id, "student", student_text)]
-        name_parts = person.full_name.split()
-        first_name = name_parts[1] if len(name_parts) > 1 else person.full_name
         for guardian_id in guardians.get(person.id, set()):
             if event in {"started", "participant_started"}:
                 text_value = (
-                    f"{first_name} приступил(а) к занятию.\n\n"
+                    f"▶️ Началось занятие\n\n"
+                    f"Ученик: {person.full_name}\n"
                     f"Предмет: {lesson.subject_name_snapshot}\n"
                     f"Преподаватель: {lesson.teacher_name_snapshot}\n"
-                    f"Кабинет: {lesson.room_name_snapshot}"
+                    f"Место: {lesson.room_name_snapshot}"
                 )
             else:
                 heading = (
-                    f"Занятие {first_name} завершено досрочно."
+                    "✅ Занятие завершено раньше"
                     if lesson.completion_type == "early"
-                    else f"Занятие {first_name} завершено."
+                    else "✅ Занятие завершено"
                 )
                 public_comment = (
                     f"\nКомментарий: {lesson.completion_public_comment}"
@@ -837,9 +836,10 @@ async def _queue_lesson_state_notifications(
                 )
                 text_value = (
                     f"{heading}\n\n"
-                    f"{lesson.subject_name_snapshot}\n"
+                    f"Ученик: {person.full_name}\n"
+                    f"Предмет: {lesson.subject_name_snapshot}\n"
                     f"Преподаватель: {lesson.teacher_name_snapshot}\n"
-                    f"Фактически: {actual_start:%H:%M}–{actual_end:%H:%M}"
+                    f"Время занятия: {actual_start:%H:%M}–{actual_end:%H:%M}"
                     f"{public_comment}"
                 )
             jobs.append(
@@ -886,7 +886,7 @@ async def _queue_guardian_event(
             )
         ).all()
     )
-    verb = "прибыл(а) в КРиТ" if event_type == "arrival" else "покинул(а) КРиТ"
+    event_label = "Приход в «КРиТ»" if event_type == "arrival" else "Уход из «КРиТ»"
     local_occurred = occurred_at.astimezone(_display_timezone(center_timezone))
     for guardian_id in guardian_ids:
         key = f"presence:{event_type}:{person.id}:{occurred_at.isoformat()}:person:{guardian_id}"
@@ -902,8 +902,10 @@ async def _queue_guardian_event(
             subject_person_id=person.id,
             scheduled_at=occurred_at,
             text_value=(
-                f"{person.full_name} {verb}\n\n"
-                f"{local_occurred:%d.%m.%Y}\n{local_occurred:%H:%M}"
+                f"📍 {event_label}\n\n"
+                f"Ученик: {person.full_name}\n"
+                f"Дата: {local_occurred:%d.%m.%Y}\n"
+                f"Время: {local_occurred:%H:%M}"
             ),
             center_timezone=center_timezone,
         )
@@ -2663,10 +2665,10 @@ def create_learning_router(
                 subject_person_id=replacement.id,
                 scheduled_at=replacement_at,
                 text_value=(
-                    "Вам назначена замена.\n\n"
-                    f"{lesson.subject_name_snapshot}\n"
-                    f"Сегодня до {local_end:%H:%M}\n"
-                    f"Кабинет: {lesson.room_name_snapshot}\n\n"
+                    "🔄 Вы проведёте занятие вместо другого преподавателя\n\n"
+                    f"Предмет: {lesson.subject_name_snapshot}\n"
+                    f"Сегодня до: {local_end:%H:%M}\n"
+                    f"Место: {lesson.room_name_snapshot}\n\n"
                     f"Ученики:\n{students_text}"
                 ),
                 center_timezone=center_timezone,
@@ -2765,9 +2767,10 @@ def create_learning_router(
                     recipient_context=delivery.recipient_context,
                     subject_person_id=delivery.subject_person_id,
                     text_value=(
-                        f"Занятие «{item.subject_name_snapshot}» "
-                        f"{local_start:%d.%m в %H:%M} "
-                        f"отменено. Причина: {payload.reason}"
+                        "❌ Занятие отменено\n\n"
+                        f"Предмет: {item.subject_name_snapshot}\n"
+                        f"Дата и время: {local_start:%d.%m в %H:%M}\n"
+                        f"Причина: {payload.reason}"
                     ),
                     center_timezone=center_timezone,
                 )
@@ -3080,8 +3083,9 @@ def create_learning_router(
             await _queue_lesson_notifications(session, lesson, [participant], center_timezone)
             local_start = _db_utc(lesson.start_at).astimezone(_display_timezone(center_timezone))
             event_text = (
-                f"Вы добавлены на занятие «{lesson.subject_name_snapshot}» "
-                f"{local_start:%d.%m в %H:%M}."
+                "📅 Вас добавили на занятие\n\n"
+                f"Предмет: {lesson.subject_name_snapshot}\n"
+                f"Дата и время: {local_start:%d.%m в %H:%M}"
             )
             await _queue_communication_event(
                 session,
@@ -3117,8 +3121,10 @@ def create_learning_router(
                     recipient_context="guardian",
                     subject_person_id=person.id,
                     text_value=(
-                        f"{person.full_name} добавлен(а) на занятие "
-                        f"«{lesson.subject_name_snapshot}»."
+                        "📅 Новое занятие в расписании\n\n"
+                        f"Ученик: {person.full_name}\n"
+                        f"Предмет: {lesson.subject_name_snapshot}\n"
+                        f"Дата и время: {local_start:%d.%m в %H:%M}"
                     ),
                     center_timezone=center_timezone,
                 )
@@ -3276,8 +3282,16 @@ def create_learning_router(
             notification_event = (
                 "participant_removed" if state == "excused" else "participant_added"
             )
-            state_text = f"Участие в занятии «{lesson.subject_name_snapshot}» " + (
-                "отменено." if state == "excused" else "восстановлено."
+            local_start = _db_utc(lesson.start_at).astimezone(
+                _display_timezone(center_timezone)
+            )
+            state_text = (
+                "❌ Участие в занятии отменено\n\n"
+                if state == "excused"
+                else "✅ Участие в занятии восстановлено\n\n"
+            ) + (
+                f"Предмет: {lesson.subject_name_snapshot}\n"
+                f"Дата и время: {local_start:%d.%m в %H:%M}"
             )
             await _queue_communication_event(
                 session,
@@ -3315,7 +3329,9 @@ def create_learning_router(
                     recipient_person_id=guardian_id,
                     recipient_context="guardian",
                     subject_person_id=person_id,
-                    text_value=state_text,
+                    text_value=(
+                        f"{state_text}\nУченик: {participant.person_name_snapshot}"
+                    ),
                     center_timezone=center_timezone,
                 )
             session.add(

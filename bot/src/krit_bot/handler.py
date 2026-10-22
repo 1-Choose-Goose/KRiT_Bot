@@ -34,20 +34,24 @@ from .max_api import MaxApiClient, MaxApiError
 log = structlog.get_logger()
 
 AUTHORIZATION_CONTACT_PROMPT = (
-    "Для авторизации нажмите кнопку «Поделиться номером». "
-    "Отправьте номер телефона, привязанный к вашему аккаунту MAX "
-    "и указанный при записи в «КРиТ»."
+    "👋 Добро пожаловать в «КРиТ»!\n\n"
+    "Чтобы подключить бота, нажмите «Поделиться номером». "
+    "Используйте номер, который вы сообщили администратору при записи."
 )
 ARCHIVED_ACCESS_MESSAGE = (
-    "Доступ к боту приостановлен. Обратитесь к администратору «КРиТ»."
+    "Доступ к боту сейчас закрыт.\n\n"
+    "Пожалуйста, свяжитесь с администратором «КРиТ» — он поможет восстановить доступ."
 )
-ARCHIVED_ACCESS_NOTIFICATION = "Доступ к боту приостановлен"
-REGISTRATION_SUCCESS_MESSAGE = "Авторизация завершена. Добро пожаловать в «КРиТ»!"
+ARCHIVED_ACCESS_NOTIFICATION = "Доступ сейчас закрыт"
+REGISTRATION_SUCCESS_MESSAGE = (
+    "✅ Всё готово! Бот «КРиТ» подключён.\n\n"
+    "Теперь вы будете получать важные сообщения о занятиях."
+)
 SUBSCRIPTION_PROMPT_TEXT = (
-    "Для завершения регистрации подпишитесь на канал КРиТ, "
-    "затем нажмите «Проверить подписку»."
+    "Остался один шаг 👇\n\n"
+    "Подпишитесь на канал «КРиТ», затем нажмите «Проверить подписку»."
 )
-SUBSCRIPTION_CONFIRMED_MESSAGE = "Подписка подтверждена. Авторизация завершена."
+SUBSCRIPTION_CONFIRMED_MESSAGE = "✅ Подписка подтверждена. Бот подключён!"
 REGISTRATION_AUTOMATIC_CHECK_OFFSETS = tuple(
     timedelta(minutes=minutes) for minutes in (1, 2, 5, 10, 15)
 )
@@ -544,7 +548,10 @@ class EchoHandler:
             await session.commit()
             await self._api.send_text(
                 user_id=user_id,
-                text="Доступ к боту отключён. Обратитесь к администратору.",
+                text=(
+                    "Доступ к боту сейчас закрыт.\n\n"
+                    "Пожалуйста, свяжитесь с администратором «КРиТ» — он поможет."
+                ),
             )
             return True
         if pending is None or pending.status != "pending":
@@ -612,7 +619,7 @@ class EchoHandler:
                         return
                     await self._api.send_text(
                         user_id=started_user.user_id,
-                        text="Вы уже авторизованы в «КРиТ».",
+                        text="✅ Бот «КРиТ» уже подключён. Всё готово к работе!",
                     )
                     return
                 if await self._handle_known_registration_state(
@@ -698,7 +705,7 @@ class EchoHandler:
                 if reason_saved:
                     await self._api.send_text(
                         user_id=incoming.user_id,
-                        text="Спасибо! Причина сохранена.",
+                        text="Спасибо! Причина записана.",
                     )
                 return
 
@@ -807,11 +814,13 @@ class EchoHandler:
 
                 await session.commit()
                 message = (
-                    "Этот номер уже привязан к другому аккаунту MAX. Обратитесь к администратору."
+                    "Этот номер уже связан с другим аккаунтом MAX.\n\n"
+                    "Пожалуйста, свяжитесь с администратором «КРиТ» — он поможет обновить данные."
                     if result == "belongs_to_another_user"
                     else (
-                        "Номер не найден в базе «КРиТ». "
-                        "Для регистрации обратитесь к администратору."
+                        "Мы не нашли этот номер среди клиентов «КРиТ».\n\n"
+                        "Пожалуйста, свяжитесь с администратором — он проверит данные "
+                        "и поможет подключить бота."
                     )
                 )
                 await self._api.send_text(user_id=incoming.user_id, text=message)
@@ -876,7 +885,7 @@ class EchoHandler:
             ):
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
-                    notification="Сначала подтвердите подписку на канал",
+                    notification="Сначала подпишитесь на канал «КРиТ»",
                 )
                 return
             pending, person = await self._registration_context(
@@ -898,7 +907,7 @@ class EchoHandler:
                     await session.commit()
                     await self._api.answer_callback(
                         callback_id=callback.callback_id,
-                        notification="Сначала подтвердите подписку на канал",
+                        notification="Сначала подпишитесь на канал «КРиТ»",
                     )
                     await self._send_subscription_prompt(callback.user_id)
                     return
@@ -929,7 +938,7 @@ class EchoHandler:
         ):
             await self._api.answer_callback(
                 callback_id=callback.callback_id,
-                notification="Кнопка больше не поддерживается",
+                notification="Эта кнопка уже не действует",
             )
             return
         async with self._sessions() as session:
@@ -941,7 +950,7 @@ class EchoHandler:
                 await session.commit()
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
-                    notification="Доступ к боту отключён. Обратитесь к администратору.",
+                    notification="Доступ закрыт. Обратитесь к администратору «КРиТ»",
                 )
                 return
             request = await session.get(InteractionRequest, request_id)
@@ -949,7 +958,7 @@ class EchoHandler:
                 await session.commit()
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
-                    notification="Этот запрос предназначен другому получателю",
+                    notification="Эта кнопка доступна только получателю сообщения",
                 )
                 return
             try:
@@ -988,14 +997,14 @@ class EchoHandler:
                         [
                             {
                                 "type": "callback",
-                                "text": f"Да · {lesson.start_at:%H:%M}",
+                                "text": f"Смогу · {lesson.start_at:%H:%M}",
                                 "payload": (
                                     f"interaction:{request.id}:lesson:{lesson_id}:yes"
                                 ),
                             },
                             {
                                 "type": "callback",
-                                "text": f"Нет · {lesson.start_at:%H:%M}",
+                                "text": f"Не смогу · {lesson.start_at:%H:%M}",
                                 "payload": (
                                     f"interaction:{request.id}:lesson:{lesson_id}:no"
                                 ),
@@ -1044,7 +1053,7 @@ class EchoHandler:
         if answer == "no":
             await self._api.send_text(
                 user_id=callback.user_id,
-                text="Хотите указать причину отсутствия?",
+                text="Хотите сообщить, почему не сможете прийти?",
                 attachments=[
                     {
                         "type": "inline_keyboard",
@@ -1053,12 +1062,12 @@ class EchoHandler:
                                 [
                                     {
                                         "type": "callback",
-                                        "text": "Указать",
+                                        "text": "Написать причину",
                                         "payload": f"reason:{request.id}:write",
                                     },
                                     {
                                         "type": "callback",
-                                        "text": "Пропустить",
+                                        "text": "Не указывать",
                                         "payload": f"reason:{request.id}:skip",
                                     },
                                 ]
@@ -1069,7 +1078,7 @@ class EchoHandler:
             )
         await self._api.answer_callback(
             callback_id=callback.callback_id,
-            notification="Ответ сохранён",
+            notification="Спасибо! Ответ сохранён",
             message=callback_message,
         )
 
@@ -1082,14 +1091,14 @@ class EchoHandler:
                 await session.commit()
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
-                    notification="Доступ к боту отключён. Обратитесь к администратору.",
+                    notification="Доступ закрыт. Обратитесь к администратору «КРиТ»",
                 )
                 return
             request = await session.get(InteractionRequest, request_id)
             if request is None or request.recipient_person_id != person_id:
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
-                    notification="Этот запрос предназначен другому получателю",
+                    notification="Эта кнопка доступна только получателю сообщения",
                 )
                 return
             await record_message(
@@ -1111,19 +1120,19 @@ class EchoHandler:
             ).all()
             await session.commit()
         buttons = []
-        lines = ["Отметьте каждое занятие:"]
+        lines = ["📅 Ответьте по каждому занятию:"]
         for lesson_id, lesson in rows:
             lines.append(f"{lesson.subject_name_snapshot} · {lesson.start_at:%d.%m %H:%M}")
             buttons.append(
                 [
                     {
                         "type": "callback",
-                        "text": f"Да · {lesson.start_at:%H:%M}",
+                        "text": f"Смогу · {lesson.start_at:%H:%M}",
                         "payload": f"interaction:{request_id}:lesson:{lesson_id}:yes",
                     },
                     {
                         "type": "callback",
-                        "text": f"Нет · {lesson.start_at:%H:%M}",
+                        "text": f"Не смогу · {lesson.start_at:%H:%M}",
                         "payload": f"interaction:{request_id}:lesson:{lesson_id}:no",
                     },
                 ]
@@ -1135,7 +1144,7 @@ class EchoHandler:
         )
         await self._api.answer_callback(
             callback_id=callback.callback_id,
-            notification="Выберите ответ по каждому занятию",
+            notification="Выберите ответ для каждого занятия",
             message=_callback_message_without_keyboard(callback),
         )
 
@@ -1150,14 +1159,14 @@ class EchoHandler:
                 await session.commit()
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
-                    notification="Доступ к боту отключён. Обратитесь к администратору.",
+                    notification="Доступ закрыт. Обратитесь к администратору «КРиТ»",
                 )
                 return
             request = await session.get(InteractionRequest, request_id)
             if request is None or request.recipient_person_id != person_id:
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
-                    notification="Этот запрос предназначен другому получателю",
+                    notification="Эта кнопка доступна только получателю сообщения",
                 )
                 return
             request.expects_reason_from_person_id = person_id if action == "write" else None
@@ -1179,9 +1188,9 @@ class EchoHandler:
         await self._api.answer_callback(
             callback_id=callback.callback_id,
             notification=(
-                "Напишите причину следующим сообщением"
+                "Напишите причину одним сообщением"
                 if action == "write"
-                else "Ответ сохранён без причины"
+                else "Спасибо! Ответ сохранён"
             ),
             message=_callback_message_without_keyboard(callback),
         )
@@ -1223,13 +1232,13 @@ class EchoHandler:
                 if not subscribed:
                     await self._api.answer_callback(
                         callback_id=callback.callback_id,
-                        notification="Подписка пока не найдена",
+                        notification="Подписка пока не найдена. Попробуйте ещё раз",
                     )
                     await self._send_subscription_prompt(callback.user_id)
                     return
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
-                    notification="Подписка подтверждена",
+                    notification="Готово! Подписка подтверждена",
                     message={
                         "text": SUBSCRIPTION_CONFIRMED_MESSAGE,
                         "attachments": [],
@@ -1262,13 +1271,13 @@ class EchoHandler:
             ):
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
-                    notification="Снова отправьте контакт для регистрации",
+                    notification="Пожалуйста, снова поделитесь номером",
                 )
                 await self._api.request_contact(
                     user_id=callback.user_id,
                     text=(
-                        "Для продолжения регистрации повторно нажмите кнопку ниже "
-                        "и передайте номер телефона, привязанный к вашему аккаунту MAX."
+                        "Чтобы продолжить, ещё раз нажмите «Поделиться номером». "
+                        "Используйте номер, который вы сообщили администратору «КРиТ»."
                     ),
                 )
                 return
@@ -1277,7 +1286,7 @@ class EchoHandler:
                 await session.commit()
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
-                    notification="Подписка пока не найдена",
+                    notification="Подписка пока не найдена. Попробуйте ещё раз",
                 )
                 await self._send_subscription_prompt(callback.user_id)
                 return
@@ -1287,13 +1296,13 @@ class EchoHandler:
                 await session.commit()
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
-                    notification="Не удалось завершить регистрацию",
+                    notification="Не получилось подключить бота. Попробуйте ещё раз",
                 )
                 return
             await session.commit()
         await self._api.answer_callback(
             callback_id=callback.callback_id,
-            notification="Регистрация завершена",
+            notification="Готово! Бот подключён",
             message={
                 "text": SUBSCRIPTION_CONFIRMED_MESSAGE,
                 "attachments": [],

@@ -139,7 +139,7 @@ class LearningNotificationWorker:
                 from .communications import refresh_campaign_status
 
                 await refresh_campaign_status(session, job.campaign_id)
-            text = str(job.payload.get("text") or "Уведомление КРиТ")
+            text = str(job.payload.get("text") or "🔔 Сообщение от «КРиТ»")
             if job.payload.get("template") == "teacher_reminder" and job.lesson_id is not None:
                 student_names = list(
                     (
@@ -220,7 +220,7 @@ class LearningNotificationWorker:
                     session,
                     person_id=job.recipient_person_id,
                     direction="outbound",
-                    text=str(job.payload.get("text") or "Уведомление КРиТ"),
+                    text=str(job.payload.get("text") or "🔔 Сообщение от «КРиТ»"),
                     delivery_status="sent",
                     max_message_id=job.external_message_id,
                     outbox_job_id=job.id,

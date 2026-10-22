@@ -23,7 +23,16 @@ from krit_bot.db import (
     build_session_factory,
     utcnow,
 )
-from krit_bot.handler import EchoHandler, parse_message_callback, parse_message_created
+from krit_bot.handler import (
+    ARCHIVED_ACCESS_MESSAGE,
+    ARCHIVED_ACCESS_NOTIFICATION,
+    AUTHORIZATION_CONTACT_PROMPT,
+    REGISTRATION_SUCCESS_MESSAGE,
+    SUBSCRIPTION_CONFIRMED_MESSAGE,
+    EchoHandler,
+    parse_message_callback,
+    parse_message_created,
+)
 from krit_bot.learning_models import PersonMaxIdentity
 from krit_bot.max_api import WEBHOOK_UPDATE_TYPES
 from krit_bot.webhook import (
@@ -79,6 +88,21 @@ class FakeApi:
     ) -> dict:
         self.callback_answers.append((callback_id, notification, message))
         return {}
+
+
+def test_registration_copy_uses_plain_human_language() -> None:
+    messages = (
+        AUTHORIZATION_CONTACT_PROMPT,
+        ARCHIVED_ACCESS_MESSAGE,
+        REGISTRATION_SUCCESS_MESSAGE,
+        SUBSCRIPTION_CONFIRMED_MESSAGE,
+    )
+
+    assert "Поделиться номером" in AUTHORIZATION_CONTACT_PROMPT
+    assert "администратором" in ARCHIVED_ACCESS_MESSAGE
+    assert "Всё готово" in REGISTRATION_SUCCESS_MESSAGE
+    assert all("авторизац" not in message.lower() for message in messages)
+    assert all("регистрац" not in message.lower() for message in messages)
 
 
 def update(user_id: int, text: str = "Привет", mid: str = "m1") -> dict:
@@ -174,11 +198,7 @@ async def test_bot_started_immediately_requests_authorization() -> None:
     await handler.handle(bot_started_update(42))
 
     assert api.contact_requests == [42]
-    assert api.contact_request_texts == [
-        "Для авторизации нажмите кнопку «Поделиться номером». "
-        "Отправьте номер телефона, привязанный к вашему аккаунту MAX "
-        "и указанный при записи в «КРиТ»."
-    ]
+    assert api.contact_request_texts == [AUTHORIZATION_CONTACT_PROMPT]
     async with sessions() as session:
         attempt = await session.get(AccessAttempt, 42)
         assert attempt is not None
@@ -215,7 +235,7 @@ async def test_bot_started_confirms_existing_authorization() -> None:
 
     await handler.handle(bot_started_update(42))
 
-    assert api.sent == [(42, "Вы уже авторизованы в «КРиТ».")]
+    assert api.sent == [(42, "✅ Бот «КРиТ» уже подключён. Всё готово к работе!")]
     assert api.contact_requests == []
     await engine.dispose()
 
@@ -409,7 +429,7 @@ async def test_poll_button_with_root_user_saves_answer_and_acknowledges_callback
         assert thread is not None and thread.admin_unread_count == 0
     assert api.callback_answers[-1] == (
         "poll-yes",
-        "Ответ сохранён",
+        "Спасибо! Ответ сохранён",
         {"text": "Исходный текст опроса", "attachments": []},
     )
     await engine.dispose()
@@ -469,7 +489,7 @@ async def test_written_absence_reason_is_saved_and_acknowledged() -> None:
         )
         assert request is not None and request.expects_reason_from_person_id is None
         assert response is not None and response.reason == "Болит живот"
-    assert api.sent == [(42, "Спасибо! Причина сохранена.")]
+    assert api.sent == [(42, "Спасибо! Причина записана.")]
     await engine.dispose()
 
 
@@ -495,7 +515,7 @@ async def test_malformed_and_stale_callbacks_are_harmless() -> None:
     )
 
     assert api.callback_answers[:4] == [
-        (callback_id, "Кнопка больше не поддерживается", None)
+        (callback_id, "Эта кнопка уже не действует", None)
         for _payload, callback_id in malformed
     ]
     assert api.callback_answers[-1][0] == "stale"
@@ -554,7 +574,7 @@ async def test_disabled_person_cannot_answer_old_callback() -> None:
     assert api.callback_answers[-3:] == [
         (
             callback_id,
-            "Доступ к боту отключён. Обратитесь к администратору.",
+            "Доступ закрыт. Обратитесь к администратору «КРиТ»",
             None,
         )
         for callback_id in ("disabled", "disabled-partial", "disabled-reason")
@@ -623,7 +643,7 @@ async def test_verified_contact_links_user_once() -> None:
         assert identity is not None
         assert identity.max_user_id == 42
     assert api.sent == [
-        (42, "Авторизация завершена. Добро пожаловать в «КРиТ»!"),
+        (42, REGISTRATION_SUCCESS_MESSAGE),
     ]
     await engine.dispose()
 
@@ -641,7 +661,9 @@ async def test_unknown_contact_tells_user_to_contact_administrator() -> None:
     assert api.sent == [
         (
             42,
-            "Номер не найден в базе «КРиТ». Для регистрации обратитесь к администратору.",
+            "Мы не нашли этот номер среди клиентов «КРиТ».\n\n"
+            "Пожалуйста, свяжитесь с администратором — он проверит данные "
+            "и поможет подключить бота.",
         )
     ]
     async with sessions() as session:
@@ -684,10 +706,14 @@ async def test_registration_waits_for_required_channel_membership() -> None:
         prompt = await session.get(MaxSubscriptionPrompt, 42)
         assert prompt is not None and prompt.message_id == "sent-1"
         assert await session.get(PersonMaxIdentity, person_id) is None
-    assert "подпишитесь на канал" in api.sent[-1][1]
+    assert "подпишитесь на канал" in api.sent[-1][1].lower()
 
     await handler.handle(callback_update(42, "registration:check", "cb-missing"))
-    assert api.callback_answers[-1] == ("cb-missing", "Подписка пока не найдена", None)
+    assert api.callback_answers[-1] == (
+        "cb-missing",
+        "Подписка пока не найдена. Попробуйте ещё раз",
+        None,
+    )
 
     api.members.add(42)
     await handler.handle(callback_update(42, "registration:check", "cb-member"))
@@ -700,9 +726,9 @@ async def test_registration_waits_for_required_channel_membership() -> None:
         assert pending is not None and pending.status == "completed"
     assert api.callback_answers[-1] == (
         "cb-member",
-        "Регистрация завершена",
+        "Готово! Бот подключён",
         {
-            "text": "Подписка подтверждена. Авторизация завершена.",
+            "text": SUBSCRIPTION_CONFIRMED_MESSAGE,
             "attachments": [],
         },
     )
@@ -762,14 +788,12 @@ async def test_user_added_to_required_channel_completes_pending_registration() -
         assert pending is not None and pending.status == "completed"
         assert pending.next_automatic_check_at is None
         assert await session.get(MaxSubscriptionPrompt, 42) is None
-    assert api.sent[-1] == (42, "Авторизация завершена. Добро пожаловать в «КРиТ»!")
-    assert api.sent.count(
-        (42, "Авторизация завершена. Добро пожаловать в «КРиТ»!")
-    ) == 1
+    assert api.sent[-1] == (42, REGISTRATION_SUCCESS_MESSAGE)
+    assert api.sent.count((42, REGISTRATION_SUCCESS_MESSAGE)) == 1
     assert api.edited_messages == [
         (
             "sent-1",
-            "Подписка подтверждена. Авторизация завершена.",
+            SUBSCRIPTION_CONFIRMED_MESSAGE,
             [],
         )
     ]
@@ -847,7 +871,7 @@ async def test_pending_registration_automatic_checks_follow_required_schedule() 
     assert api.edited_messages == [
         (
             "sent-1",
-            "Подписка подтверждена. Авторизация завершена.",
+            SUBSCRIPTION_CONFIRMED_MESSAGE,
             [],
         )
     ]
@@ -884,7 +908,7 @@ async def test_unsubscribed_registration_repeats_prompt_for_every_interaction() 
     await handler.handle(callback_update(42, "registration:check", "cb-still-missing"))
 
     assert len(api.sent) == 4
-    assert all("подпишитесь на канал" in text for _, text in api.sent)
+    assert all("подпишитесь на канал" in text.lower() for _, text in api.sent)
     assert all(
         attachments
         and attachments[0]["payload"]["buttons"][-1][0]["payload"]
@@ -894,7 +918,7 @@ async def test_unsubscribed_registration_repeats_prompt_for_every_interaction() 
     assert api.contact_requests == []
     assert api.callback_answers[-1] == (
         "cb-still-missing",
-        "Подписка пока не найдена",
+        "Подписка пока не найдена. Попробуйте ещё раз",
         None,
     )
     assert [message_id for message_id, _, _ in api.edited_messages] == [
@@ -987,7 +1011,7 @@ async def test_authorized_user_must_restore_subscription_before_interacting() ->
     await handler.handle(callback_update(42, "registration:check", "cb-resubscribe-missing"))
 
     assert len(api.sent) == 2
-    assert all("подпишитесь на канал" in text for _, text in api.sent)
+    assert all("подпишитесь на канал" in text.lower() for _, text in api.sent)
     async with sessions() as session:
         identity = await session.get(PersonMaxIdentity, person_id)
         assert identity is not None
@@ -999,9 +1023,9 @@ async def test_authorized_user_must_restore_subscription_before_interacting() ->
 
     assert api.callback_answers[-1] == (
         "cb-resubscribed",
-        "Подписка подтверждена",
+        "Готово! Подписка подтверждена",
         {
-            "text": "Подписка подтверждена. Авторизация завершена.",
+            "text": SUBSCRIPTION_CONFIRMED_MESSAGE,
             "attachments": [],
         },
     )
@@ -1053,13 +1077,13 @@ async def test_archived_pending_client_is_not_registered_as_access_attempt_again
 
     assert api.contact_requests == []
     assert api.sent == [
-        (42, "Доступ к боту приостановлен. Обратитесь к администратору «КРиТ»."),
-        (42, "Доступ к боту приостановлен. Обратитесь к администратору «КРиТ»."),
-        (42, "Доступ к боту приостановлен. Обратитесь к администратору «КРиТ»."),
+        (42, ARCHIVED_ACCESS_MESSAGE),
+        (42, ARCHIVED_ACCESS_MESSAGE),
+        (42, ARCHIVED_ACCESS_MESSAGE),
     ]
     assert api.callback_answers[-1] == (
         "archived-callback",
-        "Доступ к боту приостановлен",
+        ARCHIVED_ACCESS_NOTIFICATION,
         None,
     )
     async with sessions() as session:
@@ -1097,8 +1121,8 @@ async def test_archived_legacy_max_id_is_not_registered_as_access_attempt_again(
 
     assert api.contact_requests == []
     assert api.sent == [
-        (42, "Доступ к боту приостановлен. Обратитесь к администратору «КРиТ»."),
-        (42, "Доступ к боту приостановлен. Обратитесь к администратору «КРиТ»."),
+        (42, ARCHIVED_ACCESS_MESSAGE),
+        (42, ARCHIVED_ACCESS_MESSAGE),
     ]
     async with sessions() as session:
         assert await session.get(AccessAttempt, 42) is None
@@ -1121,7 +1145,7 @@ async def test_registration_check_without_verified_phone_requests_contact_again(
 
     assert api.callback_answers[-1] == (
         "cb-no-phone",
-        "Снова отправьте контакт для регистрации",
+        "Пожалуйста, снова поделитесь номером",
         None,
     )
     assert api.contact_requests == [42]

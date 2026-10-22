@@ -99,14 +99,19 @@ def test_confirmation_messages_are_natural_for_every_recipient_context() -> None
     guardian = render_bundle(_message_bundle("guardian"), confirmation=True)
     teacher = render_bundle(_message_bundle("teacher"), confirmation=True)
 
-    assert student.startswith("Вы записан(а) на занятие КРиТ\n12.10.2026")
+    assert student.startswith("📅 Ваше занятие в «КРиТ»\n12.10.2026")
     assert student.endswith("Пожалуйста, подтвердите, сможете ли вы прийти.")
-    assert guardian.startswith(
-        "Пупкин Иван Пупкович записан(а) на занятие КРиТ\n12.10.2026"
-    )
+    assert guardian.startswith("📅 Расписание: Пупкин Иван Пупкович\n12.10.2026")
     assert guardian.endswith("Пожалуйста, подтвердите, сможет ли ребёнок прийти.")
-    assert teacher.startswith("Ваше занятие КРиТ\n12.10.2026")
+    assert teacher.startswith("📅 Ваше занятие в «КРиТ»\n12.10.2026")
     assert teacher.endswith("Пожалуйста, подтвердите, сможете ли вы провести занятие.")
+
+    for message in (student, guardian, teacher):
+        assert "(а)" not in message
+        assert "получатель" not in message.lower()
+        assert "запрос" not in message.lower()
+        assert "Время:" in message
+        assert "Предмет:" in message
 
 
 def test_confirmation_messages_use_plural_for_multiple_lessons() -> None:
@@ -120,12 +125,16 @@ def test_confirmation_messages_use_plural_for_multiple_lessons() -> None:
         _message_bundle("teacher", lessons_count=2), confirmation=True
     )
 
-    assert student.startswith("Вы записан(а) на занятия КРиТ")
+    assert student.startswith("📅 Ваши занятия в «КРиТ»")
     assert student.endswith("Пожалуйста, подтвердите, сможете ли вы прийти на занятия.")
-    assert guardian.startswith("Пупкин Иван Пупкович записан(а) на занятия КРиТ")
-    assert guardian.endswith("Пожалуйста, подтвердите посещение занятий ребёнком.")
-    assert teacher.startswith("Ваши занятия КРиТ")
-    assert teacher.endswith("Пожалуйста, подтвердите, сможете ли вы провести занятия.")
+    assert guardian.startswith("📅 Расписание: Пупкин Иван Пупкович")
+    assert guardian.endswith(
+        "Пожалуйста, подтвердите, сможет ли ребёнок прийти на эти занятия."
+    )
+    assert teacher.startswith("📅 Ваши занятия в «КРиТ»")
+    assert teacher.endswith(
+        "Пожалуйста, подтвердите, сможете ли вы провести эти занятия."
+    )
 
 
 async def test_schedule_publication_serializes_period_dates(tmp_path) -> None:
@@ -1210,8 +1219,8 @@ def test_schedule_diff_reports_semantic_changes() -> None:
     }
     text = _schedule_text([], changed=True, changed_items=[(old, new)], timezone=timezone)
     assert "05.10 18:00–19:00 → 05.10 19:00–20:00" in text
-    assert "кабинет: Кабинет 1 → Кабинет 2" in text
-    assert "добавлены ученики: Марина" in text
+    assert "Место: Кабинет 1 → Кабинет 2" in text
+    assert "Добавлены ученики: Марина" in text
 
 
 def test_added_lesson_text_is_specific_and_snapshots_are_recipient_safe() -> None:
@@ -1246,7 +1255,7 @@ def test_added_lesson_text_is_specific_and_snapshots_are_recipient_safe() -> Non
         added=[guardian_snapshot],
         timezone=timezone,
     )
-    assert "Добавлено занятие" in text
+    assert "Новое занятие" in text
     assert "05.10 10:00–11:00" in text
     assert "Информатика" in text
     assert "Олег Учитель" in text

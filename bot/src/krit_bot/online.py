@@ -953,11 +953,11 @@ def create_online_router(
             await session.commit()
             if person is not None and identity is not None and identity.max_user_id is not None:
                 message = (
-                    "КРиТ — вход в онлайн-занятие\n\n"
-                    f"Ваш код подтверждения: {code}\n\n"
-                    "Срок действия: 5 минут.\n\n"
-                    "Никому не сообщайте этот код.\n\n"
-                    "Если вы не запрашивали вход, проигнорируйте сообщение."
+                    "🔐 Код для входа в онлайн-занятие\n\n"
+                    f"Ваш код: {code}\n"
+                    "Он действует 5 минут.\n\n"
+                    "Никому не сообщайте код. Если вы не пытались войти, "
+                    "просто проигнорируйте это сообщение."
                 )
                 try:
                     await max_api.send_text(user_id=identity.max_user_id, text=message)
