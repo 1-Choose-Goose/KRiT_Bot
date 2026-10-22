@@ -112,7 +112,7 @@ async def test_max_button_callback_reaches_database_through_webhook(
     assert callback_answers == [
         (
             "real-button-click",
-            "Ответ сохранён",
+            "Спасибо! Ответ сохранён",
             {"text": "Вы придёте?", "attachments": []},
         )
     ]
