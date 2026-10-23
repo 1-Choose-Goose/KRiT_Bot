@@ -842,6 +842,51 @@ def test_lesson_editor_shows_participant_confirmation_and_resend_feedback() -> N
     app.processEvents()
 
 
+def test_lesson_editor_shows_teacher_confirmation_and_resend_feedback() -> None:
+    app = QApplication.instance() or QApplication([])
+    target = {
+        "recipient_context": "teacher",
+        "recipient_person_id": 9,
+        "subject_person_id": 9,
+        "recipient_name": "Куц Олег Олегович",
+        "answer": "yes",
+        "max_available": True,
+    }
+    dialog = LessonDialog(
+        {
+            "subjects": [],
+            "teachers": [{"id": 9, "full_name": "Куц Олег Олегович"}],
+            "rooms": [],
+            "groups": [],
+            "students": [],
+        },
+        {
+            "teacher_id": 9,
+            "participants": [],
+            "confirmation": {"state": "green", "rows": [target]},
+            "notes": None,
+        },
+    )
+    emitted: list[list[dict[str, object]]] = []
+    dialog.resend_confirmation_requested.connect(lambda rows: emitted.append(list(rows)))
+
+    status = dialog.findChild(QLabel, "teacherConfirmationStatus")
+    assert status is not None
+    assert status.text() == "Подтвердил"
+    assert "#16a34a" in status.styleSheet()
+    resend = dialog.findChild(QPushButton, "teacherConfirmationResend")
+    assert resend is not None
+    assert resend.isEnabled()
+
+    resend.click()
+
+    assert emitted == [[target]]
+    assert not resend.isEnabled()
+    assert resend.text() == "Отправлено"
+    dialog.deleteLater()
+    app.processEvents()
+
+
 def test_lesson_editor_replaces_confirmation_widget_without_leaving_duplicates() -> None:
     app = QApplication.instance() or QApplication([])
     dialog = LessonDialog(

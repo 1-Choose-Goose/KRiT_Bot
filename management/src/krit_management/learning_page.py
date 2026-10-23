@@ -689,8 +689,22 @@ class LessonDialog(QDialog):
         self.occurrences = QSpinBox()
         self.occurrences.setRange(2, 104)
         self.occurrences.setValue(4)
+        self.teacher_confirmation = QWidget()
+        self.teacher_confirmation.setObjectName("teacherConfirmation")
+        self.teacher_confirmation_layout = QHBoxLayout(self.teacher_confirmation)
+        self.teacher_confirmation_layout.setContentsMargins(0, 0, 0, 0)
+        self.teacher_confirmation_layout.setSpacing(8)
+        self.teacher_confirmation_status = QLabel()
+        self.teacher_confirmation_status.setObjectName("teacherConfirmationStatus")
+        self.teacher_confirmation_status.setAccessibleName(
+            "Статус подтверждения преподавателя"
+        )
+        self.teacher_confirmation_layout.addWidget(self.teacher_confirmation_status)
+        self.teacher_confirmation_layout.addStretch(1)
+        self.teacher_confirmation_resend: QPushButton | None = None
         form.addRow("Предмет", self.subject)
         form.addRow("Преподаватель", self.teacher)
+        form.addRow("Ответ преподавателя", self.teacher_confirmation)
         form.addRow("Кабинет", self.room)
         form.addRow("Группа", self.group)
         form.addRow("Длительность, мин", self.duration)
@@ -740,6 +754,7 @@ class LessonDialog(QDialog):
         self._refresh_group_participants()
         self.group.currentIndexChanged.connect(self._apply_group_defaults)
         self.teacher.currentIndexChanged.connect(self._refresh_group_participants)
+        self.teacher.currentIndexChanged.connect(self._render_teacher_confirmation)
         self.start.dateTimeChanged.connect(self._refresh_group_participants)
         self._student_selection_changed()
         buttons = QDialogButtonBox(
@@ -750,6 +765,90 @@ class LessonDialog(QDialog):
         buttons.accepted.connect(self._accept_if_valid)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _render_teacher_confirmation(self, _value: object = None) -> None:
+        if self.teacher_confirmation_resend is not None:
+            self.teacher_confirmation_layout.removeWidget(
+                self.teacher_confirmation_resend
+            )
+            self.teacher_confirmation_resend.deleteLater()
+            self.teacher_confirmation_resend = None
+
+        teacher_id = self.teacher.currentData()
+        original_teacher_id = self.lesson.get("teacher_id")
+        confirmation = self.lesson.get("confirmation")
+        target = None
+        if teacher_id is not None and teacher_id == original_teacher_id and isinstance(
+            confirmation, dict
+        ):
+            target = next(
+                (
+                    row
+                    for row in confirmation.get("rows", [])
+                    if row.get("recipient_context") == "teacher"
+                    and int(row.get("subject_person_id") or -1) == int(teacher_id)
+                ),
+                None,
+            )
+
+        if teacher_id is None:
+            label, color, tooltip = (
+                "Выберите преподавателя",
+                "#64748b",
+                "Сначала выберите преподавателя занятия",
+            )
+        elif target is None:
+            label, color, tooltip = (
+                "Запрос будет отправлен после сохранения",
+                "#64748b",
+                "Ответ появится после сохранения занятия и отправки запроса",
+            )
+        elif target.get("answer") == "yes":
+            label, color, tooltip = (
+                "Подтвердил",
+                "#16a34a",
+                "Преподаватель подтвердил проведение занятия",
+            )
+        elif target.get("answer") == "no":
+            reason = target.get("reason") or "Причина не указана"
+            label, color, tooltip = (
+                "Отказался",
+                "#dc2626",
+                f"Преподаватель отказался: {reason}",
+            )
+        elif not target.get("max_available"):
+            label, color, tooltip = (
+                "Не подключён к боту",
+                "#dc2626",
+                "Запрос нельзя доставить: преподаватель не подключён к боту",
+            )
+        else:
+            label, color, tooltip = (
+                "Ожидается ответ",
+                "#f59e0b",
+                "Запрос отправлен, но преподаватель ещё не ответил",
+            )
+
+        self.teacher_confirmation_status.setText(label)
+        self.teacher_confirmation_status.setToolTip(tooltip)
+        self.teacher_confirmation_status.setStyleSheet(
+            f"color: {color}; font-weight: 600;"
+        )
+        if target is not None and target.get("max_available"):
+            def request_again() -> None:
+                if self.teacher_confirmation_resend is None:
+                    return
+                self.teacher_confirmation_resend.setEnabled(False)
+                self.teacher_confirmation_resend.setText("Отправлено")
+                self.resend_confirmation_requested.emit([target])
+
+            resend = _button("Повторить запрос", request_again, compact=True)
+            resend.setObjectName("teacherConfirmationResend")
+            resend.setToolTip("Ещё раз попросить преподавателя подтвердить занятие")
+            self.teacher_confirmation_layout.insertWidget(
+                self.teacher_confirmation_layout.count() - 1, resend
+            )
+            self.teacher_confirmation_resend = resend
 
     def _apply_group_defaults(self) -> None:
         group_id = self.group.currentData()
@@ -969,6 +1068,8 @@ class LessonDialog(QDialog):
         selected = self.teacher.findData(current)
         self.teacher.setCurrentIndex(selected if selected >= 0 else 0)
         self.teacher.blockSignals(False)
+        if hasattr(self, "teacher_confirmation_status"):
+            self._render_teacher_confirmation()
         self._refresh_group_participants()
 
     def set_period(self, start_at: str, end_at: str) -> None:
