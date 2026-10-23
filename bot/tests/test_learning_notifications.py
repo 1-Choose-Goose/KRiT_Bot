@@ -6,7 +6,11 @@ from typing import Any
 import httpx
 from sqlalchemy import select
 
-from krit_bot.communication_models import CommunicationMessage, CommunicationThread
+from krit_bot.communication_models import (
+    CommunicationMessage,
+    CommunicationThread,
+    InteractionRequest,
+)
 from krit_bot.db import (
     Person,
     PersonRole,
@@ -16,8 +20,13 @@ from krit_bot.db import (
     ensure_schema,
     utcnow,
 )
-from krit_bot.learning import _queue_guardian_event, _queue_lesson_state_notifications
+from krit_bot.learning import (
+    _cancel_daily_bundle_notifications,
+    _queue_guardian_event,
+    _queue_lesson_state_notifications,
+)
 from krit_bot.learning_models import (
+    AdminNotification,
     Lesson,
     LessonParticipant,
     NotificationJob,
@@ -26,6 +35,7 @@ from krit_bot.learning_models import (
     Subject,
 )
 from krit_bot.learning_notifications import LearningNotificationWorker
+from krit_bot.max_api import MaxApiError
 
 
 class FakeMax:
@@ -35,6 +45,111 @@ class FakeMax:
     async def send_text(self, *, user_id: int, text: str, **_: Any) -> dict[str, Any]:
         self.sent.append((user_id, text))
         return {}
+
+
+class PermanentlyFailingMax:
+    async def send_text(self, **_: Any) -> dict[str, Any]:
+        raise MaxApiError("Некорректный получатель", status_code=400)
+
+
+class UnexpectedFailingMax:
+    async def send_text(self, **_: Any) -> dict[str, Any]:
+        raise RuntimeError("Неожиданный сбой клиента MAX")
+
+
+async def test_removed_participant_daily_notifications_are_cancelled(tmp_path) -> None:
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'removed-participant.db'}")
+    await ensure_schema(engine)
+    sessions = build_session_factory(engine)
+    local_date = (utcnow() + timedelta(days=1)).date()
+    async with sessions() as session:
+        student = Person(full_name="Ученик", phone="+79000000120")
+        guardian = Person(full_name="Родитель", phone="+79000000121")
+        teacher = Person(full_name="Учитель", phone="+79000000122")
+        session.add_all([student, guardian, teacher])
+        await session.flush()
+        session.add(StudentGuardian(student_id=student.id, guardian_id=guardian.id))
+        student_request = InteractionRequest(
+            request_type="lesson_confirmation",
+            question="Подтвердите занятие",
+            recipient_person_id=student.id,
+            recipient_context="student",
+            subject_person_id=student.id,
+        )
+        guardian_request = InteractionRequest(
+            request_type="lesson_confirmation",
+            question="Подтвердите занятие",
+            recipient_person_id=guardian.id,
+            recipient_context="guardian",
+            subject_person_id=student.id,
+        )
+        session.add_all([student_request, guardian_request])
+        await session.flush()
+        session.add_all(
+            [
+                NotificationJob(
+                    dedupe_key=(
+                        f"daily:{local_date}:{student.id}:{student.id}:student:"
+                        "reminder:60:fingerprint"
+                    ),
+                    event_type="lesson_reminder",
+                    recipient_person_id=student.id,
+                    subject_person_id=student.id,
+                    recipient_context="student",
+                    scheduled_at=utcnow() + timedelta(hours=1),
+                    payload={"text": "Напоминание ученику"},
+                ),
+                NotificationJob(
+                    dedupe_key=(
+                        f"daily:{local_date}:{student.id}:{guardian.id}:guardian:"
+                        "confirmation:fingerprint"
+                    ),
+                    event_type="lesson_confirmation_request",
+                    recipient_person_id=guardian.id,
+                    subject_person_id=student.id,
+                    recipient_context="guardian",
+                    interaction_request_id=guardian_request.id,
+                    scheduled_at=utcnow() + timedelta(hours=1),
+                    payload={"text": "Подтверждение родителю"},
+                ),
+                NotificationJob(
+                    dedupe_key=(
+                        f"daily:{local_date}:{teacher.id}:{teacher.id}:teacher:"
+                        "reminder:60:fingerprint"
+                    ),
+                    event_type="lesson_reminder",
+                    recipient_person_id=teacher.id,
+                    subject_person_id=teacher.id,
+                    recipient_context="teacher",
+                    scheduled_at=utcnow() + timedelta(hours=1),
+                    payload={"text": "Напоминание учителю"},
+                ),
+            ]
+        )
+        await session.commit()
+
+        await _cancel_daily_bundle_notifications(
+            session,
+            local_date=local_date,
+            student_ids={student.id},
+        )
+        await session.commit()
+
+        jobs = list(
+            (
+                await session.scalars(
+                    select(NotificationJob).order_by(NotificationJob.id)
+                )
+            ).all()
+        )
+        assert [job.status for job in jobs] == ["cancelled", "cancelled", "pending"]
+        request_status = await session.scalar(
+            select(InteractionRequest.status).where(
+                InteractionRequest.id == guardian_request.id
+            )
+        )
+        assert request_status == "cancelled"
+    await engine.dispose()
 
 
 async def test_unavailable_recipient_is_not_added_to_dialog_history(tmp_path) -> None:
@@ -71,6 +186,100 @@ async def test_unavailable_recipient_is_not_added_to_dialog_history(tmp_path) ->
         )
         assert job is not None
         assert job.status == "cancelled"
+    await engine.dispose()
+
+
+async def test_repeated_permanent_failure_reuses_admin_notification(tmp_path) -> None:
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'repeated-failure.db'}")
+    await ensure_schema(engine)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(full_name="Получатель", phone="+79000000130", active=True)
+        session.add(person)
+        await session.flush()
+        session.add(
+            PersonMaxIdentity(
+                person_id=person.id,
+                verified_phone=person.phone,
+                max_user_id=130,
+            )
+        )
+        job = NotificationJob(
+            dedupe_key="test:repeated-permanent-failure",
+            event_type="custom_message",
+            recipient_person_id=person.id,
+            scheduled_at=utcnow() - timedelta(minutes=1),
+            payload={"text": "Тест"},
+        )
+        session.add(job)
+        await session.flush()
+        session.add(
+            AdminNotification(
+                dedupe_key=f"notification-job:{job.id}:failed",
+                kind="max_notification_failed",
+                title="Не отправлено уведомление MAX",
+                message="Предыдущая ошибка",
+            )
+        )
+        await session.commit()
+        job_id = job.id
+
+    worker = LearningNotificationWorker(
+        sessions=sessions,
+        api=PermanentlyFailingMax(),  # type: ignore[arg-type]
+        max_attempts=1,
+    )
+    assert await worker.process_one() is True
+
+    async with sessions() as session:
+        job = await session.get(NotificationJob, job_id)
+        alerts = list((await session.scalars(select(AdminNotification))).all())
+        assert job is not None and job.status == "failed"
+        assert len(alerts) == 1
+        assert "Некорректный получатель" in alerts[0].message
+    await engine.dispose()
+
+
+async def test_unexpected_max_client_error_is_retried_without_stale_processing(
+    tmp_path,
+) -> None:
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'unexpected-error.db'}")
+    await ensure_schema(engine)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(full_name="Получатель", phone="+79000000131", active=True)
+        session.add(person)
+        await session.flush()
+        session.add(
+            PersonMaxIdentity(
+                person_id=person.id,
+                verified_phone=person.phone,
+                max_user_id=131,
+            )
+        )
+        job = NotificationJob(
+            dedupe_key="test:unexpected-max-error",
+            event_type="custom_message",
+            recipient_person_id=person.id,
+            scheduled_at=utcnow() - timedelta(minutes=1),
+            payload={"text": "Тест"},
+        )
+        session.add(job)
+        await session.commit()
+        job_id = job.id
+
+    worker = LearningNotificationWorker(
+        sessions=sessions,
+        api=UnexpectedFailingMax(),  # type: ignore[arg-type]
+        max_attempts=2,
+    )
+    assert await worker.process_one() is True
+
+    async with sessions() as session:
+        job = await session.get(NotificationJob, job_id)
+        assert job is not None and job.status == "retry"
+        assert job.attempts == 1
+        assert job.last_error == "Неожиданный сбой клиента MAX"
     await engine.dispose()
 
 

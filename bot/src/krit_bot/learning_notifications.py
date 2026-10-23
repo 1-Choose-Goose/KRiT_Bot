@@ -4,7 +4,6 @@ import asyncio
 import time
 from datetime import timedelta
 
-import httpx
 import structlog
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -19,6 +18,37 @@ from .learning_models import (
 from .max_api import MaxApiClient, MaxApiError
 
 log = structlog.get_logger()
+
+
+async def _record_admin_delivery_issue(
+    session: AsyncSession,
+    *,
+    dedupe_key: str,
+    kind: str,
+    title: str,
+    message: str,
+    lesson_id: int | None,
+) -> None:
+    notification = await session.scalar(
+        select(AdminNotification).where(AdminNotification.dedupe_key == dedupe_key)
+    )
+    if notification is None:
+        session.add(
+            AdminNotification(
+                dedupe_key=dedupe_key,
+                kind=kind,
+                title=title,
+                message=message,
+                lesson_id=lesson_id,
+            )
+        )
+        return
+    notification.kind = kind
+    notification.title = title
+    notification.message = message
+    notification.lesson_id = lesson_id
+    notification.read_at = None
+    notification.resolved_at = None
 
 
 class LearningNotificationWorker:
@@ -117,14 +147,15 @@ class LearningNotificationWorker:
                 job.last_error = "Получатель не авторизован в MAX"
                 job.updated_at = utcnow()
                 if job.priority >= 2 or job.campaign_id is not None:
-                    session.add(
-                        AdminNotification(
-                            dedupe_key=f"notification-job:{job.id}:unavailable",
-                            kind="max_recipient_unavailable",
-                            title="Получатель недоступен в MAX",
-                            message=f"Получатель #{job.recipient_person_id} не подключён к MAX.",
-                            lesson_id=job.lesson_id,
-                        )
+                    await _record_admin_delivery_issue(
+                        session,
+                        dedupe_key=f"notification-job:{job.id}:unavailable",
+                        kind="max_recipient_unavailable",
+                        title="Получатель недоступен в MAX",
+                        message=(
+                            f"Получатель #{job.recipient_person_id} не подключён к MAX."
+                        ),
+                        lesson_id=job.lesson_id,
                     )
                 from .communications import refresh_campaign_status
 
@@ -167,7 +198,7 @@ class LearningNotificationWorker:
             )
         try:
             result = await self.api.send_text(user_id=user_id, text=text, attachments=attachments)
-        except (MaxApiError, httpx.TransportError, OSError, TimeoutError) as exc:
+        except Exception as exc:
             async with self.sessions() as session:
                 job = await session.get(NotificationJob, job_id)
                 if job is None:
@@ -180,14 +211,15 @@ class LearningNotificationWorker:
                     )
                 else:
                     job.status = "failed"
-                    session.add(
-                        AdminNotification(
-                            dedupe_key=f"notification-job:{job.id}:failed",
-                            kind="max_notification_failed",
-                            title="Не отправлено уведомление MAX",
-                            message=(f"Получатель #{job.recipient_person_id}: {str(exc)[:500]}"),
-                            lesson_id=job.lesson_id,
-                        )
+                    await _record_admin_delivery_issue(
+                        session,
+                        dedupe_key=f"notification-job:{job.id}:failed",
+                        kind="max_notification_failed",
+                        title="Не отправлено уведомление MAX",
+                        message=(
+                            f"Получатель #{job.recipient_person_id}: {str(exc)[:500]}"
+                        ),
+                        lesson_id=job.lesson_id,
                     )
                 job.last_error = str(exc)[:2000]
                 job.updated_at = utcnow()
@@ -200,7 +232,7 @@ class LearningNotificationWorker:
         async with self.sessions() as session:
             job = await session.get(NotificationJob, job_id)
             if job is not None:
-                message = result.get("message", result)
+                message = result.get("message", result) if isinstance(result, dict) else {}
                 if isinstance(message, dict):
                     body = message.get("body")
                     message_id = body.get("mid") if isinstance(body, dict) else message.get("mid")

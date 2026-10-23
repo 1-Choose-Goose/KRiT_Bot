@@ -168,6 +168,81 @@ async def test_schedule_publication_serializes_period_dates(tmp_path) -> None:
             assert response.json()["period_to"] == "2026-10-08"
 
 
+async def test_schedule_publication_does_not_queue_unavailable_recipients(tmp_path) -> None:
+    settings = Settings(
+        database_url=f"sqlite+aiosqlite:///{(tmp_path / 'schedule-unavailable.db').as_posix()}",
+        max_bot_token=SecretStr("test-token"),
+        jwt_secret=SecretStr("test-jwt-secret-with-enough-entropy"),
+        bot_mode="webhook",
+        vk_syndication_enabled=False,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            login = await client.post(
+                "/api/v1/auth/login", json={"username": "admin", "password": "admin"}
+            )
+            headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+            async def person(name: str, phone: str, roles: list[str]) -> int:
+                response = await client.post(
+                    "/api/v1/people",
+                    headers=headers,
+                    json={"full_name": name, "phone": phone, "roles": roles},
+                )
+                assert response.status_code == 201, response.text
+                return int(response.json()["id"])
+
+            teacher_id = await person("Учитель", "+79000000301", ["teacher"])
+            student_id = await person("Ученик", "+79000000302", ["student"])
+            subject = await client.post(
+                "/api/v1/learning/subjects",
+                headers=headers,
+                json={
+                    "name": "Программирование",
+                    "color": "#2563eb",
+                    "teacher_ids": [teacher_id],
+                },
+            )
+            room = await client.post(
+                "/api/v1/learning/rooms",
+                headers=headers,
+                json={"name": "Кабинет", "capacity": 10},
+            )
+            local_start = datetime.now(ZoneInfo("Asia/Yekaterinburg")).replace(
+                hour=12, minute=0, second=0, microsecond=0
+            ) + timedelta(days=2)
+            lesson = await client.post(
+                "/api/v1/learning/lessons",
+                headers=headers,
+                json={
+                    "subject_id": subject.json()["id"],
+                    "teacher_id": teacher_id,
+                    "room_id": room.json()["id"],
+                    "start_at": local_start.isoformat(),
+                    "end_at": (local_start + timedelta(hours=1)).isoformat(),
+                    "participant_ids": [student_id],
+                },
+            )
+            assert lesson.status_code == 201, lesson.text
+
+            response = await client.post(
+                "/api/v1/communications/schedule/publish",
+                headers=headers,
+                json={
+                    "date_from": local_start.date().isoformat(),
+                    "date_to": local_start.date().isoformat(),
+                    "preview": False,
+                },
+            )
+            assert response.status_code == 200, response.text
+            assert set(response.json()["unavailable"]) == {student_id, teacher_id}
+            assert response.json()["messages"] == 0
+            assert response.json()["queued"] == 0
+
+
 async def _database(tmp_path):
     engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'communications.db'}")
     await ensure_schema(engine)

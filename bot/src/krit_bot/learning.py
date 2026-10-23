@@ -685,6 +685,71 @@ async def _queue_lesson_notifications(
     await reconcile_confirmation_requests(session, now=utcnow(), timezone=timezone)
 
 
+async def _cancel_daily_bundle_notifications(
+    session: AsyncSession,
+    *,
+    local_date: date,
+    student_ids: set[int] | None = None,
+    teacher_ids: set[int] | None = None,
+) -> int:
+    """Cancel queued daily bundles before their lesson membership changes."""
+    students = set(student_ids or ())
+    teachers = set(teacher_ids or ())
+    recipient_keys = {
+        (student_id, student_id, "student") for student_id in students
+    } | {(teacher_id, teacher_id, "teacher") for teacher_id in teachers}
+    if students:
+        guardian_rows = (
+            await session.execute(
+                select(StudentGuardian.student_id, StudentGuardian.guardian_id).where(
+                    StudentGuardian.student_id.in_(students),
+                    StudentGuardian.guardian_id != StudentGuardian.student_id,
+                )
+            )
+        ).all()
+        recipient_keys.update(
+            (student_id, guardian_id, "guardian")
+            for student_id, guardian_id in guardian_rows
+        )
+    if not recipient_keys:
+        return 0
+    prefixes = [
+        f"daily:{local_date.isoformat()}:{subject_id}:{recipient_id}:{context}:%"
+        for subject_id, recipient_id, context in recipient_keys
+    ]
+    jobs = list(
+        (
+            await session.scalars(
+                select(NotificationJob).where(
+                    NotificationJob.status.in_(["pending", "retry"]),
+                    or_(*(NotificationJob.dedupe_key.like(prefix) for prefix in prefixes)),
+                )
+            )
+        ).all()
+    )
+    if not jobs:
+        return 0
+    request_ids = {
+        job.interaction_request_id
+        for job in jobs
+        if job.interaction_request_id is not None
+    }
+    now = utcnow()
+    for job in jobs:
+        job.status = "cancelled"
+        job.updated_at = now
+    if request_ids:
+        await session.execute(
+            InteractionRequest.__table__.update()
+            .where(
+                InteractionRequest.id.in_(request_ids),
+                InteractionRequest.status.in_(["active", "draft"]),
+            )
+            .values(status="cancelled", updated_at=now)
+        )
+    return len(jobs)
+
+
 async def _queue_communication_event(
     session: AsyncSession,
     *,
@@ -1802,6 +1867,14 @@ def create_learning_router(
                 )
             )
             if semantic_change:
+                await _cancel_daily_bundle_notifications(
+                    session,
+                    local_date=_db_utc(item.start_at)
+                    .astimezone(_display_timezone(center_timezone))
+                    .date(),
+                    student_ids=previous_participant_ids,
+                    teacher_ids={item.teacher_id},
+                )
                 item.notification_revision += 1
                 from .communication_models import LessonAttendanceIntent
 
@@ -2715,6 +2788,24 @@ def create_learning_router(
                     )
                 ).all()
             )
+            active_participant_ids = set(
+                (
+                    await session.scalars(
+                        select(LessonParticipant.person_id).where(
+                            LessonParticipant.lesson_id == lesson_id,
+                            LessonParticipant.attendance_status != "excused",
+                        )
+                    )
+                ).all()
+            )
+            await _cancel_daily_bundle_notifications(
+                session,
+                local_date=_db_utc(item.start_at)
+                .astimezone(_display_timezone(center_timezone))
+                .date(),
+                student_ids=active_participant_ids,
+                teacher_ids={item.teacher_id},
+            )
             linked_request_ids = list(
                 (
                     await session.scalars(
@@ -2794,6 +2885,12 @@ def create_learning_router(
             series_id = item.series_id
             await session.delete(item)
             await session.flush()
+            await _queue_lesson_notifications(
+                session,
+                item,
+                [],
+                center_timezone,
+            )
             if series_id is not None:
                 remaining_series_lesson = await session.scalar(
                     select(Lesson.id).where(Lesson.series_id == series_id).limit(1)
@@ -3189,6 +3286,13 @@ def create_learning_router(
                 raise HTTPException(409, "Нельзя отменить уже начавшееся участие")
             if state == "expected" and participant.attendance_status != "excused":
                 raise HTTPException(409, "Восстановить можно только отменённое участие")
+            await _cancel_daily_bundle_notifications(
+                session,
+                local_date=_db_utc(lesson.start_at)
+                .astimezone(_display_timezone(center_timezone))
+                .date(),
+                student_ids={person_id},
+            )
             if state == "excused":
                 if cancellation is None:
                     raise HTTPException(422, "Укажите причину отмены")

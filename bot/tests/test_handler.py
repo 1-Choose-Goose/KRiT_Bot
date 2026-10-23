@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from pydantic import SecretStr
 from sqlalchemy import func, select
@@ -10,6 +10,7 @@ from krit_bot.communication_models import (
     CommunicationMessage,
     CommunicationThread,
     InteractionRequest,
+    InteractionRequestLesson,
     InteractionResponse,
     MaxRegistrationPending,
     MaxSubscriptionPrompt,
@@ -33,7 +34,7 @@ from krit_bot.handler import (
     parse_message_callback,
     parse_message_created,
 )
-from krit_bot.learning_models import PersonMaxIdentity
+from krit_bot.learning_models import Lesson, PersonMaxIdentity, Room, Subject
 from krit_bot.max_api import WEBHOOK_UPDATE_TYPES
 from krit_bot.webhook import (
     ensure_max_webhook_subscription,
@@ -432,6 +433,88 @@ async def test_poll_button_with_root_user_saves_answer_and_acknowledges_callback
         "Спасибо! Ответ сохранён",
         {"text": "Исходный текст опроса", "attachments": []},
     )
+    await engine.dispose()
+
+
+async def test_partial_lesson_buttons_use_center_timezone() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = build_session_factory(engine)
+    async with sessions() as session:
+        person = Person(
+            full_name="Иван Иванов",
+            phone="+79990000000",
+            role_links=[PersonRole(role="student")],
+            active=True,
+        )
+        teacher = Person(full_name="Учитель", phone="+79990000001")
+        subject = Subject(name="Программирование", color="#2563eb")
+        room = Room(name="Кабинет № 2", capacity=10)
+        session.add_all([person, teacher, subject, room])
+        await session.flush()
+        session.add(
+            PersonMaxIdentity(
+                person_id=person.id,
+                verified_phone=person.phone,
+                max_user_id=42,
+            )
+        )
+        lesson = Lesson(
+            subject_id=subject.id,
+            teacher_id=teacher.id,
+            room_id=room.id,
+            start_at=datetime(2026, 10, 24, 4, 0, tzinfo=UTC),
+            end_at=datetime(2026, 10, 24, 5, 0, tzinfo=UTC),
+            teacher_name_snapshot=teacher.full_name,
+            room_name_snapshot=room.name,
+            subject_name_snapshot=subject.name,
+        )
+        session.add(lesson)
+        await session.flush()
+        request = InteractionRequest(
+            request_type="lesson_confirmation",
+            question="Сможете прийти?",
+            recipient_person_id=person.id,
+            recipient_context="student",
+            subject_person_id=person.id,
+            related_lesson_id=lesson.id,
+        )
+        session.add(request)
+        await session.flush()
+        session.add(
+            InteractionRequestLesson(
+                request_id=request.id,
+                lesson_id=lesson.id,
+                lesson_revision=lesson.notification_revision,
+            )
+        )
+        await session.commit()
+        request_id = request.id
+
+    api = FakeApi()
+    handler = EchoHandler(
+        sessions=sessions,
+        api=api,  # type: ignore[arg-type]
+        center_timezone="Asia/Yekaterinburg",
+    )
+    await handler.handle(
+        callback_update_with_root_user(
+            42,
+            f"interaction:{request_id}:partial",
+            "partial-local-time",
+        )
+    )
+
+    assert api.sent[-1][1] == (
+        "📅 Ответьте по каждому занятию:\n"
+        "Программирование · 24.10 09:00"
+    )
+    buttons = api.sent_attachments[-1][0]["payload"]["buttons"]
+    assert [button["text"] for button in buttons[0]] == [
+        "Смогу · 09:00",
+        "Не смогу · 09:00",
+    ]
     await engine.dispose()
 
 

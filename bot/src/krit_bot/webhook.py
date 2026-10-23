@@ -370,6 +370,7 @@ def create_app(
         api=api,
         required_channel_id=settings.max_required_channel_id,
         required_channel_link=settings.max_required_channel_link,
+        center_timezone=settings.center_timezone,
     )
 
     async def collect_backup_metadata(database_name: str) -> dict[str, Any]:

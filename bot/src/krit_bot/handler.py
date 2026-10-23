@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import delete, select
@@ -211,11 +212,19 @@ class EchoHandler:
         api: MaxApiClient,
         required_channel_id: int | None = None,
         required_channel_link: str | None = None,
+        center_timezone: str = "Asia/Yekaterinburg",
     ) -> None:
         self._sessions = sessions
         self._api = api
         self._required_channel_id = required_channel_id
         self._required_channel_link = required_channel_link
+        self._center_timezone = ZoneInfo(center_timezone)
+
+    def _local_lesson_start(self, lesson: Lesson) -> datetime:
+        start_at = lesson.start_at
+        if start_at.tzinfo is None:
+            start_at = start_at.replace(tzinfo=UTC)
+        return start_at.astimezone(self._center_timezone)
 
     async def _registration_context(
         self, session: AsyncSession, user_id: int, *, lock_pending: bool = False
@@ -993,26 +1002,29 @@ class EchoHandler:
                             .order_by(Lesson.start_at)
                         )
                     ).all()
-                    remaining_buttons = [
-                        [
-                            {
-                                "type": "callback",
-                                "text": f"Смогу · {lesson.start_at:%H:%M}",
-                                "payload": (
-                                    f"interaction:{request.id}:lesson:{lesson_id}:yes"
-                                ),
-                            },
-                            {
-                                "type": "callback",
-                                "text": f"Не смогу · {lesson.start_at:%H:%M}",
-                                "payload": (
-                                    f"interaction:{request.id}:lesson:{lesson_id}:no"
-                                ),
-                            },
-                        ]
-                        for lesson_id, lesson in remaining
-                        if str(lesson_id) not in lesson_answers
-                    ]
+                    remaining_buttons = []
+                    for lesson_id, lesson in remaining:
+                        if str(lesson_id) in lesson_answers:
+                            continue
+                        local_start = self._local_lesson_start(lesson)
+                        remaining_buttons.append(
+                            [
+                                {
+                                    "type": "callback",
+                                    "text": f"Смогу · {local_start:%H:%M}",
+                                    "payload": (
+                                        f"interaction:{request.id}:lesson:{lesson_id}:yes"
+                                    ),
+                                },
+                                {
+                                    "type": "callback",
+                                    "text": f"Не смогу · {local_start:%H:%M}",
+                                    "payload": (
+                                        f"interaction:{request.id}:lesson:{lesson_id}:no"
+                                    ),
+                                },
+                            ]
+                        )
                     callback_message = {
                         **(
                             {"text": callback.message_text}
@@ -1122,17 +1134,18 @@ class EchoHandler:
         buttons = []
         lines = ["📅 Ответьте по каждому занятию:"]
         for lesson_id, lesson in rows:
-            lines.append(f"{lesson.subject_name_snapshot} · {lesson.start_at:%d.%m %H:%M}")
+            local_start = self._local_lesson_start(lesson)
+            lines.append(f"{lesson.subject_name_snapshot} · {local_start:%d.%m %H:%M}")
             buttons.append(
                 [
                     {
                         "type": "callback",
-                        "text": f"Смогу · {lesson.start_at:%H:%M}",
+                        "text": f"Смогу · {local_start:%H:%M}",
                         "payload": f"interaction:{request_id}:lesson:{lesson_id}:yes",
                     },
                     {
                         "type": "callback",
-                        "text": f"Не смогу · {lesson.start_at:%H:%M}",
+                        "text": f"Не смогу · {local_start:%H:%M}",
                         "payload": f"interaction:{request_id}:lesson:{lesson_id}:no",
                     },
                 ]

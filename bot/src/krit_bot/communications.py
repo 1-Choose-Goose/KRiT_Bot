@@ -2946,11 +2946,15 @@ def create_communications_router(
             }
             affected_people = list({key[0] for key in affected})
             available, unavailable = await availability(session, affected_people)
+            available_people = set(available)
             preview.update(
                 {
                     "available": len(available),
                     "unavailable": unavailable,
-                    "messages": len(affected),
+                    "messages": sum(
+                        person_id in available_people
+                        for person_id, _context, _subject_person_id in affected
+                    ),
                 }
             )
             if payload.preview:
@@ -2976,6 +2980,8 @@ def create_communications_router(
             sent = 0
             for recipient_key in affected:
                 person_id, context, subject_person_id = recipient_key
+                if person_id not in available_people:
+                    continue
                 event = (
                     NotificationEvent.SCHEDULE_PUBLISHED
                     if recipient_key in new_recipients
