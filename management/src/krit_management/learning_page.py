@@ -1172,8 +1172,8 @@ class LessonDialog(QDialog):
         self._refresh_group_participants()
 
     def set_period(self, start_at: str, end_at: str) -> None:
-        start = QDateTime.fromString(start_at, Qt.DateFormat.ISODate)
-        end = QDateTime.fromString(end_at, Qt.DateFormat.ISODate)
+        start = QDateTime(parse_center(start_at))
+        end = QDateTime(parse_center(end_at))
         self.start.blockSignals(True)
         self.end.blockSignals(True)
         if start.isValid():

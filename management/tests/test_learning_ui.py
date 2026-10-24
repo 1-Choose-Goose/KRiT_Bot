@@ -2098,6 +2098,34 @@ def test_lesson_dialog_splits_start_date_hours_and_minutes() -> None:
     app.processEvents()
 
 
+def test_lesson_dialog_displays_server_utc_time_in_center_timezone() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = LessonDialog(
+        {
+            "subjects": [],
+            "teachers": [],
+            "rooms": [],
+            "groups": [],
+            "students": [],
+        },
+        {
+            "start_at": "2026-10-31T04:00:00+00:00",
+            "end_at": "2026-10-31T05:00:00+00:00",
+            "participants": [],
+        },
+    )
+
+    assert dialog.start_date.date() == QDate(2026, 10, 31)
+    assert dialog.start_hour.value() == 9
+    assert dialog.start_minute.value() == 0
+    assert dialog.end_date.date() == QDate(2026, 10, 31)
+    assert dialog.end_hour.value() == 10
+    assert dialog.end_minute.value() == 0
+
+    dialog.deleteLater()
+    app.processEvents()
+
+
 def test_lesson_dialog_serializes_online_mode_without_room() -> None:
     app = QApplication.instance() or QApplication([])
     references = {
