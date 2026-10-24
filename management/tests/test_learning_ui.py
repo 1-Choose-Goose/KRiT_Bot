@@ -7,9 +7,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate, QDateTime, QMarginsF, QPoint, QPointF, QSizeF, Qt, QTime
 from PySide6.QtGui import QPageLayout, QPdfWriter, QWheelEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSpinBox,
     QStyle,
     QStyleOptionSpinBox,
     QTableWidget,
@@ -2051,6 +2054,48 @@ def test_lesson_dialog_uses_manual_duration_and_calculates_end_time() -> None:
     assert dialog.duration.text() == "75"
     assert dialog.end.dateTime() == QDateTime(QDate(2026, 10, 18), QTime(21, 15))
     dialog.deleteLater()
+
+
+def test_lesson_dialog_splits_start_date_hours_and_minutes() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = LessonDialog(
+        {
+            "subjects": [],
+            "teachers": [],
+            "rooms": [],
+            "groups": [],
+            "students": [],
+        }
+    )
+    dialog.show()
+
+    assert isinstance(dialog.start_date, QDateEdit)
+    assert isinstance(dialog.start_hour, QSpinBox)
+    assert isinstance(dialog.start_minute, QSpinBox)
+    assert dialog.start_date.displayFormat() == "dd.MM.yyyy"
+    assert dialog.end_date.isReadOnly()
+    assert dialog.end_hour.isReadOnly()
+    assert dialog.end_minute.isReadOnly()
+
+    dialog.start_date.setDate(QDate(2026, 10, 24))
+    dialog.start_hour.setValue(16)
+    dialog.start_minute.setValue(35)
+    app.processEvents()
+
+    assert dialog.start.dateTime() == QDateTime(QDate(2026, 10, 24), QTime(16, 35))
+    assert dialog.end_date.date() == QDate(2026, 10, 24)
+    assert dialog.end_hour.value() == 17
+    assert dialog.end_minute.value() == 35
+
+    QTest.mouseClick(dialog.start_hour.lineEdit(), Qt.MouseButton.LeftButton)
+    app.processEvents()
+    assert dialog.start_hour.lineEdit().selectedText() == "16"
+    QTest.mouseClick(dialog.start_minute.lineEdit(), Qt.MouseButton.LeftButton)
+    app.processEvents()
+    assert dialog.start_minute.lineEdit().selectedText() == "35"
+
+    dialog.deleteLater()
+    app.processEvents()
 
 
 def test_lesson_dialog_serializes_online_mode_without_room() -> None:

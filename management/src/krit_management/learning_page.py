@@ -6,7 +6,17 @@ from html import escape
 from math import ceil
 from typing import Any
 
-from PySide6.QtCore import QDate, QDateTime, QMarginsF, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import (
+    QDate,
+    QDateTime,
+    QEvent,
+    QMarginsF,
+    Qt,
+    QThreadPool,
+    QTime,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QIcon,
@@ -81,6 +91,95 @@ class _ParticipantSortItem(QTableWidgetItem):
         return str(self.data(Qt.ItemDataRole.UserRole) or "") < str(
             other.data(Qt.ItemDataRole.UserRole) or ""
         )
+
+
+class _SelectAllTimeSpinBox(QSpinBox):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.setInputMethodHints(Qt.InputMethodHint.ImhDigitsOnly)
+        self.setFixedWidth(72)
+        self.lineEdit().installEventFilter(self)
+
+    def textFromValue(self, value: int) -> str:
+        return f"{value:02d}"
+
+    def eventFilter(self, watched: object, event: QEvent) -> bool:
+        if watched is self.lineEdit() and event.type() in {
+            QEvent.Type.FocusIn,
+            QEvent.Type.MouseButtonPress,
+        }:
+            QTimer.singleShot(0, self.selectAll)
+        return super().eventFilter(watched, event)
+
+
+class _SplitDateTimeEdit(QWidget):
+    dateTimeChanged = Signal(object)
+
+    def __init__(self, value: QDateTime, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.date_edit = QDateEdit(value.date(), self)
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        configure_calendar(self.date_edit)
+        self.hour_edit = _SelectAllTimeSpinBox(self)
+        self.hour_edit.setRange(0, 23)
+        self.minute_edit = _SelectAllTimeSpinBox(self)
+        self.minute_edit.setRange(0, 59)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(QLabel("Дата"))
+        layout.addWidget(self.date_edit, 1)
+        layout.addWidget(QLabel("Часы"))
+        layout.addWidget(self.hour_edit)
+        layout.addWidget(QLabel("Минуты"))
+        layout.addWidget(self.minute_edit)
+
+        self.setDateTime(value)
+        self.date_edit.dateChanged.connect(self._controls_changed)
+        self.hour_edit.valueChanged.connect(self._controls_changed)
+        self.minute_edit.valueChanged.connect(self._controls_changed)
+
+    def dateTime(self) -> QDateTime:
+        return QDateTime(
+            self.date_edit.date(),
+            QTime(self.hour_edit.value(), self.minute_edit.value()),
+        )
+
+    def setDateTime(self, value: QDateTime) -> None:
+        previous = self.dateTime() if self.date_edit.date().isValid() else QDateTime()
+        controls = (self.date_edit, self.hour_edit, self.minute_edit)
+        for control in controls:
+            control.blockSignals(True)
+        self.date_edit.setDate(value.date())
+        self.hour_edit.setValue(value.time().hour())
+        self.minute_edit.setValue(value.time().minute())
+        for control in controls:
+            control.blockSignals(False)
+        current = self.dateTime()
+        if current != previous and not self.signalsBlocked():
+            self.dateTimeChanged.emit(current)
+
+    def setReadOnly(self, read_only: bool) -> None:
+        self.date_edit.setReadOnly(read_only)
+        self.date_edit.setCalendarPopup(not read_only)
+        self.hour_edit.setReadOnly(read_only)
+        self.minute_edit.setReadOnly(read_only)
+
+    def isReadOnly(self) -> bool:
+        return self.date_edit.isReadOnly()
+
+    def setButtonSymbols(self, symbols: QAbstractSpinBox.ButtonSymbols) -> None:
+        self.date_edit.setButtonSymbols(symbols)
+        self.hour_edit.setButtonSymbols(symbols)
+        self.minute_edit.setButtonSymbols(symbols)
+
+    def _controls_changed(self, _value: object = None) -> None:
+        if not self.signalsBlocked():
+            self.dateTimeChanged.emit(self.dateTime())
 
 
 def _lesson_requires_reconciliation(
@@ -623,14 +722,14 @@ class LessonDialog(QDialog):
         self.group = self._combo(references.get("groups", []), "name", empty="Без группы")
         now = now_center().replace(second=0, microsecond=0)
         rounded = now + timedelta(minutes=(30 - now.minute % 30) % 30)
-        self.start = QDateTimeEdit(QDateTime(rounded))
-        self.start.setCalendarPopup(True)
-        configure_calendar(self.start)
-        self.start.setDisplayFormat("dd.MM.yyyy HH:mm")
-        self.end = QDateTimeEdit(QDateTime(rounded + timedelta(hours=1)))
-        self.end.setCalendarPopup(True)
-        configure_calendar(self.end)
-        self.end.setDisplayFormat("dd.MM.yyyy HH:mm")
+        self.start = _SplitDateTimeEdit(QDateTime(rounded))
+        self.start_date = self.start.date_edit
+        self.start_hour = self.start.hour_edit
+        self.start_minute = self.start.minute_edit
+        self.end = _SplitDateTimeEdit(QDateTime(rounded + timedelta(hours=1)))
+        self.end_date = self.end.date_edit
+        self.end_hour = self.end.hour_edit
+        self.end_minute = self.end.minute_edit
         self.duration = QLineEdit("60")
         self.duration.setValidator(QIntValidator(1, 1440, self.duration))
         self.duration.setInputMethodHints(Qt.InputMethodHint.ImhDigitsOnly)
