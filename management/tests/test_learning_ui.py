@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QDate, QDateTime, QPoint, QPointF, QSizeF, Qt, QTime
+from PySide6.QtCore import QDate, QDateTime, QMarginsF, QPoint, QPointF, QSizeF, Qt, QTime
 from PySide6.QtGui import QPageLayout, QPdfWriter, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -1473,6 +1473,7 @@ def test_schedule_preview_is_landscape_calendar_with_students(tmp_path) -> None:
     page._prepare_schedule_printer(printer)
 
     assert printer.pageLayout().orientation() == QPageLayout.Orientation.Landscape
+    assert printer.pageLayout().margins(QPageLayout.Unit.Millimeter) == QMarginsF(5, 5, 5, 5)
     assert "Среда" in plain
     assert "Понедельник" not in plain
     assert "Воскресенье" not in plain
@@ -1522,6 +1523,18 @@ def test_busy_day_uses_parallel_columns_before_adding_pages() -> None:
     assert plain.count("Среда") >= 2
     assert "часть 1 из" in plain
     assert "Занятий нет" not in plain
+
+    compact_lessons = [
+        {
+            "start_at": f"2026-09-30T{8 + index:02d}:00:00+05:00",
+            "end_at": f"2026-09-30T{9 + index:02d}:00:00+05:00",
+            "subject_name_snapshot": "Математика",
+            "teacher_name_snapshot": "Ключко Галина Анатольевна",
+            "participants": [],
+        }
+        for index in range(7)
+    ]
+    assert len(page._split_schedule_day(compact_lessons)) == 1
     page.shutdown()
     page.deleteLater()
     app.processEvents()

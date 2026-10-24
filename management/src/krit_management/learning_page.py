@@ -3663,23 +3663,23 @@ class LearningPage(QWidget):
                 f"<h1>КРиТ · расписание {period_label}</h1>"
                 f"<p class='subtitle'>{escape(filter_label)} · страница "
                 f"{page_number} из {len(pages)}</p>"
-                f"<table class='calendar' width='100%' cellspacing='0' cellpadding='3'"
+                f"<table class='calendar' width='100%' cellspacing='0' cellpadding='1'"
                 f"{page_break}><thead><tr>{''.join(headers)}</tr></thead>"
                 f"<tbody><tr>{''.join(cells)}</tr></tbody></table>"
             )
         document.setHtml(
             "<style>"
-            "body { font-family: 'Segoe UI'; color: #172033; font-size: 7.5pt; }"
-            "h1 { font-size: 14pt; margin: 0 0 2px 0; }"
-            ".subtitle { color: #526174; margin: 0 0 6px 0; }"
+            "body { font-family: 'Segoe UI'; color: #172033; font-size: 7pt; }"
+            "h1 { font-size: 12pt; margin: 0 0 1px 0; }"
+            ".subtitle { color: #526174; margin: 0 0 3px 0; }"
             "table.calendar { border-collapse: collapse; }"
-            "table.calendar th { background: #e8eef8; padding: 4px 3px; "
-            "border: 1px solid #b8c4d4; font-size: 8.5pt; }"
-            "table.calendar td { padding: 3px; border: 1px solid #b8c4d4; }"
+            "table.calendar th { background: #e8eef8; padding: 2px; "
+            "border: 1px solid #b8c4d4; font-size: 7.5pt; }"
+            "table.calendar td { padding: 1px; border: 1px solid #b8c4d4; }"
             ".date { font-weight: 700; }"
             ".continuation { color: #526174; font-size: 7pt; font-weight: 400; }"
             ".lesson { background: #eef4ff; border: 1px solid #c5d4ec; "
-            "margin: 0 0 3px 0; padding: 3px; line-height: 105%; }"
+            "margin: 0 0 1px 0; padding: 2px; line-height: 100%; }"
             ".lesson-title { font-weight: 700; }"
             ".time { color: #124da8; }"
             ".teacher { color: #526174; }"
@@ -3690,7 +3690,7 @@ class LearningPage(QWidget):
         return document
 
     def _split_schedule_day(
-        self, lessons: list[dict[str, Any]], *, column_capacity: int = 25
+        self, lessons: list[dict[str, Any]], *, column_capacity: int = 30
     ) -> list[list[dict[str, Any]]]:
         chunks: list[list[dict[str, Any]]] = []
         current: list[dict[str, Any]] = []
@@ -3713,7 +3713,7 @@ class LearningPage(QWidget):
     ) -> list[list[tuple[date, int, int, list[dict[str, Any]], int]]]:
         if not columns:
             return []
-        if len(columns) <= 7 and all(column[4] <= 18 for column in columns):
+        if len(columns) <= 7 and all(column[4] <= 22 for column in columns):
             return [columns]
         return [columns[index : index + 4] for index in range(0, len(columns), 4)]
 
@@ -3764,7 +3764,7 @@ class LearningPage(QWidget):
     def _prepare_schedule_printer(self, printer: QPrinter) -> None:
         printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
         printer.setPageOrientation(QPageLayout.Orientation.Landscape)
-        printer.setPageMargins(QMarginsF(8, 8, 8, 8), QPageLayout.Unit.Millimeter)
+        printer.setPageMargins(QMarginsF(5, 5, 5, 5), QPageLayout.Unit.Millimeter)
 
     def load_student_history(self) -> None:
         person_id = self.journal_student.currentData()
