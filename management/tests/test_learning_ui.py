@@ -1809,6 +1809,35 @@ def test_departure_uses_selected_present_row_instead_of_arrival_field(monkeypatc
     app.processEvents()
 
 
+def test_presence_person_starts_without_automatic_selection() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(FakeApi())  # type: ignore[arg-type]
+    assert window.learning_page.pool.waitForDone(3_000)
+    assert window.pool.waitForDone(3_000)
+    app.processEvents()
+    page = window.learning_page
+
+    page._references_loaded(
+        {
+            "subjects": [],
+            "rooms": [],
+            "groups": [],
+            "teachers": [],
+            "students": [
+                {"id": 10, "full_name": "Абраамян Светлана"},
+                {"id": 11, "full_name": "Алексеев Александр"},
+            ],
+        }
+    )
+
+    assert page.presence_person.currentIndex() == -1
+    assert page.presence_person.currentData() is None
+    assert page.presence_person.currentText() == ""
+    assert page.presence_person.lineEdit().placeholderText() == "Фамилия или имя"
+    window.close()
+    app.processEvents()
+
+
 def test_stale_presence_is_visible_and_uses_time_correction_flow(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     window = MainWindow(FakeApi())  # type: ignore[arg-type]
@@ -2170,6 +2199,10 @@ def test_group_member_is_marked_for_permanent_removal() -> None:
             }
         ],
     )
+
+    assert dialog.student.currentIndex() == -1
+    assert dialog.student.currentText() == ""
+    assert dialog.student.lineEdit().placeholderText() == "Фамилия или имя"
 
     delete_button = next(
         button

@@ -1708,6 +1708,8 @@ class GroupMembersDialog(QDialog):
         member_label.setBuddy(self.student)
         for person in students:
             self.student.addItem(person.get("full_name", ""), person.get("id"))
+        self.student.setCurrentIndex(-1)
+        self.student.clearEditText()
         actions.addWidget(self.student, 1)
         actions.addWidget(_button("Добавить", self._add, "primary"))
         self.delete_member_button = _button(
@@ -2370,6 +2372,9 @@ class LearningPage(QWidget):
         index = self.presence_person.findData(current)
         if index >= 0:
             self.presence_person.setCurrentIndex(index)
+        else:
+            self.presence_person.setCurrentIndex(-1)
+            self.presence_person.clearEditText()
         self._calendar_filter_changed()
         for kind, table in self.reference_tables.items():
             items = self.references.get(kind, [])
