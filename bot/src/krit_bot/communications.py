@@ -1813,6 +1813,24 @@ def _normalize_schedule_snapshot(
     return normalized
 
 
+def _first_publication_dates(
+    previous: list[dict[str, Any]],
+    added: list[dict[str, Any]],
+    *,
+    timezone: ZoneInfo,
+) -> set[date]:
+    """Return added dates that have never been published to this recipient."""
+    previous_dates = {
+        datetime.fromisoformat(str(snapshot["start_at"])).astimezone(timezone).date()
+        for snapshot in previous
+    }
+    added_dates = {
+        datetime.fromisoformat(str(snapshot["start_at"])).astimezone(timezone).date()
+        for snapshot in added
+    }
+    return added_dates if added_dates and added_dates.isdisjoint(previous_dates) else set()
+
+
 def _schedule_text(
     bundles: list[DailyBundle],
     *,
@@ -2910,7 +2928,6 @@ def create_communications_router(
                 for row in previous_rows
             }
             affected = set()
-            new_recipients = set()
             changed_by_recipient: dict[
                 tuple[int, str, int], list[tuple[dict[str, Any], dict[str, Any]]]
             ] = defaultdict(list)
@@ -2925,10 +2942,7 @@ def create_communications_router(
                 new_snapshot = _lesson_snapshot(lesson, recipient_context=key[1])
                 if old is None:
                     affected.add(key[:3])
-                    if not any(previous_key[:3] == key[:3] for previous_key in previous):
-                        new_recipients.add(key[:3])
-                    else:
-                        added_by_recipient[key[:3]].append(new_snapshot)
+                    added_by_recipient[key[:3]].append(new_snapshot)
                 elif _normalize_schedule_snapshot(
                     old.snapshot, recipient_context=key[1]
                 ) != _normalize_schedule_snapshot(new_snapshot, recipient_context=key[1]):
@@ -2940,6 +2954,25 @@ def create_communications_router(
                 if key not in current:
                     affected.add(key[:3])
                     removed_by_recipient[key[:3]].append(old.snapshot)
+            publication_dates_by_recipient: dict[tuple[int, str, int], set[date]] = {}
+            for recipient_key in affected:
+                if (
+                    changed_by_recipient.get(recipient_key)
+                    or removed_by_recipient.get(recipient_key)
+                ):
+                    continue
+                previous_snapshots = [
+                    row.snapshot
+                    for key, row in previous.items()
+                    if key[:3] == recipient_key
+                ]
+                publication_dates = _first_publication_dates(
+                    previous_snapshots,
+                    added_by_recipient.get(recipient_key, []),
+                    timezone=timezone,
+                )
+                if publication_dates:
+                    publication_dates_by_recipient[recipient_key] = publication_dates
             preview = {
                 "period_from": payload.date_from.isoformat(),
                 "period_to": payload.date_to.isoformat(),
@@ -2963,9 +2996,15 @@ def create_communications_router(
             )
             if payload.preview:
                 return preview
+            has_schedule_changes = any(
+                recipient_key not in publication_dates_by_recipient
+                for recipient_key in affected
+            )
             campaign = CommunicationCampaign(
                 created_by_admin_id=admin_id,
-                campaign_type="schedule_change" if previous else "schedule_publication",
+                campaign_type=(
+                    "schedule_change" if has_schedule_changes else "schedule_publication"
+                ),
                 title=f"Расписание {payload.date_from:%d.%m}–{payload.date_to:%d.%m.%Y}",
                 payload=preview,
                 status="sending",
@@ -2988,7 +3027,7 @@ def create_communications_router(
                     continue
                 event = (
                     NotificationEvent.SCHEDULE_PUBLISHED
-                    if recipient_key in new_recipients
+                    if recipient_key in publication_dates_by_recipient
                     else NotificationEvent.SCHEDULE_CHANGED
                 )
                 policy = await resolver.resolve(
@@ -3000,6 +3039,12 @@ def create_communications_router(
                 if not policy.enabled:
                     continue
                 recipient_bundles = grouped.get(recipient_key, [])
+                if publication_dates := publication_dates_by_recipient.get(recipient_key):
+                    recipient_bundles = [
+                        bundle
+                        for bundle in recipient_bundles
+                        if bundle.local_date in publication_dates
+                    ]
                 text_value = _schedule_text(
                     recipient_bundles,
                     changed=event == NotificationEvent.SCHEDULE_CHANGED,
@@ -3061,7 +3106,7 @@ def create_communications_router(
                     actor_admin_id=admin_id,
                     action=(
                         "communications.schedule_change_sent"
-                        if previous
+                        if has_schedule_changes
                         else "communications.schedule_published"
                     ),
                     entity_type="schedule_publication",

@@ -29,6 +29,7 @@ from krit_bot.communications import (
     _campaign_delivery_counts_batch,
     _campaign_poll_counts_batch,
     _campaign_poll_details,
+    _first_publication_dates,
     _lesson_snapshot,
     _normalize_schedule_snapshot,
     _poll_targets,
@@ -1430,6 +1431,33 @@ def test_added_lesson_text_is_specific_and_snapshots_are_recipient_safe() -> Non
     )
     assert "Преподаватель:" not in teacher_text
     assert "Ученики: Анна, Марина" in teacher_text
+
+
+def test_new_day_is_classified_as_publication_not_schedule_change() -> None:
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    previous = [
+        {
+            "start_at": "2026-10-24T04:00:00+00:00",
+            "subject": "Программирование",
+        }
+    ]
+    new_day = [
+        {
+            "start_at": "2026-10-31T04:00:00+00:00",
+            "subject": "Программирование",
+        }
+    ]
+    same_day = [
+        {
+            "start_at": "2026-10-24T06:00:00+00:00",
+            "subject": "Программирование",
+        }
+    ]
+
+    assert _first_publication_dates(previous, new_day, timezone=timezone) == {
+        date(2026, 10, 31)
+    }
+    assert _first_publication_dates(previous, same_day, timezone=timezone) == set()
 
 
 async def test_history_cleanup_keeps_business_confirmation(tmp_path) -> None:
