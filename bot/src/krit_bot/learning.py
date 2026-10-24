@@ -14,11 +14,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .communication_models import (
+    CommunicationMessage,
     InteractionRequest,
     InteractionRequestLesson,
     ScheduleRecipientSnapshot,
 )
-from .db import Person, PersonRole, StudentGuardian, utcnow
+from .db import AdminUser, Person, PersonRole, StudentGuardian, utcnow
 from .learning_models import (
     AdminNotification,
     AuditEvent,
@@ -1256,6 +1257,159 @@ def create_learning_router(
             return {
                 **_model(item, "id", "name", "color", "active"),
                 "teacher_ids": teacher_ids,
+            }
+
+    @router.delete("/subjects/{item_id}")
+    async def delete_subject(
+        item_id: int,
+        cascade: bool = Query(False),
+        admin_id: int = Depends(require_management_token),
+    ) -> dict[str, Any]:
+        async with sessions() as session:
+            item = await session.get(Subject, item_id, with_for_update=True)
+            if item is None:
+                raise HTTPException(404, "Предмет не найден")
+            lesson_ids = set(
+                (
+                    await session.scalars(
+                        select(Lesson.id).where(Lesson.subject_id == item_id)
+                    )
+                ).all()
+            )
+            series_ids = set(
+                (
+                    await session.scalars(
+                        select(LessonSeries.id).where(LessonSeries.subject_id == item_id)
+                    )
+                ).all()
+            )
+            group_ids = set(
+                (
+                    await session.scalars(
+                        select(StudyGroup.id).where(StudyGroup.subject_id == item_id)
+                    )
+                ).all()
+            )
+            has_links = bool(lesson_ids or series_ids or group_ids)
+            if has_links and not cascade:
+                raise HTTPException(
+                    409,
+                    "Предмет используется в занятиях или группах. "
+                    "Для безвозвратного удаления подтвердите удаление всех связей.",
+                )
+            admin = await session.get(AdminUser, admin_id)
+            if has_links and (admin is None or admin.role != "superadmin"):
+                raise HTTPException(
+                    403,
+                    "Удалить используемый предмет со всеми связями может только "
+                    "суперадминистратор.",
+                )
+
+            request_ids: set[int] = set()
+            if lesson_ids:
+                request_ids.update(
+                    (
+                        await session.scalars(
+                            select(InteractionRequestLesson.request_id).where(
+                                InteractionRequestLesson.lesson_id.in_(lesson_ids)
+                            )
+                        )
+                    ).all()
+                )
+                request_ids.update(
+                    (
+                        await session.scalars(
+                            select(InteractionRequest.id).where(
+                                InteractionRequest.related_lesson_id.in_(lesson_ids)
+                            )
+                        )
+                    ).all()
+                )
+
+            jobs = list((await session.scalars(select(NotificationJob))).all())
+            job_ids = {
+                int(job.id)
+                for job in jobs
+                if job.lesson_id in lesson_ids
+                or job.interaction_request_id in request_ids
+                or lesson_ids.intersection(
+                    int(value) for value in (job.payload or {}).get("lesson_ids", [])
+                )
+            }
+            message_conditions = []
+            if lesson_ids:
+                message_conditions.append(
+                    CommunicationMessage.related_lesson_id.in_(lesson_ids)
+                )
+            if request_ids:
+                message_conditions.append(
+                    CommunicationMessage.interaction_request_id.in_(request_ids)
+                )
+            if job_ids:
+                message_conditions.append(CommunicationMessage.outbox_job_id.in_(job_ids))
+            if message_conditions:
+                await session.execute(
+                    delete(CommunicationMessage).where(or_(*message_conditions))
+                )
+            if job_ids:
+                await session.execute(
+                    delete(NotificationJob).where(NotificationJob.id.in_(job_ids))
+                )
+            if request_ids:
+                await session.execute(
+                    delete(InteractionRequest).where(InteractionRequest.id.in_(request_ids))
+                )
+            if lesson_ids:
+                await session.execute(delete(Lesson).where(Lesson.id.in_(lesson_ids)))
+            if series_ids:
+                await session.execute(
+                    delete(LessonSeries).where(LessonSeries.id.in_(series_ids))
+                )
+            if group_ids:
+                await session.execute(
+                    StudyGroup.__table__.update()
+                    .where(StudyGroup.id.in_(group_ids))
+                    .values(subject_id=None, default_teacher_id=None, updated_at=utcnow())
+                )
+            await session.execute(
+                delete(SubjectTeacher).where(SubjectTeacher.subject_id == item_id)
+            )
+            await session.delete(item)
+            session.add(
+                AuditEvent(
+                    actor_admin_id=admin_id,
+                    action="learning.subject_deleted",
+                    entity_type="subject",
+                    entity_id=item_id,
+                    details={
+                        "name": item.name,
+                        "lessons_deleted": len(lesson_ids),
+                        "series_deleted": len(series_ids),
+                        "groups_unlinked": len(group_ids),
+                        "requests_deleted": len(request_ids),
+                        "notification_jobs_deleted": len(job_ids),
+                    },
+                )
+            )
+            await session.flush()
+            if lesson_ids:
+                from .communications import (
+                    reconcile_confirmation_requests,
+                    reconcile_daily_reminders,
+                )
+
+                timezone = _display_timezone(center_timezone)
+                await reconcile_daily_reminders(session, now=utcnow(), timezone=timezone)
+                await reconcile_confirmation_requests(
+                    session, now=utcnow(), timezone=timezone
+                )
+            await session.commit()
+            return {
+                "id": item_id,
+                "deleted": True,
+                "lessons_deleted": len(lesson_ids),
+                "series_deleted": len(series_ids),
+                "groups_unlinked": len(group_ids),
             }
 
     @router.post("/rooms", status_code=status.HTTP_201_CREATED)

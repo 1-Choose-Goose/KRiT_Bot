@@ -157,11 +157,24 @@ def test_reference_edit_is_available_from_rows_without_duplicate_button() -> Non
     delete_group = next(
         button for button in reference_buttons if button.text() == "Удалить группу"
     )
+    delete_subject = next(
+        button for button in reference_buttons if button.text() == "Удалить предмет"
+    )
     assert delete_group.property("kind") == "danger"
+    assert delete_subject.property("kind") == "danger"
     assert not delete_group.isEnabled()
+    assert not delete_subject.isEnabled()
     window.learning_page._references_loaded(
         {
-            "subjects": [],
+            "subjects": [
+                {
+                    "id": 8,
+                    "name": "Информатика",
+                    "color": "#2563eb",
+                    "teacher_ids": [],
+                    "active": True,
+                }
+            ],
             "rooms": [],
             "groups": [
                 {
@@ -180,6 +193,8 @@ def test_reference_edit_is_available_from_rows_without_duplicate_button() -> Non
     )
     window.learning_page.reference_tables["groups"].selectRow(0)
     assert delete_group.isEnabled()
+    window.learning_page.reference_tables["subjects"].selectRow(0)
+    assert delete_subject.isEnabled()
     window.close()
     app.processEvents()
 

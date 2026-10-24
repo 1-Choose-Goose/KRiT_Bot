@@ -2172,6 +2172,7 @@ class LearningPage(QWidget):
         self.reference_empty_labels: dict[str, QLabel] = {}
         self.group_members_button: QPushButton | None = None
         self.delete_group_button: QPushButton | None = None
+        self.delete_subject_button: QPushButton | None = None
         for kind, title, headers in (
             (
                 "subjects",
@@ -2197,6 +2198,12 @@ class LearningPage(QWidget):
             )
             buttons.addWidget(add_button)
             group_members_button: QPushButton | None = None
+            if kind == "subjects":
+                self.delete_subject_button = _button(
+                    "Удалить предмет", self.delete_selected_subject, "danger"
+                )
+                self.delete_subject_button.setEnabled(False)
+                buttons.addWidget(self.delete_subject_button)
             if kind == "groups":
                 group_members_button = _button("Состав группы", self.manage_selected_group)
                 group_members_button.setEnabled(False)
@@ -2215,6 +2222,10 @@ class LearningPage(QWidget):
             else:
                 table = _table(headers, stretch=(0,), compact=tuple(range(1, len(headers))))
             self.reference_tables[kind] = table
+            if kind == "subjects":
+                table.itemSelectionChanged.connect(
+                    self._sync_subject_reference_actions
+                )
             if kind == "groups":
                 table.itemSelectionChanged.connect(self._sync_group_reference_actions)
             table.itemActivated.connect(lambda _item, key=kind: self.edit_selected_reference(key))
@@ -3448,6 +3459,43 @@ class LearningPage(QWidget):
             self.group_members_button.setEnabled(selected)
         if self.delete_group_button is not None:
             self.delete_group_button.setEnabled(selected)
+
+    def _sync_subject_reference_actions(self) -> None:
+        selected = self.reference_tables["subjects"].currentRow() >= 0
+        if self.delete_subject_button is not None:
+            self.delete_subject_button.setEnabled(selected)
+
+    def delete_selected_subject(self) -> None:
+        table = self.reference_tables["subjects"]
+        row = table.currentRow()
+        item = table.item(row, 0) if row >= 0 else None
+        if item is None:
+            return
+        subject = item.data(Qt.ItemDataRole.UserRole)
+        confirmation = QMessageBox(self)
+        confirmation.setIcon(QMessageBox.Icon.Warning)
+        confirmation.setWindowTitle("Безвозвратное удаление предмета")
+        confirmation.setText(
+            f"Навсегда удалить предмет «{subject.get('name', '')}»?"
+        )
+        confirmation.setInformativeText(
+            "Если предмет использовался, будут удалены все связанные занятия, "
+            "подтверждения и уведомления. У групп будет очищена привязка к предмету.\n\n"
+            "Это действие нельзя отменить. Удаление используемого предмета доступно "
+            "только суперадминистратору."
+        )
+        delete_button = confirmation.addButton(
+            "Удалить навсегда", QMessageBox.ButtonRole.DestructiveRole
+        )
+        confirmation.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        confirmation.exec()
+        if confirmation.clickedButton() != delete_button:
+            return
+        self._run(
+            self.api.delete_learning_subject,
+            int(subject["id"]),
+            done=lambda _result: self.refresh(),
+        )
 
     def delete_selected_group(self) -> None:
         table = self.reference_tables["groups"]
