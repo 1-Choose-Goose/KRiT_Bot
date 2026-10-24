@@ -164,10 +164,15 @@ def test_reference_edit_is_available_from_rows_without_duplicate_button() -> Non
     delete_subject = next(
         button for button in reference_buttons if button.text() == "Удалить предмет"
     )
+    delete_room = next(
+        button for button in reference_buttons if button.text() == "Удалить кабинет"
+    )
     assert delete_group.property("kind") == "danger"
     assert delete_subject.property("kind") == "danger"
+    assert delete_room.property("kind") == "danger"
     assert not delete_group.isEnabled()
     assert not delete_subject.isEnabled()
+    assert not delete_room.isEnabled()
     window.learning_page._references_loaded(
         {
             "subjects": [
@@ -179,7 +184,9 @@ def test_reference_edit_is_available_from_rows_without_duplicate_button() -> Non
                     "active": True,
                 }
             ],
-            "rooms": [],
+            "rooms": [
+                {"id": 9, "name": "Кабинет №9", "capacity": 8, "active": True}
+            ],
             "groups": [
                 {
                     "id": 15,
@@ -199,6 +206,8 @@ def test_reference_edit_is_available_from_rows_without_duplicate_button() -> Non
     assert delete_group.isEnabled()
     window.learning_page.reference_tables["subjects"].selectRow(0)
     assert delete_subject.isEnabled()
+    window.learning_page.reference_tables["rooms"].selectRow(0)
+    assert delete_room.isEnabled()
     window.close()
     app.processEvents()
 

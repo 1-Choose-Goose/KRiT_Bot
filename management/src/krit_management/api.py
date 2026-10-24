@@ -664,6 +664,14 @@ class ManagementApi:
         )
         return data if isinstance(data, dict) else {}
 
+    def delete_learning_room(self, room_id: int) -> dict[str, Any]:
+        data = self._request(
+            "DELETE",
+            f"/learning/rooms/{room_id}",
+            params={"cascade": "true"},
+        )
+        return data if isinstance(data, dict) else {}
+
     @staticmethod
     def _verify_subject_assignments(kind: str, payload: dict[str, Any], result: object) -> None:
         if kind != "subjects" or "teacher_ids" not in payload:

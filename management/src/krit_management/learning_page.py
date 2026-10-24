@@ -2288,6 +2288,7 @@ class LearningPage(QWidget):
         self.group_members_button: QPushButton | None = None
         self.delete_group_button: QPushButton | None = None
         self.delete_subject_button: QPushButton | None = None
+        self.delete_room_button: QPushButton | None = None
         for kind, title, headers in (
             (
                 "subjects",
@@ -2319,6 +2320,12 @@ class LearningPage(QWidget):
                 )
                 self.delete_subject_button.setEnabled(False)
                 buttons.addWidget(self.delete_subject_button)
+            if kind == "rooms":
+                self.delete_room_button = _button(
+                    "Удалить кабинет", self.delete_selected_room, "danger"
+                )
+                self.delete_room_button.setEnabled(False)
+                buttons.addWidget(self.delete_room_button)
             if kind == "groups":
                 group_members_button = _button("Состав группы", self.manage_selected_group)
                 group_members_button.setEnabled(False)
@@ -2341,6 +2348,8 @@ class LearningPage(QWidget):
                 table.itemSelectionChanged.connect(
                     self._sync_subject_reference_actions
                 )
+            if kind == "rooms":
+                table.itemSelectionChanged.connect(self._sync_room_reference_actions)
             if kind == "groups":
                 table.itemSelectionChanged.connect(self._sync_group_reference_actions)
             table.itemActivated.connect(lambda _item, key=kind: self.edit_selected_reference(key))
@@ -3583,6 +3592,11 @@ class LearningPage(QWidget):
         if self.delete_subject_button is not None:
             self.delete_subject_button.setEnabled(selected)
 
+    def _sync_room_reference_actions(self) -> None:
+        selected = self.reference_tables["rooms"].currentRow() >= 0
+        if self.delete_room_button is not None:
+            self.delete_room_button.setEnabled(selected)
+
     def delete_selected_subject(self) -> None:
         table = self.reference_tables["subjects"]
         row = table.currentRow()
@@ -3612,6 +3626,38 @@ class LearningPage(QWidget):
         self._run(
             self.api.delete_learning_subject,
             int(subject["id"]),
+            done=lambda _result: self.refresh(),
+        )
+
+    def delete_selected_room(self) -> None:
+        table = self.reference_tables["rooms"]
+        row = table.currentRow()
+        item = table.item(row, 0) if row >= 0 else None
+        if item is None:
+            return
+        room = item.data(Qt.ItemDataRole.UserRole)
+        confirmation = QMessageBox(self)
+        confirmation.setIcon(QMessageBox.Icon.Warning)
+        confirmation.setWindowTitle("Безвозвратное удаление кабинета")
+        confirmation.setText(
+            f"Навсегда удалить кабинет «{room.get('name', '')}»?"
+        )
+        confirmation.setInformativeText(
+            "Если кабинет использовался, будут удалены все связанные занятия, "
+            "подтверждения и уведомления. Онлайн-занятия не затрагиваются.\n\n"
+            "Это действие нельзя отменить. Удаление используемого кабинета доступно "
+            "только суперадминистратору."
+        )
+        delete_button = confirmation.addButton(
+            "Удалить навсегда", QMessageBox.ButtonRole.DestructiveRole
+        )
+        confirmation.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        confirmation.exec()
+        if confirmation.clickedButton() != delete_button:
+            return
+        self._run(
+            self.api.delete_learning_room,
+            int(room["id"]),
             done=lambda _result: self.refresh(),
         )
 
