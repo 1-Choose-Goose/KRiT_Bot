@@ -667,7 +667,6 @@ async def reconcile_daily_reminders(
             recipient_context=bundle.recipient_context,
         )
         catch_up_reserved = False
-        reserved_schedules: set[datetime] = set()
         for offset in offsets:
             policy = await resolver.resolve(
                 recipient_person_id=bundle.recipient_person_id,
@@ -686,24 +685,6 @@ async def reconcile_daily_reminders(
                 or (after_confirmation == "one_hour_only" and offset != 60)
             )
             scheduled = bundle.anchor_start_at.astimezone(UTC) - timedelta(minutes=offset)
-            scheduled = apply_quiet_hours(
-                scheduled,
-                policy=policy,
-                timezone=timezone,
-                meaningful_until=bundle.anchor_start_at.astimezone(UTC),
-            )
-            schedule_is_eligible = (
-                policy.enabled
-                and not suppressed
-                and scheduled is not None
-                and scheduled < bundle.anchor_start_at.astimezone(UTC)
-            )
-            if schedule_is_eligible and scheduled is not None:
-                if scheduled in reserved_schedules:
-                    if existing is not None and existing.status in {"pending", "retry"}:
-                        existing.status = "cancelled"
-                    continue
-                reserved_schedules.add(scheduled)
             catch_up = scheduled is not None and scheduled <= now.astimezone(UTC)
             if existing is not None and existing.status == "sent":
                 if catch_up:

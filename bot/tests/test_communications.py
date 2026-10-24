@@ -424,7 +424,7 @@ async def test_late_lesson_queues_only_one_current_reminder_per_recipient(tmp_pa
     await engine.dispose()
 
 
-async def test_quiet_hours_do_not_duplicate_daily_reminder_at_same_time(tmp_path) -> None:
+async def test_quiet_hours_do_not_delay_lesson_reminders(tmp_path) -> None:
     engine, sessions = await _database(tmp_path)
     timezone = ZoneInfo("Asia/Yekaterinburg")
     now = datetime(2026, 10, 23, 21, 0, tzinfo=timezone).astimezone(UTC)
@@ -467,15 +467,9 @@ async def test_quiet_hours_do_not_duplicate_daily_reminder_at_same_time(tmp_path
             ).all()
         )
         for rule in reminder_rules:
-            rule.quiet_hours_policy = "bypass"
+            rule.quiet_hours_policy = "defer"
             rule.quiet_start = "22:00"
             rule.quiet_end = "08:00"
-        await session.flush()
-
-        # Reproduce jobs already queued before the quiet-hours collision is detected.
-        await reconcile_daily_reminders(session, now=now, timezone=timezone)
-        for rule in reminder_rules:
-            rule.quiet_hours_policy = "defer"
         await session.flush()
 
         await reconcile_daily_reminders(session, now=now, timezone=timezone)
@@ -490,32 +484,27 @@ async def test_quiet_hours_do_not_duplicate_daily_reminder_at_same_time(tmp_path
             ).all()
         )
 
-        assert len(jobs) == 2, [
+        assert len(jobs) == 4, [
             (job.dedupe_key, job.scheduled_at) for job in jobs
         ]
         assert {job.recipient_context for job in jobs} == {"student", "teacher"}
-        assert all(":reminder:60:" in job.dedupe_key for job in jobs)
-        assert all(
-            (
+        expected_local_time_by_offset = {180: (6, 0), 60: (8, 0)}
+        for job in jobs:
+            offset = next(
+                value
+                for value in expected_local_time_by_offset
+                if f":reminder:{value}:" in job.dedupe_key
+            )
+            local_scheduled = (
                 job.scheduled_at.replace(tzinfo=UTC)
                 if job.scheduled_at.tzinfo is None
                 else job.scheduled_at
             ).astimezone(timezone)
-            == datetime(2026, 10, 24, 8, 0, tzinfo=timezone)
-            for job in jobs
-        )
-        cancelled_jobs = list(
-            (
-                await session.scalars(
-                    select(NotificationJob).where(
-                        NotificationJob.event_type == "lesson_reminder",
-                        NotificationJob.status == "cancelled",
-                    )
-                )
-            ).all()
-        )
-        assert len(cancelled_jobs) == 2
-        assert all(":reminder:180:" in job.dedupe_key for job in cancelled_jobs)
+            expected_hour, expected_minute = expected_local_time_by_offset[offset]
+            assert (local_scheduled.hour, local_scheduled.minute) == (
+                expected_hour,
+                expected_minute,
+            )
     await engine.dispose()
 
 
