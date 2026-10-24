@@ -18,6 +18,7 @@ from krit_bot.communication_models import (
     InteractionResponse,
     InteractionResponseHistory,
     LessonAttendanceIntent,
+    NotificationGlobalRule,
     PersonNotificationOverride,
 )
 from krit_bot.communications import (
@@ -420,6 +421,101 @@ async def test_late_lesson_queues_only_one_current_reminder_per_recipient(tmp_pa
             ).all()
         )
         assert len(all_jobs) == 2
+    await engine.dispose()
+
+
+async def test_quiet_hours_do_not_duplicate_daily_reminder_at_same_time(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    timezone = ZoneInfo("Asia/Yekaterinburg")
+    now = datetime(2026, 10, 23, 21, 0, tzinfo=timezone).astimezone(UTC)
+    lesson_start = datetime(2026, 10, 24, 9, 0, tzinfo=timezone).astimezone(UTC)
+    async with sessions() as session:
+        student = Person(full_name="Утренний ученик", phone="+79000000221")
+        teacher = Person(full_name="Утренний учитель", phone="+79000000222")
+        subject = Subject(name="Программирование", color="#2563eb")
+        room = Room(name="Кабинет № 2", capacity=10)
+        session.add_all([student, teacher, subject, room])
+        await session.flush()
+        lesson = Lesson(
+            subject_id=subject.id,
+            teacher_id=teacher.id,
+            room_id=room.id,
+            start_at=lesson_start,
+            end_at=lesson_start + timedelta(hours=1),
+            teacher_name_snapshot=teacher.full_name,
+            room_name_snapshot=room.name,
+            subject_name_snapshot=subject.name,
+        )
+        session.add(lesson)
+        await session.flush()
+        session.add(
+            LessonParticipant(
+                lesson_id=lesson.id,
+                person_id=student.id,
+                person_name_snapshot=student.full_name,
+            )
+        )
+        await session.flush()
+        await ensure_default_rules(session)
+        reminder_rules = list(
+            (
+                await session.scalars(
+                    select(NotificationGlobalRule).where(
+                        NotificationGlobalRule.event_code == "lesson_reminder"
+                    )
+                )
+            ).all()
+        )
+        for rule in reminder_rules:
+            rule.quiet_hours_policy = "bypass"
+            rule.quiet_start = "22:00"
+            rule.quiet_end = "08:00"
+        await session.flush()
+
+        # Reproduce jobs already queued before the quiet-hours collision is detected.
+        await reconcile_daily_reminders(session, now=now, timezone=timezone)
+        for rule in reminder_rules:
+            rule.quiet_hours_policy = "defer"
+        await session.flush()
+
+        await reconcile_daily_reminders(session, now=now, timezone=timezone)
+        jobs = list(
+            (
+                await session.scalars(
+                    select(NotificationJob).where(
+                        NotificationJob.event_type == "lesson_reminder",
+                        NotificationJob.status == "pending",
+                    )
+                )
+            ).all()
+        )
+
+        assert len(jobs) == 2, [
+            (job.dedupe_key, job.scheduled_at) for job in jobs
+        ]
+        assert {job.recipient_context for job in jobs} == {"student", "teacher"}
+        assert all(":reminder:60:" in job.dedupe_key for job in jobs)
+        assert all(
+            (
+                job.scheduled_at.replace(tzinfo=UTC)
+                if job.scheduled_at.tzinfo is None
+                else job.scheduled_at
+            ).astimezone(timezone)
+            == datetime(2026, 10, 24, 8, 0, tzinfo=timezone)
+            for job in jobs
+        )
+        cancelled_jobs = list(
+            (
+                await session.scalars(
+                    select(NotificationJob).where(
+                        NotificationJob.event_type == "lesson_reminder",
+                        NotificationJob.status == "cancelled",
+                    )
+                )
+            ).all()
+        )
+        assert len(cancelled_jobs) == 2
+        assert all(":reminder:180:" in job.dedupe_key for job in cancelled_jobs)
     await engine.dispose()
 
 
