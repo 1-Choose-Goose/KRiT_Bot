@@ -297,6 +297,36 @@ async def test_learning_schedule_conflicts_capacity_and_lifecycle(tmp_path) -> N
                 },
             )
             assert membership_without_bot.status_code == 201, membership_without_bot.text
+            membership_to_delete = await client.post(
+                f"/api/v1/learning/groups/{group_id}/memberships",
+                headers=headers,
+                json={
+                    "person_id": student_two,
+                    "start_at": datetime.now(UTC).isoformat(),
+                    "end_at": None,
+                },
+            )
+            assert membership_to_delete.status_code == 201, membership_to_delete.text
+
+            deleted_membership = await client.delete(
+                f"/api/v1/learning/groups/{group_id}/memberships/"
+                f"{membership_to_delete.json()['id']}",
+                headers=headers,
+            )
+            assert deleted_membership.status_code == 200, deleted_membership.text
+            assert deleted_membership.json() == {
+                "id": membership_to_delete.json()["id"],
+                "deleted": True,
+            }
+            memberships_after_delete = await client.get(
+                f"/api/v1/learning/groups/{group_id}/memberships",
+                headers=headers,
+            )
+            assert memberships_after_delete.status_code == 200
+            assert all(
+                item["id"] != membership_to_delete.json()["id"]
+                for item in memberships_after_delete.json()
+            )
 
             references = await client.get("/api/v1/learning/reference-data", headers=headers)
             assert references.status_code == 200

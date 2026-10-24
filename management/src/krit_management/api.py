@@ -990,6 +990,13 @@ class ManagementApi:
             json={},
         )
 
+    def delete_group_membership(self, group_id: int, membership_id: int) -> dict[str, Any]:
+        data = self._request(
+            "DELETE",
+            f"/learning/groups/{group_id}/memberships/{membership_id}",
+        )
+        return data if isinstance(data, dict) else {}
+
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         try:
             response = self._client.request(method, path, **kwargs)

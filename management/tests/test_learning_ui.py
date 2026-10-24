@@ -27,6 +27,7 @@ from krit_management.api import ApiError, ManagementApi
 from krit_management.dialogs import PersonDialog
 from krit_management.learning_page import (
     FreeSlotDialog,
+    GroupMembersDialog,
     LearningPage,
     LessonCardDialog,
     LessonDialog,
@@ -2150,6 +2151,38 @@ def test_group_selection_loads_members_and_keeps_extra_student_available() -> No
     assert payload["participant_ids"] == [11, 12]
     assert payload["excluded_participant_ids"] == [10]
     assert dialog.participant_count.text() == "Из группы: 1 · исключено: 1 · доп.: 1"
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_group_member_is_marked_for_permanent_removal() -> None:
+    app = QApplication.instance() or QApplication([])
+    dialog = GroupMembersDialog(
+        {"id": 4, "name": "Группа А"},
+        [{"id": 10, "full_name": "Алексеев Александр Фёдорович"}],
+        [
+            {
+                "id": 42,
+                "person_id": 10,
+                "person_name": "Алексеев Александр Фёдорович",
+                "start_at": "2026-10-01T00:00:00+05:00",
+                "end_at": "2026-10-20T00:00:00+05:00",
+            }
+        ],
+    )
+
+    delete_button = next(
+        button
+        for button in dialog.findChildren(QPushButton)
+        if button.text() == "Удалить из группы"
+    )
+    assert delete_button.property("kind") == "danger"
+    dialog.table.selectRow(0)
+    delete_button.click()
+    app.processEvents()
+
+    assert dialog.table.item(0, 3).text() == "Будет удалено"
+    assert dialog.changes() == ([], [42])
     dialog.deleteLater()
     app.processEvents()
 

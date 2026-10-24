@@ -1701,6 +1701,32 @@ def create_learning_router(
                 await session.commit()
             return _model(item, "id", "group_id", "person_id", "start_at", "end_at")
 
+    @router.delete("/groups/{group_id}/memberships/{membership_id}")
+    async def delete_membership(
+        group_id: int,
+        membership_id: int,
+        admin_id: int = Depends(require_management_token),
+    ) -> dict[str, Any]:
+        async with sessions() as session:
+            item = await session.get(GroupMembership, membership_id, with_for_update=True)
+            if item is None or item.group_id != group_id:
+                raise HTTPException(404, "Участник группы не найден")
+            session.add(
+                AuditEvent(
+                    actor_admin_id=admin_id,
+                    action="group_membership.deleted",
+                    entity_type="group_membership",
+                    entity_id=item.id,
+                    details={
+                        "group_id": item.group_id,
+                        "person_id": item.person_id,
+                    },
+                )
+            )
+            await session.delete(item)
+            await session.commit()
+            return {"id": membership_id, "deleted": True}
+
     @router.get("/lessons")
     async def list_lessons(
         date_from: datetime,

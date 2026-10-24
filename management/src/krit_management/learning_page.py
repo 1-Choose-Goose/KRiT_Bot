@@ -1710,13 +1710,18 @@ class GroupMembersDialog(QDialog):
             self.student.addItem(person.get("full_name", ""), person.get("id"))
         actions.addWidget(self.student, 1)
         actions.addWidget(_button("Добавить", self._add, "primary"))
-        actions.addWidget(_button("Завершить участие", self._end, "warning"))
+        self.delete_member_button = _button(
+            "Удалить из группы", self._delete, "danger"
+        )
+        self.delete_member_button.setEnabled(False)
+        actions.addWidget(self.delete_member_button)
         layout.addLayout(actions)
         self.table = _table(
             ["Ученик", "Начало", "Окончание", "Состояние"],
             stretch=(0,),
             compact=(1, 2, 3),
         )
+        self.table.itemSelectionChanged.connect(self._sync_actions)
         layout.addWidget(self.table)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -1731,7 +1736,9 @@ class GroupMembersDialog(QDialog):
     def _add(self) -> None:
         person_id = self.student.currentData()
         if person_id is None or any(
-            item.get("person_id") == person_id and not item.get("end_at")
+            item.get("person_id") == person_id
+            and not item.get("end_at")
+            and not item.get("_delete")
             for item in self.memberships
         ):
             return
@@ -1744,16 +1751,19 @@ class GroupMembersDialog(QDialog):
         )
         self._render()
 
-    def _end(self) -> None:
+    def _delete(self) -> None:
         row = self.table.currentRow()
         if row < 0:
             return
         item = self.memberships[row]
-        if item.get("id") and not item.get("end_at"):
-            item["_end"] = True
+        if item.get("id"):
+            item["_delete"] = True
         elif item.get("_new"):
             self.memberships.pop(row)
         self._render()
+
+    def _sync_actions(self) -> None:
+        self.delete_member_button.setEnabled(self.table.currentRow() >= 0)
 
     def _render(self) -> None:
         self.table.setRowCount(len(self.memberships))
@@ -1766,15 +1776,19 @@ class GroupMembersDialog(QDialog):
                 if start
                 else "После сохранения",
                 parse_center(end).strftime("%d.%m.%Y") if end else "—",
-                "Будет завершено" if item.get("_end") else "Активно" if not end else "Завершено",
+                "Будет удалено"
+                if item.get("_delete")
+                else "Активно"
+                if not end
+                else "Завершено",
             ]
             for column, value in enumerate(values):
                 self.table.setItem(row, column, QTableWidgetItem(str(value)))
 
     def changes(self) -> tuple[list[int], list[int]]:
         additions = [int(item["person_id"]) for item in self.memberships if item.get("_new")]
-        endings = [int(item["id"]) for item in self.memberships if item.get("_end")]
-        return additions, endings
+        deletions = [int(item["id"]) for item in self.memberships if item.get("_delete")]
+        return additions, deletions
 
 
 class FreeSlotDialog(QDialog):
@@ -3530,13 +3544,13 @@ class LearningPage(QWidget):
         )
         if not dialog.exec():
             return
-        additions, endings = dialog.changes()
+        additions, deletions = dialog.changes()
 
         def save() -> None:
+            for membership_id in deletions:
+                self.api.delete_group_membership(int(group["id"]), membership_id)
             for person_id in additions:
                 self.api.add_group_membership(int(group["id"]), person_id)
-            for membership_id in endings:
-                self.api.end_group_membership(int(group["id"]), membership_id)
 
         self._run(save, done=lambda _result: self.refresh())
 
