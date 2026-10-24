@@ -1413,12 +1413,23 @@ def test_added_lesson_text_is_specific_and_snapshots_are_recipient_safe() -> Non
         [],
         changed=True,
         added=[guardian_snapshot],
+        recipient_context="guardian",
         timezone=timezone,
     )
     assert "Новое занятие" in text
     assert "05.10 10:00–11:00" in text
     assert "Информатика" in text
     assert "Олег Учитель" in text
+
+    teacher_text = _schedule_text(
+        [],
+        changed=True,
+        added=[teacher_snapshot],
+        recipient_context="teacher",
+        timezone=timezone,
+    )
+    assert "Преподаватель:" not in teacher_text
+    assert "Ученики: Анна, Марина" in teacher_text
 
 
 async def test_history_cleanup_keeps_business_confirmation(tmp_path) -> None:

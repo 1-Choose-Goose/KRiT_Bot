@@ -1820,6 +1820,7 @@ def _schedule_text(
     added: list[dict[str, Any]] | None = None,
     removed: list[dict[str, Any]] | None = None,
     changed_items: list[tuple[dict[str, Any], dict[str, Any]]] | None = None,
+    recipient_context: str | None = None,
     timezone: ZoneInfo | None = None,
 ) -> str:
     heading = "📅 Расписание обновилось" if changed else "📅 Расписание опубликовано"
@@ -1828,22 +1829,31 @@ def _schedule_text(
         lines: list[str] = []
         labels = {
             "subject": "Предмет",
-            "teacher": "Преподаватель",
             "room": "Место",
         }
+        if recipient_context != "teacher":
+            labels["teacher"] = "Преподаватель"
         for snapshot in added or []:
             start = datetime.fromisoformat(str(snapshot["start_at"])).astimezone(zone)
             end = datetime.fromisoformat(str(snapshot["end_at"])).astimezone(zone)
-            lines.extend(
-                [
-                    "Новое занятие",
-                    f"{start:%d.%m %H:%M}–{end:%H:%M}",
-                    str(snapshot.get("subject") or "—"),
-                    f"Преподаватель: {snapshot.get('teacher') or '—'}",
-                    f"Место: {snapshot.get('room') or '—'}",
-                    "",
-                ]
-            )
+            lesson_lines = [
+                "Новое занятие",
+                f"{start:%d.%m %H:%M}–{end:%H:%M}",
+                str(snapshot.get("subject") or "—"),
+            ]
+            if recipient_context == "teacher":
+                students = snapshot.get("students") or []
+                lesson_lines.append(
+                    "Ученики: " + ", ".join(students)
+                    if students
+                    else "Ученики пока не назначены"
+                )
+            else:
+                lesson_lines.append(
+                    f"Преподаватель: {snapshot.get('teacher') or '—'}"
+                )
+            lesson_lines.extend([f"Место: {snapshot.get('room') or '—'}", ""])
+            lines.extend(lesson_lines)
         for old, new in changed_items or []:
             start = datetime.fromisoformat(str(new["start_at"])).astimezone(zone)
             lines.append(f"{start:%d.%m} · {new['subject']}")
@@ -1860,8 +1870,8 @@ def _schedule_text(
                     lines.append(f"{label}: {old.get(field) or '—'} → {new.get(field) or '—'}")
             old_students = set(old.get("students") or [])
             new_students = set(new.get("students") or [])
-            if added := sorted(new_students - old_students):
-                lines.append("Добавлены ученики: " + ", ".join(added))
+            if added_students := sorted(new_students - old_students):
+                lines.append("Добавлены ученики: " + ", ".join(added_students))
             if removed_students := sorted(old_students - new_students):
                 lines.append("Больше не участвуют: " + ", ".join(removed_students))
             lines.append("")
@@ -2996,6 +3006,7 @@ def create_communications_router(
                     added=added_by_recipient.get(recipient_key),
                     removed=removed_by_recipient.get(recipient_key),
                     changed_items=changed_by_recipient.get(recipient_key),
+                    recipient_context=context,
                     timezone=timezone,
                 )
                 snapshot_values = [
