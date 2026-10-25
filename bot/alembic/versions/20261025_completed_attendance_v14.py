@@ -1,6 +1,6 @@
 """repair attendance left expected after completed lessons
 
-Revision ID: 20261025_completed_attendance_v14
+Revision ID: 20261025_attendance_v14
 Revises: 20261021_online_lessons_v13
 Create Date: 2026-10-25
 """
@@ -9,7 +9,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "20261025_completed_attendance_v14"
+revision: str = "20261025_attendance_v14"
 down_revision: str | None = "20261021_online_lessons_v13"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

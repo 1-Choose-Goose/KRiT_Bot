@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "krit-management"
-version = "1.2.0"
+version = "1.3.0"
 description = "Management panel for KRiT education center bot"
 requires-python = ">=3.11"
 dependencies = [
