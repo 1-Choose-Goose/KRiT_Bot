@@ -1205,6 +1205,36 @@ def test_cancelled_lesson_is_not_shown_as_expected_in_student_journal() -> None:
     app.processEvents()
 
 
+def test_completed_lesson_is_not_shown_as_expected_in_student_journal() -> None:
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage(FakeApi())  # type: ignore[arg-type]
+    assert page.pool.waitForDone(3_000)
+    page.shutdown()
+
+    page._student_history_loaded(
+        {
+            "lessons": [
+                {
+                    "id": 29,
+                    "start_at": "2026-10-24T11:00:00+05:00",
+                    "end_at": "2026-10-24T12:30:00+05:00",
+                    "subject_name_snapshot": "Программирование",
+                    "teacher_name_snapshot": "Куц Олег Олегович",
+                    "status": "completed",
+                    "attendance_status": "expected",
+                }
+            ]
+        }
+    )
+
+    assert page.student_journal.item(0, 4).text() == "Не пришёл"
+    assert page.student_journal.item(0, 4).toolTip() == (
+        "Занятие завершено без отметки о посещении"
+    )
+    page.deleteLater()
+    app.processEvents()
+
+
 def test_calendar_can_remove_selected_planned_lesson(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     page = LearningPage(FakeApi())  # type: ignore[arg-type]

@@ -2805,13 +2805,15 @@ def create_learning_router(
                 item.completion_reason = payload.reason.strip()
                 item.completion_public_comment = None
                 for participant in participants:
-                    if participant.attendance_status in {"present", "late"}:
+                    if participant.attendance_status == "expected":
+                        apply_attendance_state(participant, "absent")
+                    elif participant.attendance_status in {"present", "late"}:
                         if participant.arrived_at is not None and _db_utc(
                             participant.arrived_at
                         ) <= actual_end:
                             participant.left_at = actual_end
                         else:
-                            apply_attendance_state(participant, "expected")
+                            apply_attendance_state(participant, "absent")
                 if not segments:
                     session.add(
                         LessonTeacherSegment(

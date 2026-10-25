@@ -416,7 +416,7 @@ async def test_operational_lesson_flow_and_identity_guards(tmp_path) -> None:
             assert datetime.fromisoformat(reconciled.json()["actual_end_at"]) == (
                 forgotten_start + timedelta(hours=1)
             )
-            assert reconciled.json()["participants"][0]["attendance_status"] == "expected"
+            assert reconciled.json()["participants"][0]["attendance_status"] == "absent"
             assert len(reconciled.json()["teacher_segments"]) == 1
             assert datetime.fromisoformat(
                 reconciled.json()["teacher_segments"][0]["ended_at"]

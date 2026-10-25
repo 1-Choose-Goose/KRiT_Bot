@@ -47,7 +47,7 @@ def test_alembic_builds_empty_database(tmp_path, monkeypatch) -> None:
         assert "learning_lesson_teacher_segments" in tables
         assert "learning_subject_teachers" in tables
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20261021_online_lessons_v13",
+            "20261025_completed_attendance_v14",
         )
         attempt_columns = {
             item[1] for item in connection.execute("PRAGMA table_info(access_attempts)")
@@ -163,7 +163,7 @@ def test_alembic_adopts_known_legacy_database(tmp_path, monkeypatch) -> None:
             "SELECT person_id, max_user_id FROM person_max_identities WHERE person_id = 7"
         ).fetchone() == (7, 700000007)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "20261021_online_lessons_v13",
+            "20261025_completed_attendance_v14",
         )
         assert connection.execute(
             "SELECT COUNT(*) FROM learning_admin_notifications "
@@ -228,6 +228,11 @@ def test_upgrade_from_v4_preserves_learning_history(tmp_path, monkeypatch) -> No
         "'completed', 'Учитель', 'Кабинет', 'Предмет', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
     )
     connection.execute(
+        "INSERT INTO learning_lesson_participants "
+        "(id, lesson_id, person_id, person_name_snapshot, attendance_status) VALUES "
+        "(45, 42, 1, 'Ученик', 'expected')"
+    )
+    connection.execute(
         "INSERT INTO learning_club_presence_sessions "
         "(id, person_id, source, arrived_at) "
         "VALUES (43, 1, 'management', '2026-09-30 09:00:00')"
@@ -254,5 +259,8 @@ def test_upgrade_from_v4_preserves_learning_history(tmp_path, monkeypatch) -> No
         assert connection.execute(
             "SELECT message FROM learning_admin_notifications WHERE id = 44"
         ).fetchone() == ("Сохранить",)
+        assert connection.execute(
+            "SELECT attendance_status FROM learning_lesson_participants WHERE id = 45"
+        ).fetchone() == ("absent",)
     finally:
         connection.close()

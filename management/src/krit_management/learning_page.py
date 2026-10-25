@@ -3940,11 +3940,14 @@ class LearningPage(QWidget):
         for row, lesson in enumerate(lessons):
             start = parse_center(lesson["start_at"])
             end = parse_center(lesson["end_at"])
-            attendance_label = (
-                "Отменено"
-                if lesson.get("status") == "cancelled"
-                else labels.get(lesson.get("attendance_status"), "")
-            )
+            lesson_status = lesson.get("status")
+            attendance_status = lesson.get("attendance_status")
+            if lesson_status == "cancelled":
+                attendance_label = "Отменено"
+            elif lesson_status == "completed" and attendance_status == "expected":
+                attendance_label = "Не пришёл"
+            else:
+                attendance_label = labels.get(attendance_status, "")
             values = [
                 f"{start:%d.%m.%Y}",
                 lesson.get("subject_name_snapshot", ""),
@@ -3960,6 +3963,12 @@ class LearningPage(QWidget):
                     cell.setToolTip(
                         str(lesson.get("cancelled_reason") or "Причина не указана")
                     )
+                elif (
+                    column == 4
+                    and lesson_status == "completed"
+                    and attendance_status == "expected"
+                ):
+                    cell.setToolTip("Занятие завершено без отметки о посещении")
                 self.student_journal.setItem(row, column, cell)
 
     def _open_student_journal_lesson(self, _index: object = None) -> None:
