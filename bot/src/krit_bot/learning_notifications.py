@@ -133,6 +133,35 @@ class LearningNotificationWorker:
             )
             if job is None:
                 return False
+            bundle_base_key = job.payload.get("bundle_base_key")
+            if job.event_type == "lesson_reminder" and bundle_base_key:
+                newer_candidates = list(
+                    (
+                        await session.scalars(
+                            select(NotificationJob).where(
+                                NotificationJob.id != job.id,
+                                NotificationJob.event_type == "lesson_reminder",
+                                NotificationJob.recipient_person_id
+                                == job.recipient_person_id,
+                                NotificationJob.recipient_context == job.recipient_context,
+                                NotificationJob.subject_person_id
+                                == job.subject_person_id,
+                                NotificationJob.scheduled_at > job.scheduled_at,
+                                NotificationJob.scheduled_at <= now,
+                                NotificationJob.status.in_(["pending", "retry", "sent"]),
+                            )
+                        )
+                    ).all()
+                )
+                if any(
+                    candidate.payload.get("bundle_base_key") == bundle_base_key
+                    for candidate in newer_candidates
+                ):
+                    job.status = "cancelled"
+                    job.last_error = "Заменено более актуальным напоминанием"
+                    job.updated_at = now
+                    await session.commit()
+                    return True
             person = await session.get(Person, job.recipient_person_id)
             identity = await session.get(PersonMaxIdentity, job.recipient_person_id)
             if (

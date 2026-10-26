@@ -113,7 +113,7 @@ async def ensure_default_rules(session: AsyncSession) -> None:
                         event_code=key[0],
                         recipient_context=context,
                         offset_minutes=offset,
-                        configuration={"after_confirmation": "all"},
+                        configuration={"after_confirmation": "one_hour_only"},
                     )
                 )
         confirmation_offsets = {
@@ -224,11 +224,10 @@ async def ensure_default_rules(session: AsyncSession) -> None:
     )
     for rule in reminder_rules:
         configuration = dict(rule.configuration or {})
-        legacy_rule = configuration.get("after_confirmation") == "one_hour_only"
-        if legacy_rule:
-            configuration["after_confirmation"] = "all"
+        if configuration.get("after_confirmation") in {None, "all"}:
+            configuration["after_confirmation"] = "one_hour_only"
             rule.configuration = configuration
-        if legacy_rule and rule.offset_minutes == 1440:
+        if rule.offset_minutes == 1440:
             rule.enabled = False
     await session.execute(
         update(NotificationJob)
@@ -679,7 +678,9 @@ async def reconcile_daily_reminders(
             existing = await session.scalar(
                 select(NotificationJob).where(NotificationJob.dedupe_key.like(prefix + "%"))
             )
-            after_confirmation = policy.configuration.get("after_confirmation", "all")
+            after_confirmation = policy.configuration.get(
+                "after_confirmation", "one_hour_only"
+            )
             suppressed = has_response and (
                 after_confirmation == "none"
                 or (after_confirmation == "one_hour_only" and offset != 60)
@@ -819,13 +820,13 @@ async def reconcile_confirmation_requests(
                 await session.scalars(
                     select(NotificationJob).where(
                         NotificationJob.dedupe_key.like(prefix + "%"),
-                        NotificationJob.status.in_(["pending", "retry"]),
                     )
                 )
             ).all()
         )
         for stale in stale_jobs:
-            stale.status = "cancelled"
+            if stale.status in {"pending", "retry"}:
+                stale.status = "cancelled"
             if stale.interaction_request_id:
                 old_request = await session.get(InteractionRequest, stale.interaction_request_id)
                 if old_request and old_request.status in {"active", "draft"}:

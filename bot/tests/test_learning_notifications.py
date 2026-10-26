@@ -379,6 +379,70 @@ async def test_notification_recovery_and_deduplicated_delivery(tmp_path) -> None
     await engine.dispose()
 
 
+async def test_overdue_older_bundle_reminder_is_cancelled_before_delivery(tmp_path) -> None:
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'overdue-reminders.db'}")
+    await ensure_schema(engine)
+    sessions = build_session_factory(engine)
+    now = utcnow()
+    async with sessions() as session:
+        person = Person(
+            full_name="Получатель Напоминаний",
+            phone="+79000000101",
+            active=True,
+        )
+        session.add(person)
+        await session.flush()
+        session.add(
+            PersonMaxIdentity(
+                person_id=person.id,
+                verified_phone=person.phone,
+                max_user_id=101,
+            )
+        )
+        common = {
+            "event_type": "lesson_reminder",
+            "recipient_person_id": person.id,
+            "recipient_context": "student",
+            "subject_person_id": person.id,
+            "status": "pending",
+        }
+        session.add_all(
+            [
+                NotificationJob(
+                    **common,
+                    dedupe_key="daily:student:1:2026-10-26:reminder:180:old",
+                    scheduled_at=now - timedelta(hours=2),
+                    payload={"text": "Старое напоминание", "bundle_base_key": "daily:1"},
+                ),
+                NotificationJob(
+                    **common,
+                    dedupe_key="daily:student:1:2026-10-26:reminder:60:new",
+                    scheduled_at=now - timedelta(minutes=1),
+                    payload={"text": "Актуальное напоминание", "bundle_base_key": "daily:1"},
+                ),
+            ]
+        )
+        await session.commit()
+
+    api = FakeMax()
+    worker = LearningNotificationWorker(sessions=sessions, api=api)  # type: ignore[arg-type]
+    assert await worker.process_one() is True
+    assert api.sent == []
+    assert await worker.process_one() is True
+    assert api.sent == [(101, "Актуальное напоминание")]
+
+    async with sessions() as session:
+        jobs = list(
+            (
+                await session.scalars(
+                    select(NotificationJob).order_by(NotificationJob.scheduled_at)
+                )
+            ).all()
+        )
+        assert [job.status for job in jobs] == ["cancelled", "sent"]
+    await engine.dispose()
+
+
 async def test_notification_recovery_keeps_fresh_processing_job(tmp_path) -> None:
     engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'fresh-processing.db'}")
     await ensure_schema(engine)

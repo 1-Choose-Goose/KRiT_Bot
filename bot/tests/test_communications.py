@@ -771,6 +771,141 @@ async def test_daily_lessons_are_bundled_once_per_person_and_day(tmp_path) -> No
     await engine.dispose()
 
 
+async def test_answered_bundle_keeps_only_one_hour_reminder(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    timezone = ZoneInfo("UTC")
+    now = datetime(2026, 10, 26, 8, 0, tzinfo=UTC)
+    async with sessions() as session:
+        student = Person(full_name="Ученик", phone="+79000000301")
+        teacher = Person(full_name="Учитель", phone="+79000000302")
+        subject = Subject(name="Математика", color="#2563eb")
+        room = Room(name="Кабинет 1", capacity=10)
+        session.add_all([student, teacher, subject, room])
+        await session.flush()
+        lesson = Lesson(
+            subject_id=subject.id,
+            teacher_id=teacher.id,
+            room_id=room.id,
+            start_at=now + timedelta(days=2),
+            end_at=now + timedelta(days=2, hours=1),
+            status="planned",
+            teacher_name_snapshot=teacher.full_name,
+            room_name_snapshot=room.name,
+            subject_name_snapshot=subject.name,
+        )
+        session.add(lesson)
+        await session.flush()
+        session.add(
+            LessonParticipant(
+                lesson_id=lesson.id,
+                person_id=student.id,
+                person_name_snapshot=student.full_name,
+            )
+        )
+        await session.flush()
+
+        await reconcile_daily_reminders(session, now=now, timezone=timezone)
+        await reconcile_confirmation_requests(session, now=now, timezone=timezone)
+        request = await session.scalar(
+            select(InteractionRequest).where(
+                InteractionRequest.recipient_person_id == student.id,
+                InteractionRequest.recipient_context == "student",
+            )
+        )
+        assert request is not None
+        await save_interaction_response(
+            session,
+            request=request,
+            respondent_person_id=student.id,
+            respondent_context="student",
+            answer="yes",
+        )
+        await reconcile_daily_reminders(session, now=now, timezone=timezone)
+
+        reminders = list(
+            (
+                await session.scalars(
+                    select(NotificationJob).where(
+                        NotificationJob.recipient_person_id == student.id,
+                        NotificationJob.event_type == "lesson_reminder",
+                    )
+                )
+            ).all()
+        )
+        one_hour = next(job for job in reminders if ":reminder:60:" in job.dedupe_key)
+        three_hours = next(job for job in reminders if ":reminder:180:" in job.dedupe_key)
+        assert one_hour.status == "pending"
+        assert three_hours.status == "cancelled"
+    await engine.dispose()
+
+
+async def test_changed_bundle_cancels_previously_sent_confirmation(tmp_path) -> None:
+    engine, sessions = await _database(tmp_path)
+    timezone = ZoneInfo("UTC")
+    now = datetime(2026, 10, 26, 8, 0, tzinfo=UTC)
+    async with sessions() as session:
+        student = Person(full_name="Ученик", phone="+79000000311")
+        teacher = Person(full_name="Учитель", phone="+79000000312")
+        subject = Subject(name="Физика", color="#2563eb")
+        room = Room(name="Кабинет 2", capacity=10)
+        session.add_all([student, teacher, subject, room])
+        await session.flush()
+
+        async def add_lesson(hour: int) -> None:
+            lesson = Lesson(
+                subject_id=subject.id,
+                teacher_id=teacher.id,
+                room_id=room.id,
+                start_at=now + timedelta(days=2, hours=hour),
+                end_at=now + timedelta(days=2, hours=hour + 1),
+                status="planned",
+                teacher_name_snapshot=teacher.full_name,
+                room_name_snapshot=room.name,
+                subject_name_snapshot=subject.name,
+            )
+            session.add(lesson)
+            await session.flush()
+            session.add(
+                LessonParticipant(
+                    lesson_id=lesson.id,
+                    person_id=student.id,
+                    person_name_snapshot=student.full_name,
+                )
+            )
+            await session.flush()
+
+        await add_lesson(0)
+        await reconcile_confirmation_requests(session, now=now, timezone=timezone)
+        first_job = await session.scalar(
+            select(NotificationJob).where(
+                NotificationJob.recipient_person_id == student.id,
+                NotificationJob.event_type == "lesson_confirmation_request",
+            )
+        )
+        assert first_job is not None
+        first_job.status = "sent"
+        first_request = await session.get(InteractionRequest, first_job.interaction_request_id)
+        assert first_request is not None
+
+        await add_lesson(2)
+        await reconcile_confirmation_requests(session, now=now, timezone=timezone)
+        await session.flush()
+
+        requests = list(
+            (
+                await session.scalars(
+                    select(InteractionRequest).where(
+                        InteractionRequest.recipient_person_id == student.id,
+                        InteractionRequest.recipient_context == "student",
+                    )
+                )
+            ).all()
+        )
+        assert first_request.status == "cancelled"
+        assert len([request for request in requests if request.status == "active"]) == 1
+    await engine.dispose()
+
+
 async def test_teacher_bundle_exists_when_lesson_has_no_students(tmp_path) -> None:
     engine, sessions = await _database(tmp_path)
     timezone = ZoneInfo("Asia/Yekaterinburg")
