@@ -410,3 +410,51 @@ def test_opening_dialog_scrolls_to_latest_message_after_layout() -> None:
     assert scrollbar.value() == scrollbar.maximum()
     page.shutdown()
     page.close()
+
+
+def test_refreshing_dialog_list_preserves_chat_scroll_position() -> None:
+    app = QApplication.instance() or QApplication([])
+    page = CommunicationsPage(FakeApi())  # type: ignore[arg-type]
+    page.resize(900, 300)
+    page.tabs.blockSignals(True)
+    page.tabs.setCurrentIndex(1)
+    page.tabs.blockSignals(False)
+    page.show()
+    page.current_person_id = 7
+    messages = [
+        {
+            "direction": "inbound",
+            "created_at": f"2026-10-11T12:{index % 60:02d}:00+05:00",
+            "delivery_status": "received",
+            "text": f"Сообщение {index}\nдополнительная строка",
+        }
+        for index in range(30)
+    ]
+    page._messages_loaded_for(7, messages, force_bottom=True)
+    app.processEvents()
+    app.processEvents()
+    scrollbar = page.chat_history.verticalScrollBar()
+    scrollbar.setValue(scrollbar.maximum() // 3)
+    previous_value = scrollbar.value()
+    assert previous_value < scrollbar.maximum()
+
+    page._run = (  # type: ignore[method-assign]
+        lambda _fn, done=None: done(messages) if done is not None else None
+    )
+    page._dialogs_loaded(
+        [
+            {
+                "person_id": 7,
+                "full_name": "Тестовый пользователь",
+                "last_message_preview": "Новое сообщение",
+                "last_message_at": "2026-10-11T13:00:00+05:00",
+                "admin_unread_count": 0,
+            }
+        ]
+    )
+    app.processEvents()
+    app.processEvents()
+
+    assert page.chat_history.verticalScrollBar().value() == previous_value
+    page.shutdown()
+    page.close()

@@ -1401,22 +1401,32 @@ class CommunicationsPage(QWidget):
                 int(row.get("admin_unread_count") or 0) for row in rows
             )
         current = self.current_person_id
-        self.dialogs.clear()
-        for row in rows:
-            unread = int(row.get("admin_unread_count") or 0)
-            item = QListWidgetItem()
-            item.setToolTip(str(row.get("full_name", "")))
-            item.setData(Qt.ItemDataRole.UserRole, int(row["person_id"]))
-            item.setData(Qt.ItemDataRole.UserRole + 1, row.get("full_name", ""))
-            item.setData(Qt.ItemDataRole.UserRole + 2, unread)
-            item.setData(Qt.ItemDataRole.UserRole + 3, row.get("last_message_preview", ""))
-            item.setData(Qt.ItemDataRole.UserRole + 4, row.get("last_message_at"))
-            item.setSizeHint(QSize(0, 68))
-            self.dialogs.addItem(item)
-            self._render_dialog_list_item(item)
-            if current == int(row["person_id"]):
-                self.dialogs.setCurrentItem(item)
+        selected_item: QListWidgetItem | None = None
+        signals_blocked = self.dialogs.blockSignals(True)
+        try:
+            self.dialogs.clear()
+            for row in rows:
+                unread = int(row.get("admin_unread_count") or 0)
+                item = QListWidgetItem()
+                item.setToolTip(str(row.get("full_name", "")))
+                item.setData(Qt.ItemDataRole.UserRole, int(row["person_id"]))
+                item.setData(Qt.ItemDataRole.UserRole + 1, row.get("full_name", ""))
+                item.setData(Qt.ItemDataRole.UserRole + 2, unread)
+                item.setData(
+                    Qt.ItemDataRole.UserRole + 3, row.get("last_message_preview", "")
+                )
+                item.setData(Qt.ItemDataRole.UserRole + 4, row.get("last_message_at"))
+                item.setSizeHint(QSize(0, 68))
+                self.dialogs.addItem(item)
+                self._render_dialog_list_item(item)
+                if current == int(row["person_id"]):
+                    selected_item = item
+                    self.dialogs.setCurrentItem(item)
+        finally:
+            self.dialogs.blockSignals(signals_blocked)
         self._sync_unread_indicators()
+        if selected_item is not None and not signals_blocked:
+            self._show_dialog(selected_item, force_bottom=False)
 
     def _sync_unread_indicators(self) -> None:
         label = (
@@ -1477,6 +1487,11 @@ class CommunicationsPage(QWidget):
         self.dialogs.setItemWidget(item, container)
 
     def _dialog_selected(self, item: QListWidgetItem | None) -> None:
+        self._show_dialog(item, force_bottom=True)
+
+    def _show_dialog(
+        self, item: QListWidgetItem | None, *, force_bottom: bool
+    ) -> None:
         if item is None:
             return
         self.current_person_id = int(item.data(Qt.ItemDataRole.UserRole))
@@ -1494,7 +1509,7 @@ class CommunicationsPage(QWidget):
         self._run(
             lambda: self.api.communication_messages(person_id),
             lambda value: self._messages_loaded_for(
-                person_id, value, force_bottom=True
+                person_id, value, force_bottom=force_bottom
             ),
         )
         self._run(lambda: self.api.communication_mark_read(person_id))
