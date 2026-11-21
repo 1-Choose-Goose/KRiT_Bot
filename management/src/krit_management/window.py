@@ -209,7 +209,7 @@ class MainWindow(QMainWindow):
             self.communications_page.open_schedule_publication
         )
         self.pages.addWidget(self.communications_page)
-        self.registration_page = RegistrationPage(self.api)
+        self.registration_page = RegistrationPage(self.api, can_manage=self.role == "superadmin")
         self.pages.addWidget(self.registration_page)
         self.reports_page = (
             ReportsPage()

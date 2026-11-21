@@ -258,6 +258,9 @@ class ManagementApi:
     def update_registration_record(self, record_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("PUT", f"/registration/{record_id}", json=payload)
 
+    def delete_registration_record(self, record_id: int) -> None:
+        self._request("DELETE", f"/registration/{record_id}")
+
 
     def create_administrator(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/administration/users", json=payload)
@@ -1043,4 +1046,4 @@ class ManagementApi:
                 detail=detail,
                 path=path,
             )
-        return response.json()
+        return None if response.status_code == 204 else response.json()

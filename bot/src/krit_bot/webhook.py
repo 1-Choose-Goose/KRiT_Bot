@@ -914,7 +914,12 @@ def create_app(
             allow_headers=["Content-Type", "X-Online-CSRF"],
         )
     app.include_router(create_online_router(sessions, api, settings))
-    app.include_router(create_registration_router(sessions, require_management_token))
+    app.include_router(
+        create_registration_router(
+            sessions, require_management_token, require_superadmin_management_token,
+            center_timezone=settings.center_timezone,
+        )
+    )
     app.include_router(
         create_learning_router(
             sessions,
