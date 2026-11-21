@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import timedelta
+from datetime import UTC, timedelta
 
 import structlog
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .communication_models import InteractionRequest
 from .db import Person, utcnow
 from .learning_models import (
     AdminNotification,
+    Lesson,
     LessonParticipant,
     NotificationJob,
     PersonMaxIdentity,
@@ -133,6 +135,43 @@ class LearningNotificationWorker:
             )
             if job is None:
                 return False
+            if job.interaction_request_id is not None:
+                request = await session.get(InteractionRequest, job.interaction_request_id)
+                if request is None:
+                    job.status = "cancelled"
+                    job.last_error = "Запрос ответа не найден"
+                    job.updated_at = now
+                    await session.commit()
+                    return True
+                if request.request_type == "lesson_confirmation":
+                    lesson = await session.get(Lesson, job.lesson_id) if job.lesson_id else None
+                    start_at = lesson.start_at if lesson is not None else None
+                    if start_at is not None and start_at.tzinfo is None:
+                        start_at = start_at.replace(tzinfo=UTC)
+                    if (
+                        lesson is None
+                        or lesson.status not in {"planned", "scheduled"}
+                        or start_at is None
+                        or start_at <= now
+                    ):
+                        job.status = "cancelled"
+                        job.last_error = "Занятие уже началось или отменено"
+                        job.updated_at = now
+                        await session.commit()
+                        return True
+                    if request.status == "expired":
+                        request.status = "active"
+                    if request.status == "active":
+                        request.expires_at = start_at
+                expiry = request.expires_at
+                if expiry is not None and expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=UTC)
+                if request.status != "active" or (expiry is not None and expiry <= now):
+                    job.status = "cancelled"
+                    job.last_error = "Срок ответа истёк до отправки"
+                    job.updated_at = now
+                    await session.commit()
+                    return True
             bundle_base_key = job.payload.get("bundle_base_key")
             if job.event_type == "lesson_reminder" and bundle_base_key:
                 newer_candidates = list(

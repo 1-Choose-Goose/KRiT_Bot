@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Any
 
-from PySide6.QtCore import QThreadPool
+from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -17,6 +19,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -48,13 +52,9 @@ FIELDS = {
         ("notes", "Примечание"),
     ),
     "outgoing": (
-        ("sent_date", "Дата отправки"),
         ("channel", "Способ отправки"),
         ("signer", "Подписал"),
         ("responsible", "Исполнитель"),
-        ("incoming_number", "Наш входящий №"),
-        ("incoming_document_number", "№ письма отправителя"),
-        ("incoming_document_date", "Дата письма отправителя"),
         ("notes", "Примечание"),
     ),
     "contract": (
@@ -69,8 +69,14 @@ FIELDS = {
 
 class RegistrationDialog(QDialog):
     def __init__(
-        self, kind: str, people: list[dict[str, Any]], record: dict[str, Any] | None = None,
+        self,
+        kind: str,
+        people: list[dict[str, Any]],
+        record: dict[str, Any] | None = None,
         parent: QWidget | None = None,
+        *,
+        incoming_records: list[dict[str, Any]] | None = None,
+        subjects: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Исправить запись" if record else "Зарегистрировать документ")
@@ -80,30 +86,49 @@ class RegistrationDialog(QDialog):
         self.record = record or {}
         layout = QVBoxLayout(self)
         content = QWidget()
+        content.setObjectName("registrationForm")
+        content.setStyleSheet(
+            "QWidget#registrationForm { background-color: #f4f6fa; }"
+            "QWidget#registrationForm QLabel { color: #10254c; background: transparent; }"
+        )
         form = QFormLayout(content)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         registered = self.record.get("registration_date")
         date_label = (
             date.fromisoformat(registered).strftime("%d.%m.%Y")
-            if registered else "Программа присвоит при сохранении"
+            if registered
+            else "Программа присвоит при сохранении"
         )
-        if record:
+        if record and kind == "incoming":
             self.registration_date = QLineEdit(date_label)
             self.registration_date.setPlaceholderText("ДД.ММ.ГГГГ")
             form.addRow("Дата регистрации", self.registration_date)
+        elif kind == "incoming":
+            form.addRow("Дата регистрации", QLabel(date_label))
+        if record:
             self.registration_number = QLineEdit(str(record["registration_number"]))
             form.addRow("Регистрационный №", self.registration_number)
-        else:
-            form.addRow("Дата регистрации", QLabel(date_label))
-        self.document_date = QLineEdit()
+        self.document_date = QLineEdit() if record or kind != "contract" else None
         document_date = self.record.get("document_date")
-        if document_date:
+        if document_date and self.document_date is not None:
             self.document_date.setText(date.fromisoformat(document_date).strftime("%d.%m.%Y"))
-        self.document_date.setPlaceholderText("ДД.ММ.ГГГГ")
+        if self.document_date is not None:
+            self.document_date.setPlaceholderText("ДД.ММ.ГГГГ")
         form.addRow(
-            "Дата письма отправителя" if kind == "incoming" else "Дата подписания",
-            self.document_date,
+            "Дата письма отправителя"
+            if kind == "incoming"
+            else "Дата договора и регистрации"
+            if kind == "contract"
+            else "Дата подписания",
+            self.document_date if self.document_date is not None else QLabel(date_label),
         )
+        if kind == "outgoing":
+            if record:
+                self.sent_date = QLineEdit(date_label)
+                self.sent_date.setPlaceholderText("ДД.ММ.ГГГГ")
+                form.addRow("Дата отправки и регистрации", self.sent_date)
+            else:
+                form.addRow("Дата отправки и регистрации", QLabel(date_label))
         self.document_number = QLineEdit(str(self.record.get("document_number") or ""))
         if kind == "incoming":
             form.addRow("Номер письма отправителя", self.document_number)
@@ -113,10 +138,52 @@ class RegistrationDialog(QDialog):
             {"incoming": "Отправитель", "outgoing": "Адресат", "contract": "Заказчик"}[kind],
             self.counterparty,
         )
-        self.subject = QTextEdit(str(self.record.get("subject") or ""))
-        self.subject.setFixedHeight(80)
-        form.addRow("Услуга" if kind == "contract" else "Краткое содержание", self.subject)
+        details = self.record.get("details") or {}
+        if kind == "contract":
+            subject_holder = QWidget()
+            subject_layout = QVBoxLayout(subject_holder)
+            subject_layout.setContentsMargins(0, 0, 0, 0)
+            self.subject_search = QLineEdit()
+            self.subject_search.setPlaceholderText("Поиск предмета…")
+            self.subject_search.setClearButtonEnabled(True)
+            self.subject_list = QListWidget()
+            self.subject_list.setMinimumHeight(135)
+            saved_ids = {
+                value.strip()
+                for value in str(details.get("subject_ids") or "").split(",")
+                if value.strip()
+            }
+            legacy_names = {
+                value.strip().replace(" ", "").casefold()
+                for value in re.split(r",|\s+и\s+", str(self.record.get("subject") or ""))
+            }
+            for item in subjects or []:
+                if not item.get("active", True):
+                    continue
+                choice = QListWidgetItem(str(item.get("name") or ""))
+                choice.setData(Qt.ItemDataRole.UserRole, int(item["id"]))
+                choice.setFlags(choice.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                checked = (
+                    str(item["id"]) in saved_ids
+                    if saved_ids
+                    else choice.text().replace(" ", "").casefold() in legacy_names
+                )
+                choice.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+                self.subject_list.addItem(choice)
+            self.subject_search.textChanged.connect(self._filter_subjects)
+            subject_layout.addWidget(self.subject_search)
+            subject_layout.addWidget(self.subject_list)
+            form.addRow("Услуга", subject_holder)
+        else:
+            self.subject = QTextEdit(str(self.record.get("subject") or ""))
+            self.subject.setFixedHeight(80)
+            form.addRow("Краткое содержание", self.subject)
         self.person = QComboBox()
+        self.person.setEditable(True)
+        self.person.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.person.completer().setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self.person.completer().setFilterMode(Qt.MatchFlag.MatchContains)
+        self.person.completer().setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.person.addItem("Не связан с учеником", None)
         for person in people:
             if "student" in (person.get("roles") or []):
@@ -127,7 +194,32 @@ class RegistrationDialog(QDialog):
         if kind == "contract":
             form.addRow("Ученик в базе", self.person)
         self.extra: dict[str, QLineEdit | QTextEdit] = {}
-        details = self.record.get("details") or {}
+        if kind == "outgoing":
+            self.incoming_records = {int(item["id"]): item for item in (incoming_records or [])}
+            self.incoming_choice = QComboBox()
+            self.incoming_choice.addItem("Не связан с входящим документом", None)
+            for item in incoming_records or []:
+                self.incoming_choice.addItem(
+                    f"№ {item['registration_number']} · {item.get('counterparty') or ''}",
+                    int(item["id"]),
+                )
+            saved_id = details.get("incoming_record_id")
+            selected = self.incoming_choice.findData(
+                int(saved_id) if saved_id and str(saved_id).isdigit() else None
+            )
+            if selected >= 0:
+                self.incoming_choice.setCurrentIndex(selected)
+            form.addRow("Наш входящий №", self.incoming_choice)
+            for key, label in (
+                ("incoming_document_number", "№ письма отправителя"),
+                ("incoming_document_date", "Дата письма отправителя"),
+            ):
+                field = QLineEdit(str(details.get(key) or ""))
+                field.setReadOnly(True)
+                form.addRow(label, field)
+                self.extra[key] = field
+            self.incoming_choice.currentIndexChanged.connect(self._incoming_changed)
+            self._incoming_changed()
         if kind == "contract" and details.get("source_number"):
             form.addRow("№ в старом журнале", QLabel(str(details["source_number"])))
         if kind == "contract" and details.get("source_date"):
@@ -156,37 +248,96 @@ class RegistrationDialog(QDialog):
         layout.addWidget(buttons)
 
     def payload(self) -> dict[str, Any]:
-        raw_date = self.document_date.text().strip()
+        raw_date = self.document_date.text().strip() if self.document_date is not None else ""
         document_date = (
             datetime.strptime(raw_date, "%d.%m.%Y").date().isoformat() if raw_date else None
         )
         details = dict(self.record.get("details") or {})
         details.update({key: self._value(field) for key, field in self.extra.items()})
+        if self.kind == "outgoing":
+            selected_id = self.incoming_choice.currentData()
+            details["incoming_record_id"] = str(selected_id) if selected_id else ""
+            details["incoming_number"] = (
+                self.incoming_records[int(selected_id)]["registration_number"]
+                if selected_id
+                else ""
+            )
+        if self.kind == "outgoing" and self.record:
+            details["sent_date"] = self.sent_date.text().strip()
+        if self.kind == "contract":
+            details["subject_ids"] = ",".join(
+                str(item.data(Qt.ItemDataRole.UserRole)) for item in self._selected_subjects()
+            )
         result = {
             "document_date": document_date,
             "document_number": self.document_number.text().strip() or None
-            if self.kind == "incoming" else None,
+            if self.kind == "incoming"
+            else None,
             "counterparty": self._value(self.counterparty),
-            "subject": self._value(self.subject),
+            "subject": self._subject_value(),
             "person_id": self.person.currentData() if self.kind == "contract" else None,
             "details": details,
         }
         if self.record:
             result["registration_number"] = self.registration_number.text().strip()
-            result["registration_date"] = datetime.strptime(
-                self.registration_date.text().strip(), "%d.%m.%Y"
-            ).date().isoformat()
+            if self.kind == "incoming":
+                result["registration_date"] = (
+                    datetime.strptime(self.registration_date.text().strip(), "%d.%m.%Y")
+                    .date()
+                    .isoformat()
+                )
         return result
 
     @staticmethod
     def _value(field: QLineEdit | QTextEdit) -> str:
         return (field.text() if isinstance(field, QLineEdit) else field.toPlainText()).strip()
 
+    def _incoming_changed(self) -> None:
+        selected_id = self.incoming_choice.currentData()
+        incoming = self.incoming_records.get(int(selected_id)) if selected_id else None
+        self.extra["incoming_document_number"].setText(
+            str(incoming.get("document_number") or "") if incoming else ""
+        )
+        document_date = incoming.get("document_date") if incoming else None
+        self.extra["incoming_document_date"].setText(
+            date.fromisoformat(document_date).strftime("%d.%m.%Y") if document_date else ""
+        )
+
+    def _filter_subjects(self, text: str) -> None:
+        for index in range(self.subject_list.count()):
+            item = self.subject_list.item(index)
+            item.setHidden(text.casefold() not in item.text().casefold())
+
+    def _selected_subjects(self) -> list[QListWidgetItem]:
+        return [
+            self.subject_list.item(index)
+            for index in range(self.subject_list.count())
+            if self.subject_list.item(index).checkState() == Qt.CheckState.Checked
+        ]
+
+    def _subject_value(self) -> str:
+        if self.kind != "contract":
+            return self._value(self.subject)
+        selected = self._selected_subjects()
+        return (
+            ", ".join(item.text() for item in selected)
+            if selected
+            else str(self.record.get("subject") or "").strip()
+        )
+
     def _validate_and_accept(self) -> None:
-        if not self._value(self.counterparty) or not self._value(self.subject):
+        if not self._value(self.counterparty) or not self._subject_value():
             QMessageBox.warning(self, "Не заполнены поля", "Укажите корреспондента и содержание.")
             return
-        if not self.record and self.kind != "incoming" and not self.document_date.text().strip():
+        if self.kind == "contract" and not self.record and not self._selected_subjects():
+            QMessageBox.warning(self, "Не выбран предмет", "Выберите предмет из справочника.")
+            return
+        if (
+            not self.record
+            and self.kind == "outgoing"
+            and self.document_date is not None
+            and not self.document_date.text().strip()
+        ):
             QMessageBox.warning(self, "Не заполнена дата", "Укажите дату подписания документа.")
             return
         if self.kind == "incoming":
@@ -195,6 +346,12 @@ class RegistrationDialog(QDialog):
                 datetime.strptime(received, "%d.%m.%Y")
             except ValueError:
                 QMessageBox.warning(self, "Неверная дата", "Укажите дату получения как ДД.ММ.ГГГГ.")
+                return
+        if self.kind == "outgoing" and self.record:
+            try:
+                datetime.strptime(self.sent_date.text().strip(), "%d.%m.%Y")
+            except ValueError:
+                QMessageBox.warning(self, "Неверная дата", "Укажите дату отправки как ДД.ММ.ГГГГ.")
                 return
         try:
             self.payload()
@@ -206,7 +363,11 @@ class RegistrationDialog(QDialog):
 
 class RegistrationPage(QWidget):
     def __init__(
-        self, api: ManagementApi, parent: QWidget | None = None, *, can_manage: bool = False,
+        self,
+        api: ManagementApi,
+        parent: QWidget | None = None,
+        *,
+        can_manage: bool = False,
     ) -> None:
         super().__init__(parent)
         self.api = api
@@ -271,12 +432,19 @@ class RegistrationPage(QWidget):
         table = self.tables[kind]
         table.setRowCount(len(self.records[kind]))
         for row, record in enumerate(self.records[kind]):
-            registered = record.get("registration_date")
+            registered = (
+                record.get("document_date") if kind == "contract"
+                else record.get("registration_date")
+            )
             display_date = date.fromisoformat(registered).strftime("%d.%m.%Y") if registered else ""
-            for col, value in enumerate((
-                f"№ {record.get('registration_number') or ''}", display_date,
-                record.get("counterparty"), record.get("subject"),
-            )):
+            for col, value in enumerate(
+                (
+                    f"№ {record.get('registration_number') or ''}",
+                    display_date,
+                    record.get("counterparty"),
+                    record.get("subject"),
+                )
+            ):
                 item = QTableWidgetItem(str(value or ""))
                 item.setToolTip(str(value or ""))
                 table.setItem(row, col, item)
@@ -291,7 +459,40 @@ class RegistrationPage(QWidget):
             QMessageBox.information(self, "Выберите запись", "Сначала выберите запись в журнале.")
             return
         record = records[row] if selected else None
-        dialog = RegistrationDialog(kind, self.people, record, self)
+        if kind == "outgoing":
+            self._run(
+                lambda: self.api.registration_records("incoming"),
+                lambda incoming: self._open_editor(kind, record, incoming),
+            )
+            return
+        if kind == "contract":
+            self._run(
+                self.api.learning_reference_data,
+                lambda references: self._open_editor(
+                    kind,
+                    record,
+                    [],
+                    references.get("subjects", []) if isinstance(references, dict) else [],
+                ),
+            )
+            return
+        self._open_editor(kind, record, [])
+
+    def _open_editor(
+        self,
+        kind: str,
+        record: dict[str, Any] | None,
+        incoming: object,
+        subjects: object = None,
+    ) -> None:
+        dialog = RegistrationDialog(
+            kind,
+            self.people,
+            record,
+            self,
+            incoming_records=incoming if isinstance(incoming, list) else [],
+            subjects=subjects if isinstance(subjects, list) else [],
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         payload = dialog.payload()
@@ -315,14 +516,20 @@ class RegistrationPage(QWidget):
             QMessageBox.information(self, "Выберите запись", "Сначала выберите запись в журнале.")
             return
         record = records[row]
-        if QMessageBox.question(
-            self, "Удаление записи",
-            f"Полностью удалить запись {record['registration_number']}? "
-            "Отменить это действие нельзя.",
-        ) != QMessageBox.StandardButton.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "Удаление записи",
+                f"Полностью удалить запись {record['registration_number']}? "
+                "Отменить это действие нельзя.",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
-        self._run(lambda: self.api.delete_registration_record(record["id"]),
-                  lambda _result: self.refresh())
+        self._run(
+            lambda: self.api.delete_registration_record(record["id"]),
+            lambda _result: self.refresh(),
+        )
 
     def _export(self, kind: str) -> None:
         suggested = f"{dict(JOURNALS)[kind]}.docx"

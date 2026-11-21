@@ -86,6 +86,29 @@ class FakeApi:
         pass
 
 
+def test_background_learning_refresh_only_loads_today_without_modal_error() -> None:
+    app = QApplication.instance() or QApplication([])
+    api = FakeApi()
+    page = LearningPage(api)  # type: ignore[arg-type]
+    try:
+        page.show()
+        for _ in range(20):
+            assert page.pool.waitForDone(3_000)
+            app.processEvents()
+            if not page._workers:
+                break
+        assert not page._workers
+        calls = []
+        page._run = lambda fn, *args, **kwargs: calls.append((fn, kwargs))  # type: ignore[method-assign]
+        page._auto_refresh()
+        assert len(calls) == 1
+        assert calls[0][0] == api.learning_today
+        assert calls[0][1]["on_error"] is not None
+    finally:
+        page.shutdown()
+        page.close()
+
+
 def test_main_window_loads_learning_calendar_without_worker_argument_error() -> None:
     app = QApplication.instance() or QApplication([])
     window = MainWindow(FakeApi())  # type: ignore[arg-type]

@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base, Person, utcnow
+from .learning_models import Subject
 
 Kind = Literal["incoming", "outgoing", "contract"]
 PREFIX = {"incoming": "вх", "outgoing": "исх", "contract": "дг"}
@@ -115,11 +116,75 @@ def create_registration_router(
         if person_id is not None and await session.get(Person, person_id) is None:
             raise HTTPException(422, "Ученик не найден")
 
+    async def resolve_incoming_reference(
+        session: AsyncSession, details: dict[str, str]
+    ) -> dict[str, str]:
+        resolved = dict(details)
+        source_id = resolved.get("incoming_record_id", "").strip()
+        linked_fields = (
+            "incoming_number", "incoming_document_number", "incoming_document_date"
+        )
+        if not source_id:
+            if any(resolved.get(key) for key in linked_fields):
+                raise HTTPException(422, "Выберите входящий документ из журнала")
+            return resolved
+        try:
+            incoming_id = int(source_id)
+        except ValueError as exc:
+            raise HTTPException(422, "Неверная ссылка на входящий документ") from exc
+        incoming = await session.get(RegistrationRecord, incoming_id)
+        if incoming is None or incoming.kind != "incoming":
+            raise HTTPException(422, "Входящий документ не найден")
+        resolved.update({
+            "incoming_record_id": str(incoming.id),
+            "incoming_number": incoming.registration_number,
+            "incoming_document_number": incoming.document_number or "",
+            "incoming_document_date": (
+                incoming.document_date.strftime("%d.%m.%Y")
+                if incoming.document_date else ""
+            ),
+        })
+        return resolved
+
+    async def resolve_contract_subjects(
+        session: AsyncSession, values: dict[str, Any], *, creating: bool
+    ) -> dict[str, Any]:
+        raw_ids = values["details"].get("subject_ids", "").strip()
+        if not raw_ids:
+            if creating:
+                raise HTTPException(422, "Выберите предметы из справочника")
+            return values
+        parts = [part.strip() for part in raw_ids.split(",")]
+        if not parts or len(parts) > 20 or any(not part.isdigit() for part in parts):
+            raise HTTPException(422, "Неверный список предметов")
+        identifiers = list(dict.fromkeys(int(part) for part in parts))
+        subjects = {
+            item.id: item for item in (
+                await session.scalars(select(Subject).where(Subject.id.in_(identifiers)))
+            ).all()
+        }
+        if len(subjects) != len(identifiers) or any(
+            not subjects[identifier].active for identifier in identifiers
+        ):
+            raise HTTPException(422, "Предмет не найден в действующем справочнике")
+        names = ", ".join(subjects[identifier].name for identifier in identifiers)
+        if len(names) > 500:
+            raise HTTPException(422, "Слишком длинный список предметов")
+        values["subject"] = names
+        values["details"] = {
+            **values["details"], "subject_ids": ",".join(map(str, identifiers))
+        }
+        return values
+
     def validate_document(kind: Kind, payload: RecordInput, *, creating: bool) -> None:
         if kind != "incoming" and payload.document_number:
             raise HTTPException(422, "Регистрационный номер присваивается программой")
-        if creating and kind != "incoming" and payload.document_date is None:
+        if creating and kind == "outgoing" and payload.document_date is None:
             raise HTTPException(422, "Укажите дату подписания документа")
+        if creating and kind == "contract" and payload.document_date is not None:
+            raise HTTPException(422, "Дату договора присваивает программа")
+        if creating and kind == "outgoing" and payload.details.get("sent_date"):
+            raise HTTPException(422, "Дату отправки присваивает программа")
         if kind == "incoming":
             received = payload.details.get("received_date", "").strip()
             try:
@@ -155,13 +220,24 @@ def create_registration_router(
                 ),
                 {"kind": kind, "year": year},
             )
+            values = payload.model_dump()
+            if kind == "contract":
+                values["document_date"] = registration_date
+                values = await resolve_contract_subjects(session, values, creating=True)
+            if kind == "outgoing":
+                values["details"] = {
+                    **values["details"], "sent_date": registration_date.strftime("%d.%m.%Y")
+                }
+                values["details"] = await resolve_incoming_reference(
+                    session, values["details"]
+                )
             record = RegistrationRecord(
                 kind=kind,
                 year=year,
                 sequence=sequence,
                 registration_number=f"{PREFIX[kind]}-{year}/{sequence}",
                 registration_date=registration_date,
-                **payload.model_dump(),
+                **values,
             )
             session.add(record)
             await session.commit()
@@ -180,6 +256,12 @@ def create_registration_router(
             validate_document(record.kind, payload, creating=False)
             await validate_person(session, payload.person_id)
             editable = payload.model_dump(exclude={"registration_number", "registration_date"})
+            if record.kind == "contract":
+                editable = await resolve_contract_subjects(session, editable, creating=False)
+            if record.kind == "outgoing":
+                editable["details"] = await resolve_incoming_reference(
+                    session, editable["details"]
+                )
             for key, value in editable.items():
                 setattr(record, key, value)
             if payload.registration_number is not None:
@@ -207,7 +289,17 @@ def create_registration_router(
                             ))
                         elif proposed > counter.next_value:
                             counter.next_value = proposed
-            if payload.registration_date is not None:
+            if record.kind == "contract" and payload.document_date is not None:
+                record.registration_date = payload.document_date
+            elif record.kind == "outgoing":
+                sent_date = payload.details.get("sent_date", "").strip()
+                try:
+                    record.registration_date = datetime.strptime(
+                        sent_date, "%d.%m.%Y"
+                    ).date()
+                except ValueError as exc:
+                    raise HTTPException(422, "Укажите дату отправки как ДД.ММ.ГГГГ") from exc
+            elif record.kind != "contract" and payload.registration_date is not None:
                 record.registration_date = payload.registration_date
             record.updated_at = utcnow()
             try:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, timedelta
 from typing import Any
 
 import httpx
@@ -440,6 +440,96 @@ async def test_overdue_older_bundle_reminder_is_cancelled_before_delivery(tmp_pa
             ).all()
         )
         assert [job.status for job in jobs] == ["cancelled", "sent"]
+    await engine.dispose()
+
+
+async def test_late_confirmation_keeps_time_until_lesson_start(tmp_path) -> None:
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'late-confirmation.db'}")
+    await ensure_schema(engine)
+    sessions = build_session_factory(engine)
+    now = utcnow()
+    async with sessions() as session:
+        student = Person(full_name="Ученик", phone="+79000000111")
+        teacher = Person(full_name="Учитель", phone="+79000000112")
+        subject = Subject(name="Математика", color="#2563eb")
+        room = Room(name="Кабинет", capacity=10)
+        session.add_all([student, teacher, subject, room])
+        await session.flush()
+        session.add(PersonMaxIdentity(
+            person_id=student.id, verified_phone=student.phone, max_user_id=111,
+        ))
+        lesson = Lesson(
+            subject_id=subject.id, teacher_id=teacher.id, room_id=room.id,
+            start_at=now + timedelta(minutes=30), end_at=now + timedelta(minutes=90),
+            status="planned", teacher_name_snapshot=teacher.full_name,
+            room_name_snapshot=room.name, subject_name_snapshot=subject.name,
+        )
+        session.add(lesson)
+        await session.flush()
+        request = InteractionRequest(
+            request_type="lesson_confirmation", question="Подтвердите занятие",
+            recipient_person_id=student.id, recipient_context="student",
+            subject_person_id=student.id, related_lesson_id=lesson.id,
+            expires_at=now + timedelta(minutes=1),
+        )
+        session.add(request)
+        await session.flush()
+        job = NotificationJob(
+            dedupe_key="late-confirmation", event_type="lesson_confirmation_request",
+            recipient_person_id=student.id, recipient_context="student",
+            subject_person_id=student.id, lesson_id=lesson.id,
+            interaction_request_id=request.id, scheduled_at=now - timedelta(minutes=1),
+            payload={"text": request.question},
+        )
+        session.add(job)
+        await session.commit()
+        request_id = request.id
+    api = FakeMax()
+    worker = LearningNotificationWorker(sessions=sessions, api=api)  # type: ignore[arg-type]
+    assert await worker.process_one() is True
+    assert api.sent == [(111, "Подтвердите занятие")]
+    async with sessions() as session:
+        request = await session.get(InteractionRequest, request_id)
+        assert request is not None
+        assert request.status == "active"
+        assert request.expires_at is not None
+        assert request.expires_at.replace(tzinfo=UTC) > utcnow() + timedelta(minutes=25)
+    await engine.dispose()
+
+
+async def test_expired_poll_is_not_delivered(tmp_path) -> None:
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path / 'expired-poll.db'}")
+    await ensure_schema(engine)
+    sessions = build_session_factory(engine)
+    now = utcnow()
+    async with sessions() as session:
+        person = Person(full_name="Получатель", phone="+79000000113")
+        session.add(person)
+        await session.flush()
+        session.add(PersonMaxIdentity(
+            person_id=person.id, verified_phone=person.phone, max_user_id=113,
+        ))
+        request = InteractionRequest(
+            request_type="yes_no", question="Вопрос", recipient_person_id=person.id,
+            recipient_context="student", expires_at=now - timedelta(seconds=1),
+        )
+        session.add(request)
+        await session.flush()
+        session.add(NotificationJob(
+            dedupe_key="expired-poll", event_type="custom_yes_no_request",
+            recipient_person_id=person.id, interaction_request_id=request.id,
+            scheduled_at=now - timedelta(minutes=1), payload={"text": request.question},
+        ))
+        await session.commit()
+    api = FakeMax()
+    worker = LearningNotificationWorker(sessions=sessions, api=api)  # type: ignore[arg-type]
+    assert await worker.process_one() is True
+    assert api.sent == []
+    async with sessions() as session:
+        job = await session.scalar(select(NotificationJob).where(
+            NotificationJob.dedupe_key == "expired-poll"
+        ))
+        assert job is not None and job.status == "cancelled"
     await engine.dispose()
 
 

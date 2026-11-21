@@ -973,18 +973,28 @@ class EchoHandler:
             try:
                 answer = parts[4] if lesson_answer else parts[2]
                 lesson_answers: dict[str, str] | None = None
-                if lesson_answer:
-                    current_response = await session.scalar(
-                        select(InteractionResponse).where(
-                            InteractionResponse.request_id == request.id,
-                            InteractionResponse.respondent_person_id == person_id,
-                            InteractionResponse.respondent_context == request.recipient_context,
-                        )
+                current_response = await session.scalar(
+                    select(InteractionResponse).where(
+                        InteractionResponse.request_id == request.id,
+                        InteractionResponse.respondent_person_id == person_id,
+                        InteractionResponse.respondent_context == request.recipient_context,
                     )
+                )
+                if lesson_answer:
                     lesson_answers = dict(
                         current_response.lesson_answers if current_response else {}
                     )
                     lesson_answers[str(lesson_id)] = answer
+                already_saved = bool(
+                    current_response is not None
+                    and (
+                        (current_response.lesson_answers or {}).get(str(lesson_id))
+                        == answer
+                        if lesson_answer
+                        else current_response.answer == answer
+                        and not current_response.lesson_answers
+                    )
+                )
                 await save_interaction_response(
                     session,
                     request=request,
@@ -1042,19 +1052,20 @@ class EchoHandler:
                             else []
                         )
                     }
-                await record_message(
-                    session,
-                    person_id=person_id,
-                    direction="inbound",
-                    text=(
-                        f"Ответ по занятию: {'Да' if answer == 'yes' else 'Нет'}"
-                        if lesson_answer
-                        else f"Ответ на запрос: {'Да' if answer == 'yes' else 'Нет'}"
-                    ),
-                    delivery_status="received",
-                    message_type="interaction_callback",
-                    interaction_request_id=request.id,
-                )
+                if not already_saved:
+                    await record_message(
+                        session,
+                        person_id=person_id,
+                        direction="inbound",
+                        text=(
+                            f"Ответ по занятию: {'Да' if answer == 'yes' else 'Нет'}"
+                            if lesson_answer
+                            else f"Ответ на запрос: {'Да' if answer == 'yes' else 'Нет'}"
+                        ),
+                        delivery_status="received",
+                        message_type="interaction_callback",
+                        interaction_request_id=request.id,
+                    )
             except (ValueError, PermissionError) as exc:
                 await session.commit()
                 await self._api.answer_callback(
@@ -1062,7 +1073,7 @@ class EchoHandler:
                 )
                 return
             await session.commit()
-        if answer == "no":
+        if answer == "no" and not already_saved:
             await self._api.send_text(
                 user_id=callback.user_id,
                 text="Хотите сообщить, почему не сможете прийти?",
@@ -1090,7 +1101,7 @@ class EchoHandler:
             )
         await self._api.answer_callback(
             callback_id=callback.callback_id,
-            notification="Спасибо! Ответ сохранён",
+            notification="Этот ответ уже сохранён" if already_saved else "Спасибо! Ответ сохранён",
             message=callback_message,
         )
 
@@ -1111,6 +1122,25 @@ class EchoHandler:
                 await self._api.answer_callback(
                     callback_id=callback.callback_id,
                     notification="Эта кнопка доступна только получателю сообщения",
+                )
+                return
+            if request.status != "active":
+                await session.commit()
+                await self._api.answer_callback(
+                    callback_id=callback.callback_id,
+                    notification="Ответ уже сохранён" if request.status == "answered"
+                    else "Ответить на это сообщение уже нельзя",
+                    message=_callback_message_without_keyboard(callback),
+                )
+                return
+            expires_at = request.expires_at
+            if expires_at is not None and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            if expires_at is not None and expires_at <= utcnow():
+                await session.commit()
+                await self._api.answer_callback(
+                    callback_id=callback.callback_id,
+                    notification="Время для ответа уже закончилось",
                 )
                 return
             await record_message(

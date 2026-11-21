@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 import krit_bot.registration as registration_module
 from krit_bot.db import Person, build_engine, build_session_factory, ensure_schema
+from krit_bot.learning_models import Subject
 from krit_bot.registration import RegistrationRecord, create_registration_router
 
 
@@ -21,9 +22,12 @@ async def test_registration_journals_share_database_and_keep_separate_numbers(tm
     sessions = build_session_factory(engine)
     async with sessions() as session:
         person = Person(full_name="Ученик", phone="+79000000000")
-        session.add(person)
+        math = Subject(name="Математика", color="#2563eb")
+        russian = Subject(name="Русский язык", color="#2563eb")
+        session.add_all([person, math, russian])
         await session.commit()
         person_id = person.id
+        math_id, russian_id = math.id, russian.id
 
     async def authorized() -> int:
         return 1
@@ -37,15 +41,16 @@ async def test_registration_journals_share_database_and_keep_separate_numbers(tm
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         year = datetime.now(ZoneInfo("Asia/Yekaterinburg")).year
         payload = {
-            "document_date": "2026-11-20",
             "counterparty": "Родитель",
             "subject": "Математика",
             "person_id": person_id,
-            "details": {"student_name": "Ученик", "monthly_price": "8000.00"},
+            "details": {"student_name": "Ученик", "monthly_price": "8000.00",
+                        "subject_ids": str(math_id)},
         }
         first = await client.post("/api/v1/registration/contract", json=payload)
         assert first.status_code == 201, first.text
         assert first.json()["registration_number"] == f"дг-{year}/1"
+        assert first.json()["registration_date"] == first.json()["document_date"]
         second = await client.post("/api/v1/registration/contract", json=payload)
         assert second.status_code == 201, second.text
         assert second.json()["registration_number"] == f"дг-{year}/2"
@@ -60,6 +65,7 @@ async def test_registration_journals_share_database_and_keep_separate_numbers(tm
             f"дг-{year}/2", f"дг-{year}/1"
         ]
         payload["subject"] = "Русский язык"
+        payload["details"]["subject_ids"] = str(russian_id)
         changed = await client.put(
             f"/api/v1/registration/{first.json()['id']}", json=payload
         )
@@ -84,10 +90,10 @@ async def test_registration_journals_share_database_and_keep_separate_numbers(tm
         )
         assert corrected_legacy.status_code == 200, corrected_legacy.text
         assert corrected_legacy.json()["document_date"] is None
-        missing_new_date = await client.post(
-            "/api/v1/registration/contract", json={**payload, "document_date": None}
+        manual_new_date = await client.post(
+            "/api/v1/registration/contract", json={**payload, "document_date": "2026-11-20"}
         )
-        assert missing_new_date.status_code == 422
+        assert manual_new_date.status_code == 422
         payload["registration_date"] = "2027-01-01"
         rejected = await client.post("/api/v1/registration/contract", json=payload)
         assert rejected.status_code == 422

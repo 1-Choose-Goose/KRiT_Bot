@@ -433,6 +433,14 @@ async def test_poll_button_with_root_user_saves_answer_and_acknowledges_callback
         "Спасибо! Ответ сохранён",
         {"text": "Исходный текст опроса", "attachments": []},
     )
+    await handler.handle(
+        callback_update_with_root_user(42, f"interaction:{request_id}:yes", "poll-yes-again")
+    )
+    async with sessions() as session:
+        response = await session.scalar(select(InteractionResponse))
+        assert response is not None and response.revision == 1
+        assert await session.scalar(select(func.count(CommunicationMessage.id))) == 1
+    assert api.callback_answers[-1][1] == "Этот ответ уже сохранён"
     await engine.dispose()
 
 

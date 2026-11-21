@@ -2110,7 +2110,7 @@ class LearningPage(QWidget):
             and QApplication.activeModalWidget() is None
             and not self._workers
         ):
-            self.refresh()
+            self.refresh_today(silent=True)
 
     def _today_tab(self) -> QWidget:
         page = QWidget()
@@ -2462,9 +2462,13 @@ class LearningPage(QWidget):
         self.refresh_today()
         self.load_calendar()
 
-    def refresh_today(self) -> None:
+    def refresh_today(self, *, silent: bool = False) -> None:
         if self.isVisible():
-            self._run(self.api.learning_today, done=self._today_loaded)
+            self._run(
+                self.api.learning_today,
+                done=self._today_loaded,
+                on_error=(lambda _message: None) if silent else None,
+            )
 
     def _references_loaded(self, data: object) -> None:
         self.references = data if isinstance(data, dict) else {}

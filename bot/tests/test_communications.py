@@ -760,6 +760,7 @@ async def test_daily_lessons_are_bundled_once_per_person_and_day(tmp_path) -> No
         )
         request = await session.get(InteractionRequest, confirmation.interaction_request_id)
         assert request is not None
+        assert request.expires_at == bundles[0].anchor_start_at.astimezone(UTC)
         await save_interaction_response(
             session,
             request=request,
@@ -1094,6 +1095,50 @@ async def test_past_lesson_answer_is_rejected_without_persisting_response(tmp_pa
                 answer="yes",
             )
         assert await session.scalar(select(InteractionResponse)) is None
+    await engine.dispose()
+
+
+async def test_recently_expired_legacy_confirmation_can_be_answered_before_lesson(
+    tmp_path,
+) -> None:
+    engine, sessions = await _database(tmp_path)
+    now = utcnow()
+    async with sessions() as session:
+        student = Person(full_name="Ученик", phone="+79000000905")
+        teacher = Person(full_name="Учитель", phone="+79000000906")
+        subject = Subject(name="Математика", color="#2563eb")
+        room = Room(name="Кабинет", capacity=10)
+        session.add_all([student, teacher, subject, room])
+        await session.flush()
+        lesson = Lesson(
+            subject_id=subject.id, teacher_id=teacher.id, room_id=room.id,
+            start_at=now + timedelta(minutes=30), end_at=now + timedelta(minutes=90),
+            teacher_name_snapshot=teacher.full_name,
+            room_name_snapshot=room.name, subject_name_snapshot=subject.name,
+        )
+        session.add(lesson)
+        await session.flush()
+        request = InteractionRequest(
+            request_type="lesson_confirmation", question="Будете?",
+            recipient_person_id=student.id, recipient_context="student",
+            subject_person_id=student.id, status="expired",
+            expires_at=now - timedelta(seconds=1),
+        )
+        session.add(request)
+        await session.flush()
+        session.add(InteractionRequestLesson(
+            request_id=request.id, lesson_id=lesson.id,
+            lesson_revision=lesson.notification_revision,
+        ))
+        await session.flush()
+        response = await save_interaction_response(
+            session, request=request, respondent_person_id=student.id,
+            respondent_context="student", answer="yes",
+        )
+        assert response.answer == "yes"
+        assert request.status == "answered"
+        assert request.expires_at is not None
+        assert request.expires_at > now + timedelta(minutes=25)
     await engine.dispose()
 
 
@@ -1618,6 +1663,16 @@ async def test_history_cleanup_keeps_business_confirmation(tmp_path) -> None:
             respondent_context="student",
             answer="yes",
         )
+        repeated = await save_interaction_response(
+            session,
+            request=request,
+            respondent_person_id=student.id,
+            respondent_context="student",
+            answer="yes",
+        )
+        assert repeated.id == response.id
+        assert response.revision == 1
+        assert await session.scalar(select(InteractionResponseHistory.id)) is None
         session.add_all(
             [
                 CommunicationMessage(

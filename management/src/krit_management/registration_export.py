@@ -15,19 +15,26 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
 
 HEADERS = {
-    "contract": ("Дата регистрации и №", "Дата договора", "Заказчик (ФИО законного представителя)",
+    "contract": ("Рег. №", "Дата договора и регистрации", "Заказчик (ФИО законного представителя)",
                  "Ученик (ФИО)", "Наименование услуги", "Срок оказания услуг",
                  "Стоимость услуг в месяц", "Соглашения об изменении цены"),
     "incoming": ("Дата регистрации и входящий №", "Дата получения", "Дата письма отправителя",
                  "Отправитель", "№ письма отправителя", "Краткое содержание",
                  "Ответственный / срок", "Результат / исходящий ответ"),
-    "outgoing": ("Дата регистрации и исходящий №", "Дата отправки", "Дата подписания",
+    "outgoing": ("Исходящий №", "Дата отправки и регистрации", "Дата подписания",
                  "Адресат", "Краткое содержание", "Подписал / исполнитель",
                  "Способ отправки", "Связь с входящим / примечание"),
 }
 TITLES = {"contract": "ЖУРНАЛ РЕГИСТРАЦИИ ДОГОВОРОВ",
           "incoming": "ЖУРНАЛ РЕГИСТРАЦИИ ВХОДЯЩЕЙ КОРРЕСПОНДЕНЦИИ",
           "outgoing": "ЖУРНАЛ РЕГИСТРАЦИИ ИСХОДЯЩЕЙ КОРРЕСПОНДЕНЦИИ"}
+ORGANIZATION_HEADER = (
+    "Индивидуальный предприниматель Вольф Христина Леонидовна",
+    "ИНН 743014934321 ОГРНИП 324745600056012 от 01.04.2024",
+    "Юридический адрес: Челябинская область, г. Копейск",
+    "р/сч: 40802 810 3 7200 0127919 Наименование банка: СБЕРБАНК БИК 047501602 "
+    "кор/сч 30101 810 7 0000 0000602",
+)
 
 
 def _date(value: str | None) -> str:
@@ -46,7 +53,7 @@ def _values(kind: str, record: dict[str, Any]) -> tuple[str, ...]:
             additions.append(f"№ в старом журнале: {d['source_number']}")
         if d.get("source_date"):
             additions.append(f"Дата в старом журнале: {d['source_date']}")
-        return (base, _date(record.get("document_date")), record.get("counterparty") or "",
+        return (f"№ {number}", _date(record.get("document_date")), record.get("counterparty") or "",
                 d.get("student_name") or "", record.get("subject") or "",
                 d.get("service_period") or "", d.get("monthly_price") or "",
                 "\n".join(filter(None, (amendments, *additions))))
@@ -58,7 +65,8 @@ def _values(kind: str, record: dict[str, Any]) -> tuple[str, ...]:
                 " / ".join(filter(None, (d.get("responsible"), d.get("due_date")))),
                 "\n".join(filter(None, (d.get("result"), d.get("reply_number"),
                                           d.get("channel"), d.get("notes")))))
-    return (base, d.get("sent_date") or "", _date(record.get("document_date")),
+    return (f"№ {number}", _date(record.get("registration_date")),
+            _date(record.get("document_date")),
             record.get("counterparty") or "", record.get("subject") or "",
             " / ".join(filter(None, (d.get("signer"), d.get("responsible")))),
             d.get("channel") or "",
@@ -79,6 +87,30 @@ def export_journal(kind: str, records: list[dict[str, Any]], path: str | Path) -
     normal = document.styles["Normal"]
     normal.font.name = "Times New Roman"
     normal.font.size = Pt(9)
+    for index, line in enumerate(ORGANIZATION_HEADER):
+        header_line = document.add_paragraph()
+        header_line.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        header_line.paragraph_format.space_after = Pt(0)
+        header_run = header_line.add_run(line)
+        header_run.bold = index == 0
+        header_run.font.size = Pt(10 if index == 0 else 8)
+    separator = document.add_paragraph()
+    separator.paragraph_format.space_after = Pt(6)
+    bottom = OxmlElement("w:pBdr")
+    line = OxmlElement("w:bottom")
+    line.set(qn("w:val"), "single")
+    line.set(qn("w:sz"), "12")
+    bottom.append(line)
+    separator._p.get_or_add_pPr().append(bottom)
+    for label in (
+        "Ответственный за ведение: _____________________________",
+        "Дата начала: «___» __________ _____ г.",
+        "Дата окончания: «___» __________ _____ г.",
+    ):
+        header_line = document.add_paragraph()
+        header_line.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        header_line.paragraph_format.space_after = Pt(0)
+        header_line.add_run(label).bold = label.startswith("Ответственный")
     paragraph = document.add_paragraph()
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = paragraph.add_run(TITLES[kind])

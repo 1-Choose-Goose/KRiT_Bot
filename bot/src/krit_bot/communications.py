@@ -838,11 +838,7 @@ async def reconcile_confirmation_requests(
             recipient_context=bundle.recipient_context,
             subject_person_id=bundle.subject_person_id,
             related_lesson_id=bundle.lessons[0].id,
-            expires_at=max(
-                max(now, scheduled) + timedelta(minutes=1),
-                bundle.anchor_start_at.astimezone(UTC)
-                - timedelta(minutes=int(policy.configuration.get("deadline_minutes", 60))),
-            ),
+            expires_at=bundle.anchor_start_at.astimezone(UTC),
         )
         session.add(request)
         await session.flush()
@@ -1501,17 +1497,35 @@ async def save_interaction_response(
     lesson_answers: dict[str, str] | None = None,
     reason: str | None = None,
 ) -> InteractionResponse:
-    if request.status not in {"active", "answered"}:
-        raise ValueError("Ответить на это сообщение уже нельзя")
-    expires_at = request.expires_at
-    if expires_at is not None and expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=UTC)
-    if expires_at is not None and expires_at < utcnow():
-        request.status = "expired"
-        raise ValueError("Время для ответа уже закончилось")
+    request = await session.scalar(
+        select(InteractionRequest)
+        .where(InteractionRequest.id == request.id)
+        .with_for_update()
+    )
+    if request is None:
+        raise ValueError("Запрос не найден")
     if respondent_person_id != request.recipient_person_id:
         raise PermissionError("Эта кнопка доступна только получателю сообщения")
     lesson_map = lesson_answers or {}
+    current = await session.scalar(
+        select(InteractionResponse).where(
+            InteractionResponse.request_id == request.id,
+            InteractionResponse.respondent_person_id == respondent_person_id,
+            InteractionResponse.respondent_context == respondent_context,
+        )
+    )
+    merged_lesson_map = (
+        {**(current.lesson_answers or {}), **lesson_map}
+        if answer == "partial" and current is not None
+        else lesson_map
+    )
+    if (
+        current is not None
+        and current.answer == answer
+        and (current.lesson_answers or {}) == merged_lesson_map
+        and (reason is None or current.reason == reason)
+    ):
+        return current
     links = list(
         (
             await session.scalars(
@@ -1521,6 +1535,30 @@ async def save_interaction_response(
             )
         ).all()
     )
+    if request.request_type == "lesson_confirmation" and links:
+        first_start = await session.scalar(
+            select(func.min(Lesson.start_at)).where(
+                Lesson.id.in_([link.lesson_id for link in links])
+            )
+        )
+        if first_start is not None:
+            first_start = _db_utc(first_start)
+            old_expiry = _db_utc(request.expires_at) if request.expires_at else None
+            if (
+                request.status in {"active", "expired"}
+                and first_start > utcnow()
+                and (old_expiry is None or old_expiry < first_start)
+            ):
+                request.expires_at = first_start
+                request.status = "active"
+    if request.status not in {"active", "answered"}:
+        raise ValueError("Ответить на это сообщение уже нельзя")
+    expires_at = request.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at is not None and expires_at < utcnow():
+        request.status = "expired"
+        raise ValueError("Время для ответа уже закончилось")
     answered_lesson_ids = {
         int(link.lesson_id)
         for link in links
@@ -1541,18 +1579,6 @@ async def save_interaction_response(
             for value in lesson_starts
         ):
             raise ValueError("Занятие уже началось, поэтому изменить ответ нельзя")
-    current = await session.scalar(
-        select(InteractionResponse).where(
-            InteractionResponse.request_id == request.id,
-            InteractionResponse.respondent_person_id == respondent_person_id,
-            InteractionResponse.respondent_context == respondent_context,
-        )
-    )
-    merged_lesson_map = (
-        {**(current.lesson_answers or {}), **lesson_map}
-        if answer == "partial" and current is not None
-        else lesson_map
-    )
     if current is None:
         current = InteractionResponse(
             request_id=request.id,
@@ -3262,7 +3288,7 @@ def create_communications_router(
                 subject_person_id=payload.subject_person_id,
                 related_lesson_id=lesson_id,
                 created_by_admin_id=admin_id,
-                expires_at=max(utcnow() + timedelta(minutes=1), start_at - timedelta(minutes=5)),
+                expires_at=start_at,
             )
             session.add(request)
             await session.flush()
