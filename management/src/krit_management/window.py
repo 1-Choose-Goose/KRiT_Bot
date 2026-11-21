@@ -39,6 +39,7 @@ from .backup_controller import BackupController
 from .communications_page import CommunicationsPage
 from .dialogs import ROLE_LABELS, PersonDialog, person_roles
 from .learning_page import LearningPage
+from .registration_page import RegistrationPage
 from .timeutils import parse_center
 from .updates import (
     UpdateInfo,
@@ -144,6 +145,7 @@ class MainWindow(QMainWindow):
             "Клиенты",
             "Учебный процесс",
             "Рассылки",
+            "Регистрация",
             "Отчёты",
             "Администрирование",
         ]
@@ -207,6 +209,8 @@ class MainWindow(QMainWindow):
             self.communications_page.open_schedule_publication
         )
         self.pages.addWidget(self.communications_page)
+        self.registration_page = RegistrationPage(self.api)
+        self.pages.addWidget(self.registration_page)
         self.reports_page = (
             ReportsPage()
             if self.role in {"superadmin", "director"}
@@ -595,6 +599,8 @@ class MainWindow(QMainWindow):
             self.learning_page.refresh()
         elif index == 2:
             self.communications_page.refresh()
+        elif self.section_names[index] == "Регистрация":
+            self.registration_page.refresh()
         elif (
             self.administration_page is not None
             and self.section_names[index] == "Администрирование"
@@ -804,6 +810,7 @@ class MainWindow(QMainWindow):
                 else None
             )
             self.people = snapshot_payload["people"]
+            self.registration_page.set_people(self.people)
             self.archived_people = snapshot_payload["archived_people"]
             self.attempts = snapshot_payload["access_attempts"]
             self._render_people()
@@ -1375,6 +1382,7 @@ class MainWindow(QMainWindow):
         self.notification_timer.stop()
         self.learning_page.shutdown()
         self.communications_page.shutdown()
+        self.registration_page.shutdown()
         if self.administration_page is not None:
             self.administration_page.shutdown()
         self.backup_controller.shutdown()

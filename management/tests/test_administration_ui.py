@@ -43,6 +43,9 @@ class FakeAdministrationApi:
     def learning_lessons(self, _date_from: str, _date_to: str) -> list:
         return []
 
+    def registration_records(self, _kind: str) -> list:
+        return []
+
     def system_status(self) -> dict:
         self.status_calls += 1
         return {
@@ -541,6 +544,7 @@ def test_navigation_respects_roles_and_admin_status_runs_only_while_visible(
         "Клиенты",
         "Учебный процесс",
         "Рассылки",
+        "Регистрация",
         "Отчёты",
         "Администрирование",
     ]
@@ -551,7 +555,7 @@ def test_navigation_respects_roles_and_admin_status_runs_only_while_visible(
         for button in window.administration_page.findChildren(QPushButton)
     )
 
-    window.main_nav.setCurrentRow(4)
+    window.main_nav.setCurrentRow(5)
     assert window.administration_page.status_timer.isActive()
     assert window.administration_page.pool.waitForDone(3_000)
     app.processEvents()
@@ -698,12 +702,13 @@ def test_restricted_sections_stay_visible_and_show_role_requirements() -> None:
         "Клиенты",
         "Учебный процесс",
         "Рассылки",
+        "Регистрация",
         "Отчёты",
         "Администрирование",
     ]
     assert _labels(director) == expected
     assert director.administration_page is None
-    director.main_nav.setCurrentRow(4)
+    director.main_nav.setCurrentRow(5)
     director_denied = director.pages.currentWidget().findChild(QLabel, "accessDeniedMessage")
     assert director_denied is not None
     assert director_denied.text() == (
@@ -712,14 +717,14 @@ def test_restricted_sections_stay_visible_and_show_role_requirements() -> None:
     )
 
     assert _labels(administrator) == expected
-    administrator.main_nav.setCurrentRow(3)
+    administrator.main_nav.setCurrentRow(4)
     reports_denied = administrator.pages.currentWidget().findChild(
         QLabel, "accessDeniedMessage"
     )
     assert reports_denied is not None
     assert "директора" not in reports_denied.text()
     assert "SuperAdmin" not in reports_denied.text()
-    administrator.main_nav.setCurrentRow(4)
+    administrator.main_nav.setCurrentRow(5)
     administration_denied = administrator.pages.currentWidget().findChild(
         QLabel, "accessDeniedMessage"
     )
@@ -737,7 +742,7 @@ def test_server_role_overrides_legacy_admin_username() -> None:
     )
     assert window.role == "administrator"
     assert window.administration_page is None
-    window.main_nav.setCurrentRow(4)
+    window.main_nav.setCurrentRow(5)
     denied = window.pages.currentWidget().findChild(QLabel, "accessDeniedMessage")
     assert denied is not None
     window.close()

@@ -248,6 +248,17 @@ class ManagementApi:
         data = self._request("GET", "/administration/users")
         return data if isinstance(data, list) else []
 
+    def registration_records(self, kind: str) -> list[dict[str, Any]]:
+        data = self._request("GET", f"/registration/{kind}")
+        return data if isinstance(data, list) else []
+
+    def create_registration_record(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", f"/registration/{kind}", json=payload)
+
+    def update_registration_record(self, record_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("PUT", f"/registration/{record_id}", json=payload)
+
+
     def create_administrator(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/administration/users", json=payload)
 

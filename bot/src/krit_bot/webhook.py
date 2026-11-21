@@ -65,6 +65,7 @@ from .learning_notifications import LearningNotificationWorker
 from .max_api import WEBHOOK_UPDATE_TYPES, MaxApiClient
 from .online import create_online_router, reset_online_presence, run_online_maintenance
 from .polling import run_polling
+from .registration import create_registration_router
 from .restores import RestoreService, create_restore_router
 from .syndication import (
     SyndicationWorker,
@@ -913,6 +914,7 @@ def create_app(
             allow_headers=["Content-Type", "X-Online-CSRF"],
         )
     app.include_router(create_online_router(sessions, api, settings))
+    app.include_router(create_registration_router(sessions, require_management_token))
     app.include_router(
         create_learning_router(
             sessions,
