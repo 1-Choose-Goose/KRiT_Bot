@@ -10,6 +10,7 @@ from typing import Any
 from PySide6.QtCore import QDate, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDateEdit,
@@ -332,6 +333,7 @@ class CommunicationsPage(QWidget):
         self.pool = QThreadPool(self)
         self._workers: set[Worker] = set()
         self._closing = False
+        self._silent_refresh = False
         self.people: list[dict[str, Any]] = []
         self.selected_recipient_ids: set[int] = set()
         self.chat_messages: list[dict[str, Any]] = []
@@ -1006,6 +1008,7 @@ class CommunicationsPage(QWidget):
     ) -> None:
         if self._closing:
             return
+        silent = self._silent_refresh
         worker = Worker(fn)
         self._workers.add(worker)
 
@@ -1016,7 +1019,7 @@ class CommunicationsPage(QWidget):
 
         def failed(message: str) -> None:
             self._workers.discard(worker)
-            if not self._closing:
+            if not self._closing and not silent:
                 QMessageBox.critical(self, "Ошибка", message)
 
         worker.signals.finished.connect(finished)
@@ -1024,8 +1027,12 @@ class CommunicationsPage(QWidget):
         self.pool.start(worker)
 
     def _auto_refresh(self) -> None:
-        if self.isVisible() and not self._workers:
-            self.refresh()
+        if self.isVisible() and not self._workers and QApplication.activeModalWidget() is None:
+            self._silent_refresh = True
+            try:
+                self.refresh()
+            finally:
+                self._silent_refresh = False
 
     def refresh(self) -> None:
         if self.tabs.currentIndex() == 0:

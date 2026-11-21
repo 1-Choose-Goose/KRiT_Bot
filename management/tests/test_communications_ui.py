@@ -5,7 +5,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QComboBox, QHeaderView, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QHeaderView, QLabel, QMessageBox, QPushButton
 
 from krit_management.communications_page import (
     PERSON_SEARCH_ROLE,
@@ -25,6 +25,38 @@ class FakeApi:
     def save_communication_global_settings(self, payload: list[dict]) -> list[dict]:
         self.saved_rules = payload
         return payload
+
+
+def test_background_refresh_does_not_repeat_connection_dialogs(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+
+    class FailingApi(FakeApi):
+        def people(self) -> list[dict]:
+            raise TimeoutError("Сервер не ответил вовремя")
+
+        def learning_lessons(self, _date_from: str, _date_to: str) -> list[dict]:
+            return []
+
+    messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "critical", lambda _parent, _title, message: messages.append(message)
+    )
+    page = CommunicationsPage(FailingApi())  # type: ignore[arg-type]
+    page.show()
+    app.processEvents()
+
+    for _ in range(2):
+        page._auto_refresh()
+        assert page.pool.waitForDone(3_000)
+        app.processEvents()
+    assert messages == []
+
+    page.refresh()
+    assert page.pool.waitForDone(3_000)
+    app.processEvents()
+    assert messages == ["Сервер не ответил вовремя"]
+    page.shutdown()
+    page.close()
 
 
 def test_send_tab_requests_poll_lessons_with_timezone_aware_period() -> None:
