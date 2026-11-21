@@ -12,7 +12,11 @@ from sqlalchemy import select
 import krit_bot.registration as registration_module
 from krit_bot.db import Person, build_engine, build_session_factory, ensure_schema
 from krit_bot.learning_models import Subject
-from krit_bot.registration import RegistrationRecord, create_registration_router
+from krit_bot.registration import (
+    RegistrationRecord,
+    create_registration_router,
+    registration_sort_key,
+)
 
 
 @pytest.mark.asyncio
@@ -62,7 +66,7 @@ async def test_registration_journals_share_database_and_keep_separate_numbers(tm
         assert incoming.json()["registration_number"] == f"вх-{year}/1"
         listed = await client.get("/api/v1/registration/contract")
         assert [item["registration_number"] for item in listed.json()] == [
-            f"дг-{year}/2", f"дг-{year}/1"
+            f"дг-{year}/1", f"дг-{year}/2"
         ]
         payload["subject"] = "Русский язык"
         payload["details"]["subject_ids"] = str(russian_id)
@@ -120,6 +124,19 @@ async def test_registration_journals_share_database_and_keep_separate_numbers(tm
         records = list(await session.scalars(select(RegistrationRecord)))
         assert len(records) == 2
     await engine.dispose()
+
+
+def test_registration_sort_uses_numeric_number_even_after_admin_edit() -> None:
+    records = [
+        SimpleNamespace(kind="contract", registration_number=number, year=2026,
+                        sequence=original, id=original)
+        for original, number in enumerate(
+            ("дг-2026/10", "дг-2026/2", "дг-2025/70"), start=1
+        )
+    ]
+    assert [item.registration_number for item in sorted(records, key=registration_sort_key)] == [
+        "дг-2025/70", "дг-2026/2", "дг-2026/10"
+    ]
 
 
 @pytest.mark.asyncio

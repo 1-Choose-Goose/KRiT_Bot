@@ -100,6 +100,16 @@ class RecordView(RecordInput):
     updated_at: datetime
 
 
+def registration_sort_key(record: RegistrationRecord) -> tuple[int, int, str, int]:
+    number = record.registration_number
+    match = re.fullmatch(rf"{PREFIX[record.kind]}-(\d{{4}})/(\d+)", number)
+    year, sequence = (
+        (int(match.group(1)), int(match.group(2)))
+        if match else (record.year, record.sequence)
+    )
+    return year, sequence, number, record.id
+
+
 def create_registration_router(
     sessions: async_sessionmaker[AsyncSession],
     require_management_token: Callable[..., Any],
@@ -198,9 +208,8 @@ def create_registration_router(
             result = await session.scalars(
                 select(RegistrationRecord)
                 .where(RegistrationRecord.kind == kind)
-                .order_by(RegistrationRecord.registration_date.desc(), RegistrationRecord.id.desc())
             )
-            return list(result)
+            return sorted(result, key=registration_sort_key)
 
     @router.post("/{kind}", response_model=RecordView, status_code=201)
     async def create_record(kind: Kind, payload: RecordInput) -> RegistrationRecord:

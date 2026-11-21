@@ -41,6 +41,16 @@ JOURNALS = (
     ("outgoing", "Исходящая корреспонденция"),
     ("contract", "Регистрация договоров"),
 )
+
+
+def registration_year(record: dict[str, Any]) -> int | None:
+    match = re.fullmatch(r"(?:вх|исх|дг)-(\d{4})/\d+", str(record.get("registration_number") or ""))
+    if match:
+        return int(match.group(1))
+    registered = str(record.get("registration_date") or "")
+    return int(registered[:4]) if re.fullmatch(r"\d{4}", registered[:4]) else None
+
+
 FIELDS = {
     "incoming": (
         ("received_date", "Дата получения"),
@@ -77,9 +87,18 @@ class RegistrationDialog(QDialog):
         *,
         incoming_records: list[dict[str, Any]] | None = None,
         subjects: list[dict[str, Any]] | None = None,
+        read_only: bool = False,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Исправить запись" if record else "Зарегистрировать документ")
+        if read_only and record is None:
+            raise ValueError("Для просмотра нужна зарегистрированная запись")
+        self.setWindowTitle(
+            "Просмотр записи"
+            if read_only
+            else "Исправить запись"
+            if record
+            else "Зарегистрировать документ"
+        )
         self.setMinimumWidth(520)
         self.resize(680, 600)
         self.kind = kind
@@ -103,8 +122,6 @@ class RegistrationDialog(QDialog):
             self.registration_date = QLineEdit(date_label)
             self.registration_date.setPlaceholderText("ДД.ММ.ГГГГ")
             form.addRow("Дата регистрации", self.registration_date)
-        elif kind == "incoming":
-            form.addRow("Дата регистрации", QLabel(date_label))
         if record:
             self.registration_number = QLineEdit(str(record["registration_number"]))
             form.addRow("Регистрационный №", self.registration_number)
@@ -114,21 +131,20 @@ class RegistrationDialog(QDialog):
             self.document_date.setText(date.fromisoformat(document_date).strftime("%d.%m.%Y"))
         if self.document_date is not None:
             self.document_date.setPlaceholderText("ДД.ММ.ГГГГ")
-        form.addRow(
-            "Дата письма отправителя"
-            if kind == "incoming"
-            else "Дата договора и регистрации"
-            if kind == "contract"
-            else "Дата подписания",
-            self.document_date if self.document_date is not None else QLabel(date_label),
-        )
+        if self.document_date is not None:
+            form.addRow(
+                "Дата письма отправителя"
+                if kind == "incoming"
+                else "Дата договора и регистрации"
+                if kind == "contract"
+                else "Дата подписания",
+                self.document_date,
+            )
         if kind == "outgoing":
             if record:
                 self.sent_date = QLineEdit(date_label)
                 self.sent_date.setPlaceholderText("ДД.ММ.ГГГГ")
                 form.addRow("Дата отправки и регистрации", self.sent_date)
-            else:
-                form.addRow("Дата отправки и регистрации", QLabel(date_label))
         self.document_number = QLineEdit(str(self.record.get("document_number") or ""))
         if kind == "incoming":
             form.addRow("Номер письма отправителя", self.document_number)
@@ -139,7 +155,11 @@ class RegistrationDialog(QDialog):
             self.counterparty,
         )
         details = self.record.get("details") or {}
-        if kind == "contract":
+        if kind == "contract" and read_only:
+            self.subject = QTextEdit(str(self.record.get("subject") or ""))
+            self.subject.setFixedHeight(80)
+            form.addRow("Услуга", self.subject)
+        elif kind == "contract":
             subject_holder = QWidget()
             subject_layout = QVBoxLayout(subject_holder)
             subject_layout.setContentsMargins(0, 0, 0, 0)
@@ -194,7 +214,14 @@ class RegistrationDialog(QDialog):
         if kind == "contract":
             form.addRow("Ученик в базе", self.person)
         self.extra: dict[str, QLineEdit | QTextEdit] = {}
-        if kind == "outgoing":
+        if kind == "outgoing" and read_only:
+            form.addRow("Наш входящий №", QLineEdit(str(details.get("incoming_number") or "")))
+            for key, label in (
+                ("incoming_document_number", "№ письма отправителя"),
+                ("incoming_document_date", "Дата письма отправителя"),
+            ):
+                form.addRow(label, QLineEdit(str(details.get(key) or "")))
+        elif kind == "outgoing":
             self.incoming_records = {int(item["id"]): item for item in (incoming_records or [])}
             self.incoming_choice = QComboBox()
             self.incoming_choice.addItem("Не связан с входящим документом", None)
@@ -238,12 +265,26 @@ class RegistrationDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
+        if read_only:
+            for field in content.findChildren(QLineEdit):
+                field.setReadOnly(True)
+            for field in content.findChildren(QTextEdit):
+                field.setReadOnly(True)
+            for field in content.findChildren(QComboBox):
+                field.setEnabled(False)
+            for field in content.findChildren(QListWidget):
+                field.setEnabled(False)
         buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+            QDialogButtonBox.StandardButton.Close
+            if read_only
+            else QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Сохранить")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
-        buttons.accepted.connect(self._validate_and_accept)
+        if read_only:
+            buttons.button(QDialogButtonBox.StandardButton.Close).setText("Закрыть")
+        else:
+            buttons.button(QDialogButtonBox.StandardButton.Save).setText("Сохранить")
+            buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+            buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
@@ -377,7 +418,11 @@ class RegistrationPage(QWidget):
         self._workers: set[Worker] = set()
         self._closing = False
         self.records: dict[str, list[dict[str, Any]]] = {}
+        self.visible_records: dict[str, list[dict[str, Any]]] = {}
         self.tables: dict[str, QTableWidget] = {}
+        self.year_filters: dict[str, QComboBox] = {}
+        self.search_fields: dict[str, QLineEdit] = {}
+        self._year_initialized: set[str] = set()
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
         for kind, label in JOURNALS:
@@ -394,11 +439,33 @@ class RegistrationPage(QWidget):
                 delete = QPushButton("Удалить выбранное")
                 delete.clicked.connect(lambda _checked=False, key=kind: self._delete(key))
                 actions.addWidget(delete)
+            else:
+                view = QPushButton("Просмотреть выбранное")
+                view.clicked.connect(
+                    lambda _checked=False, key=kind: self._edit(key, selected=True)
+                )
+                actions.addWidget(view)
             export = QPushButton("Экспорт в Word")
             export.clicked.connect(lambda _checked=False, key=kind: self._export(key))
             actions.addWidget(export)
             actions.addStretch(1)
             page_layout.addLayout(actions)
+            filters = QHBoxLayout()
+            filters.addWidget(QLabel("Год регистрации"))
+            year_filter = QComboBox()
+            year_filter.addItem("Все годы", None)
+            year_filter.currentIndexChanged.connect(
+                lambda _index, key=kind: self._apply_filters(key)
+            )
+            self.year_filters[kind] = year_filter
+            filters.addWidget(year_filter)
+            search = QLineEdit()
+            search.setPlaceholderText("Поиск по номеру, корреспонденту или содержанию")
+            search.setClearButtonEnabled(True)
+            search.textChanged.connect(lambda _text, key=kind: self._apply_filters(key))
+            self.search_fields[kind] = search
+            filters.addWidget(search, 1)
+            page_layout.addLayout(filters)
             table = QTableWidget(0, 4)
             table.setHorizontalHeaderLabels(["Рег. №", "Дата", "Корреспондент", "Содержание"])
             table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -412,8 +479,7 @@ class RegistrationPage(QWidget):
             table.setColumnWidth(0, 130)
             table.setColumnWidth(1, 100)
             table.setColumnWidth(2, 260)
-            if can_manage:
-                table.doubleClicked.connect(lambda _index, key=kind: self._edit(key, selected=True))
+            table.doubleClicked.connect(lambda _index, key=kind: self._edit(key, selected=True))
             self.tables[kind] = table
             page_layout.addWidget(table)
             self.tabs.addTab(page, label)
@@ -429,11 +495,48 @@ class RegistrationPage(QWidget):
 
     def _show(self, kind: str, rows: object) -> None:
         self.records[kind] = list(rows) if isinstance(rows, list) else []
+        years = sorted(
+            {year for record in self.records[kind] if (year := registration_year(record))},
+            reverse=True,
+        )
+        year_filter = self.year_filters[kind]
+        selected_year = year_filter.currentData()
+        year_filter.blockSignals(True)
+        year_filter.clear()
+        year_filter.addItem("Все годы", None)
+        for year in years:
+            year_filter.addItem(str(year), year)
+        if kind not in self._year_initialized and years:
+            selected_year = years[0]
+            self._year_initialized.add(kind)
+        index = year_filter.findData(selected_year)
+        year_filter.setCurrentIndex(index if index >= 0 else 0)
+        year_filter.blockSignals(False)
+        self._apply_filters(kind)
+
+    def _apply_filters(self, kind: str) -> None:
+        year = self.year_filters[kind].currentData()
+        query = self.search_fields[kind].text().strip().casefold()
+        records = [
+            record
+            for record in self.records.get(kind, [])
+            if (year is None or registration_year(record) == year)
+            and (
+                not query
+                or query
+                in " ".join(
+                    str(record.get(key) or "")
+                    for key in ("registration_number", "counterparty", "subject")
+                ).casefold()
+            )
+        ]
+        self.visible_records[kind] = records
         table = self.tables[kind]
-        table.setRowCount(len(self.records[kind]))
-        for row, record in enumerate(self.records[kind]):
+        table.setRowCount(len(records))
+        for row, record in enumerate(records):
             registered = (
-                record.get("document_date") if kind == "contract"
+                record.get("document_date")
+                if kind == "contract"
                 else record.get("registration_date")
             )
             display_date = date.fromisoformat(registered).strftime("%d.%m.%Y") if registered else ""
@@ -451,14 +554,15 @@ class RegistrationPage(QWidget):
         table.resizeRowsToContents()
 
     def _edit(self, kind: str, *, selected: bool = False) -> None:
-        if selected and not self.can_manage:
-            return
         row = self.tables[kind].currentRow()
-        records = self.records.get(kind, [])
+        records = self.visible_records.get(kind, [])
         if selected and not 0 <= row < len(records):
             QMessageBox.information(self, "Выберите запись", "Сначала выберите запись в журнале.")
             return
         record = records[row] if selected else None
+        if record and not self.can_manage:
+            self._open_editor(kind, record, [])
+            return
         if kind == "outgoing":
             self._run(
                 lambda: self.api.registration_records("incoming"),
@@ -492,8 +596,11 @@ class RegistrationPage(QWidget):
             self,
             incoming_records=incoming if isinstance(incoming, list) else [],
             subjects=subjects if isinstance(subjects, list) else [],
+            read_only=bool(record and not self.can_manage),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if record and not self.can_manage:
             return
         payload = dialog.payload()
         if record:
@@ -511,7 +618,7 @@ class RegistrationPage(QWidget):
         if not self.can_manage:
             return
         row = self.tables[kind].currentRow()
-        records = self.records.get(kind, [])
+        records = self.visible_records.get(kind, [])
         if not 0 <= row < len(records):
             QMessageBox.information(self, "Выберите запись", "Сначала выберите запись в журнале.")
             return
@@ -532,13 +639,15 @@ class RegistrationPage(QWidget):
         )
 
     def _export(self, kind: str) -> None:
-        suggested = f"{dict(JOURNALS)[kind]}.docx"
+        selected_year = self.year_filters[kind].currentData()
+        suffix = f" {selected_year}" if selected_year else ""
+        suggested = f"{dict(JOURNALS)[kind]}{suffix}.docx"
         path, _filter = QFileDialog.getSaveFileName(
             self, "Экспорт журнала", suggested, "Документ Word (*.docx)"
         )
         if path:
             self._run(
-                lambda: export_journal(kind, self.api.registration_records(kind), path),
+                lambda: export_journal(kind, self.visible_records.get(kind, []), path),
                 lambda _result: QMessageBox.information(self, "Экспорт завершён", path),
             )
 
