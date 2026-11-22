@@ -219,8 +219,6 @@ def create_registration_router(
             raise HTTPException(422, "Укажите дату подписания документа")
         if creating and kind == "contract" and payload.document_date is not None:
             raise HTTPException(422, "Дату договора присваивает программа")
-        if creating and kind == "outgoing" and payload.details.get("sent_date"):
-            raise HTTPException(422, "Дату отправки присваивает программа")
         if kind == "incoming" and not creating:
             received = payload.details.get("received_date", "").strip()
             try:
@@ -374,6 +372,21 @@ def create_registration_router(
                     raise HTTPException(422, "Укажите дату отправки как ДД.ММ.ГГГГ") from exc
             elif record.kind != "contract" and payload.registration_date is not None:
                 record.registration_date = payload.registration_date
+            if record.kind == "incoming":
+                outgoing = await session.scalars(
+                    select(RegistrationRecord).where(RegistrationRecord.kind == "outgoing")
+                )
+                for answer in outgoing:
+                    if answer.details.get("incoming_record_id") == str(record.id):
+                        answer.details = {
+                            **answer.details,
+                            "incoming_number": record.registration_number,
+                            "incoming_document_number": record.document_number or "",
+                            "incoming_document_date": (
+                                record.document_date.strftime("%d.%m.%Y")
+                                if record.document_date else ""
+                            ),
+                        }
             record.updated_at = utcnow()
             try:
                 await session.commit()

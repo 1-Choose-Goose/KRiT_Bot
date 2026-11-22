@@ -760,7 +760,9 @@ async def test_daily_lessons_are_bundled_once_per_person_and_day(tmp_path) -> No
         )
         request = await session.get(InteractionRequest, confirmation.interaction_request_id)
         assert request is not None
-        assert request.expires_at == bundles[0].anchor_start_at.astimezone(UTC)
+        assert request.expires_at.replace(tzinfo=UTC) == (
+            bundles[0].anchor_start_at.astimezone(UTC)
+        )
         await save_interaction_response(
             session,
             request=request,
@@ -775,7 +777,7 @@ async def test_daily_lessons_are_bundled_once_per_person_and_day(tmp_path) -> No
 async def test_answered_bundle_keeps_only_one_hour_reminder(tmp_path) -> None:
     engine, sessions = await _database(tmp_path)
     timezone = ZoneInfo("UTC")
-    now = datetime(2026, 10, 26, 8, 0, tzinfo=UTC)
+    now = utcnow()
     async with sessions() as session:
         student = Person(full_name="Ученик", phone="+79000000301")
         teacher = Person(full_name="Учитель", phone="+79000000302")

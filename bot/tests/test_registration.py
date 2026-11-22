@@ -102,9 +102,13 @@ async def test_registration_journals_share_database_and_keep_separate_numbers(tm
         independent_outgoing = await client.post(
             "/api/v1/registration/outgoing",
             json={"document_date": f"{year}-11-21", "counterparty": "Адресат",
-                  "subject": "Самостоятельное письмо"}
+                  "subject": "Самостоятельное письмо",
+                  "details": {"sent_date": "01.01.2020"}}
         )
         assert independent_outgoing.status_code == 201, independent_outgoing.text
+        assert independent_outgoing.json()["details"]["sent_date"] == (
+            incoming.json()["details"]["received_date"]
+        )
         incoming_list = await client.get("/api/v1/registration/incoming")
         registered_incoming = next(
             item for item in incoming_list.json() if item["id"] == incoming.json()["id"]
@@ -124,10 +128,20 @@ async def test_registration_journals_share_database_and_keep_separate_numbers(tm
         corrected_incoming = await client.put(
             f"/api/v1/registration/{incoming.json()['id']}",
             json={"counterparty": "Отправитель", "subject": "Письмо",
+                  "registration_number": f"вх-{year}/27",
+                  "document_number": "П-1", "document_date": f"{year}-11-19",
                   "details": {"received_date": f"20.11.{year}"}},
         )
         assert corrected_incoming.status_code == 200, corrected_incoming.text
         assert corrected_incoming.json()["registration_date"] == f"{year}-11-20"
+        outgoing_list = await client.get("/api/v1/registration/outgoing")
+        linked = next(
+            item for item in outgoing_list.json()
+            if item["id"] == linked_outgoing.json()["id"]
+        )
+        assert linked["details"]["incoming_number"] == f"вх-{year}/27"
+        assert linked["details"]["incoming_document_number"] == "П-1"
+        assert linked["details"]["incoming_document_date"] == f"19.11.{year}"
         listed = await client.get("/api/v1/registration/contract")
         assert [item["registration_number"] for item in listed.json()] == [
             f"дг-{year}/2", f"дг-{year}/1"

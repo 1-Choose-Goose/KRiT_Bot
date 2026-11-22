@@ -114,7 +114,7 @@ class RegistrationDialog(QDialog):
             "QWidget#registrationForm QLabel { color: #10254c; background: transparent; }"
         )
         form = QFormLayout(content)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         registered = self.record.get("registration_date")
         date_label = (
             date.fromisoformat(registered).strftime("%d.%m.%Y")
@@ -284,6 +284,16 @@ class RegistrationDialog(QDialog):
             self._auto_student_name = ""
             self.person.currentIndexChanged.connect(self._person_changed)
             self.customer_choice.currentIndexChanged.connect(self._customer_changed)
+        if kind == "contract":
+            customer_row = form.takeRow(form.getWidgetPosition(self.customer_choice)[0])
+            counterparty_row = form.takeRow(form.getWidgetPosition(self.counterparty)[0])
+            form.insertRow(0, customer_row.labelItem.widget(), customer_row.fieldItem.widget())
+            form.insertRow(
+                1, counterparty_row.labelItem.widget(), counterparty_row.fieldItem.widget()
+            )
+        for field in content.findChildren(QTextEdit):
+            field.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            field.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(content)
@@ -373,6 +383,7 @@ class RegistrationDialog(QDialog):
         field = self.extra["student_name"]
         student_id = self.person.currentData()
         name = self.person.currentText() if student_id is not None else ""
+        self.person.setToolTip(name)
         if name:
             field.setText(name)
             self._auto_student_name = name
@@ -382,40 +393,46 @@ class RegistrationDialog(QDialog):
         customer_id = self.customer_choice.currentData()
         if customer_id is not None and customer_id == self._last_student_id:
             customer_id = student_id
+        elif customer_id is None and student_id is not None:
+            guardians = self.people_by_id[int(student_id)].get("guardians") or []
+            if len(guardians) == 1 and int(guardians[0]["id"]) in self.people_by_id:
+                customer_id = int(guardians[0]["id"])
         self._populate_customer_choices(customer_id)
         self._last_student_id = student_id
-        if customer_id is not None and customer_id == student_id:
+        if customer_id is not None:
             self._customer_changed(self.customer_choice.currentIndex())
 
     def _populate_customer_choices(self, preferred_id: int | None) -> None:
         student_id = self.person.currentData()
         student = self.people_by_id.get(int(student_id)) if student_id else None
-        linked_ids = (
-            {int(person["id"]) for person in student.get("guardians", [])}
-            if student else set()
-        )
         choice = self.customer_choice
         choice.blockSignals(True)
         choice.clear()
         choice.addItem("Ввести заказчика вручную", None)
         if student:
-            choice.addItem(f"Сам ученик — {student['full_name']}", int(student_id))
+            choice.addItem(f"{student['full_name']} — ученик", int(student_id))
+            choice.setItemData(
+                choice.count() - 1, student["full_name"], Qt.ItemDataRole.ToolTipRole
+            )
+        linked_ids = (
+            {int(person["id"]) for person in student.get("guardians", [])}
+            if student else set()
+        )
         parents = sorted(
-            (person for person in self.people_by_id.values()
-             if "parent" in (person.get("roles") or [])),
-            key=lambda person: (
-                int(person["id"]) not in linked_ids, person["full_name"].casefold()
-            ),
+            (self.people_by_id[person_id] for person_id in linked_ids
+             if person_id in self.people_by_id),
+            key=lambda person: person["full_name"].casefold(),
         )
         for parent in parents:
-            label = "Родитель ученика" if int(parent["id"]) in linked_ids else "Родитель"
-            choice.addItem(f"{label} — {parent['full_name']}", int(parent["id"]))
+            choice.addItem(f"{parent['full_name']} — родитель", int(parent["id"]))
+            choice.setItemData(choice.count() - 1, parent["full_name"], Qt.ItemDataRole.ToolTipRole)
         index = choice.findData(preferred_id)
         choice.setCurrentIndex(index if index >= 0 else 0)
         choice.blockSignals(False)
 
     def _customer_changed(self, _index: int) -> None:
         customer_id = self.customer_choice.currentData()
+        self.customer_choice.setToolTip(self.customer_choice.currentText())
         customer = self.people_by_id.get(int(customer_id)) if customer_id else None
         if customer:
             self.counterparty.setPlainText(str(customer.get("full_name") or ""))

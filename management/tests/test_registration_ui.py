@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QDialogButtonBox,
+    QFormLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -201,6 +202,7 @@ def test_contract_selects_multiple_subjects_and_finds_student_by_surname() -> No
             {"id": 7, "full_name": "Акуляева Ирина", "roles": ["student"],
              "guardians": [{"id": 8, "full_name": "Акуляева Анна"}]},
             {"id": 8, "full_name": "Акуляева Анна", "roles": ["parent"]},
+            {"id": 9, "full_name": "Чужой родитель", "roles": ["parent"]},
         ],
         subjects=[
             {"id": 2, "name": "Математика", "active": True},
@@ -220,11 +222,32 @@ def test_contract_selects_multiple_subjects_and_finds_student_by_surname() -> No
         assert "background: white" in dialog.person.completer().popup().styleSheet()
         dialog.person.setCurrentIndex(1)
         assert dialog.extra["student_name"].text() == "Акуляева Ирина"
+        assert dialog.customer_choice.currentData() == 8
+        assert dialog.counterparty.toPlainText() == "Акуляева Анна"
         parent_index = dialog.customer_choice.findData(8)
-        assert "Родитель ученика" in dialog.customer_choice.itemText(parent_index)
+        assert dialog.customer_choice.itemText(parent_index).startswith("Акуляева Анна")
+        assert dialog.customer_choice.findData(9) == -1
+        assert dialog.customer_choice.count() == 3
+        form = dialog.findChild(QWidget, "registrationForm").layout()
+        assert isinstance(form, QFormLayout)
+        assert form.itemAt(0, QFormLayout.ItemRole.LabelRole).widget().text() == (
+            "Заказчик в базе"
+        )
+        assert form.itemAt(1, QFormLayout.ItemRole.LabelRole).widget().text() == "Заказчик"
         dialog.customer_choice.setCurrentIndex(parent_index)
         assert dialog.counterparty.toPlainText() == "Акуляева Анна"
         assert dialog.payload()["customer_person_id"] == 8
+        dialog.show()
+        _app.processEvents()
+        assert dialog.customer_choice.width() >= dialog.counterparty.width() - 10
+        dialog.customer_choice.showPopup()
+        _app.processEvents()
+        assert dialog.customer_choice.view().width() >= dialog.customer_choice.width() - 10
+        dialog.customer_choice.hidePopup()
+        assert all(
+            field.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            for field in dialog.findChildren(QTextEdit)
+        )
         dialog.customer_choice.setCurrentIndex(dialog.customer_choice.findData(7))
         assert dialog.counterparty.toPlainText() == "Акуляева Ирина"
         assert dialog.payload()["customer_person_id"] == 7
