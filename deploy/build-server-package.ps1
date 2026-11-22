@@ -10,7 +10,7 @@ New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $StageRoot = Join-Path ([IO.Path]::GetTempPath()) ("krit-server-" + [guid]::NewGuid().ToString("N"))
 if (-not [String]::Equals(
     [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($StageRoot)),
-    [IO.Path]::GetFullPath([IO.Path]::GetTempPath()),
+    [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath([IO.Path]::GetTempPath())),
     [StringComparison]::OrdinalIgnoreCase
 )) { throw "Некорректный временный каталог серверного комплекта" }
 

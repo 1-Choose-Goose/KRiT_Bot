@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import zipfile
 
 import pytest
@@ -96,7 +97,10 @@ async def test_postgresql_backup_can_replace_database_and_recover_data(tmp_path)
     def runner(argv: list[str], command_environment: dict[str, str]) -> None:
         if argv[0] == "/opt/krit-bot/venv/bin/krit-migrate":
             return
-        run_command(argv, command_environment)
+        try:
+            run_command(argv, command_environment)
+        except subprocess.CalledProcessError as exc:
+            pytest.fail(f"{argv[0]} failed: {exc.stderr.decode(errors='replace')}")
 
     restore_operation(
         tmp_path / "restore",
