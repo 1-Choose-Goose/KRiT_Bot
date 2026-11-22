@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch]$SkipInstaller)
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -8,10 +8,18 @@ $versionFile = Join-Path $managementRoot "src\krit_management\version.py"
 $versionMatch = Select-String -LiteralPath $versionFile -Pattern 'APP_VERSION\s*=\s*"([^"]+)"'
 if (-not $versionMatch) { throw "Не удалось прочитать версию" }
 $appVersion = $versionMatch.Matches[0].Groups[1].Value
+if ($appVersion -notmatch '^\d+\.\d+\.\d+$') { throw "Некорректная версия" }
 
-$pythonLauncher = Get-Command py.exe -ErrorAction Stop
-$pythonHome = (& $pythonLauncher.Source -3.13 -c "import sys; print(sys.base_prefix)").Trim()
-$buildRoot = Join-Path $env:TEMP "krit-management-build-$appVersion"
+$pythonCommand = Get-Command python.exe -ErrorAction Stop
+$pythonVersion = (& $pythonCommand.Source -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
+if ($pythonVersion -ne "3.13") { throw "Для сборки требуется Python 3.13" }
+$pythonHome = (& $pythonCommand.Source -c "import sys; print(sys.base_prefix)").Trim()
+$buildRoot = [IO.Path]::GetFullPath((Join-Path $env:TEMP "krit-management-build-$appVersion"))
+if (-not [String]::Equals(
+    [IO.Path]::GetDirectoryName($buildRoot),
+    [IO.Path]::GetFullPath($env:TEMP),
+    [StringComparison]::OrdinalIgnoreCase
+)) { throw "Некорректный временный каталог сборки" }
 $releaseDir = Join-Path $projectRoot "release\v$appVersion"
 $stagingDir = Join-Path $buildRoot "dist\KRiTManagement"
 $savedPath = $env:PATH
@@ -21,7 +29,7 @@ if (Test-Path -LiteralPath $buildRoot) { [IO.Directory]::Delete($buildRoot, $tru
 [IO.Directory]::CreateDirectory($releaseDir) | Out-Null
 
 try {
-    & $pythonLauncher.Source -3.13 -m venv (Join-Path $buildRoot "venv")
+    & $pythonCommand.Source -m venv (Join-Path $buildRoot "venv")
     $python = Join-Path $buildRoot "venv\Scripts\python.exe"
     & $python -m pip install --disable-pip-version-check --quiet --upgrade pip "setuptools>=83"
     & $python -m pip install --disable-pip-version-check --quiet -e $managementRoot "pyinstaller==6.22.3"
@@ -85,11 +93,13 @@ try {
     if (Test-Path -LiteralPath $zipPath) { [IO.File]::Delete($zipPath) }
     Compress-Archive -LiteralPath $stagingDir -DestinationPath $zipPath -CompressionLevel Optimal
 
-    $iscc = Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"
-    if (-not (Test-Path -LiteralPath $iscc)) { throw "Не установлен Inno Setup 6" }
-    & $iscc "/DAppVersion=$appVersion" "/DSourceDir=$stagingDir" `
-        "/DOutputDir=$releaseDir" (Join-Path $managementRoot "packaging\windows-installer.iss")
-    if ($LASTEXITCODE -ne 0) { throw "Не собран Setup" }
+    if (-not $SkipInstaller) {
+        $iscc = Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"
+        if (-not (Test-Path -LiteralPath $iscc)) { throw "Не установлен Inno Setup 6" }
+        & $iscc "/DAppVersion=$appVersion" "/DSourceDir=$stagingDir" `
+            "/DOutputDir=$releaseDir" (Join-Path $managementRoot "packaging\windows-installer.iss")
+        if ($LASTEXITCODE -ne 0) { throw "Не собран Setup" }
+    }
 
     Get-ChildItem -LiteralPath $releaseDir -File |
         Where-Object Name -in @(

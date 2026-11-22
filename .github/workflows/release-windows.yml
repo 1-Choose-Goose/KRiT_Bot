@@ -1,0 +1,73 @@
+name: Release Windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      QT_QPA_PLATFORM: offscreen
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Verify release version
+        shell: pwsh
+        run: |
+          $version = (Get-Content management/src/krit_management/version.py -Raw |
+            Select-String -Pattern 'APP_VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF -like 'refs/tags/v*' -and
+              $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match application version $version"
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "APP_VERSION=$version"
+      - name: Build management update archive
+        shell: pwsh
+        run: ./management/build_windows.ps1 -SkipInstaller
+      - name: Verify update contents
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $path = "release/v$env:APP_VERSION/KRiT-Management-Windows-x64.zip"
+          $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $path).Path)
+          try {
+            $names = @($archive.Entries | ForEach-Object FullName)
+            if (-not ($names | Where-Object { $_ -match '(^|/)KRiTManagement\.exe$' })) {
+              throw "Application executable is absent from the update archive"
+            }
+            if (-not ($names | Where-Object { $_ -match '/_internal/KRiTManagementUpdater\.exe$' })) {
+              throw "Updater executable is absent from the update archive"
+            }
+          }
+          finally { $archive.Dispose() }
+      - name: Build server package
+        shell: pwsh
+        run: ./deploy/build-server-package.ps1
+      - name: Ensure GitHub CLI is available
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+            choco install gh --no-progress -y
+          }
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          gh release create $tag `
+            "release/v$env:APP_VERSION/KRiT-Management-Windows-x64.zip" `
+            "dist/KRiTServer.tar.gz" `
+            "dist/KRiTServer.tar.gz.sha256" `
+            --verify-tag --title "KRiT $tag" --generate-notes
