@@ -37,6 +37,7 @@ from krit_management.learning_page import (
     ReasonDialog,
     ReferenceDialog,
     SchedulePreviewDialog,
+    suggest_subject_color,
 )
 from krit_management.main import build_stylesheet
 from krit_management.widgets import SafeComboBox, SearchableComboBox
@@ -1843,6 +1844,19 @@ def test_subject_dialog_uses_palette_button_and_saves_teacher_ids() -> None:
     assert payload["teacher_ids"] == [10]
     dialog.deleteLater()
     app.processEvents()
+
+
+def test_new_subject_receives_unused_calendar_color() -> None:
+    QApplication.instance() or QApplication([])
+    existing = [{"color": "#0F766E"}, {"color": "#BE185D"}]
+    dialog = ReferenceDialog("subjects", references={"subjects": existing})
+    try:
+        assert dialog.color_value == suggest_subject_color(existing)
+        assert dialog.color_value.casefold() not in {
+            item["color"].casefold() for item in existing
+        }
+    finally:
+        dialog.close()
 
 
 def test_departure_uses_selected_present_row_instead_of_arrival_field(monkeypatch) -> None:

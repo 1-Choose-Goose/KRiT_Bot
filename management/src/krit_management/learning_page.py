@@ -494,6 +494,25 @@ class PresenceDepartureDialog(QDialog):
         self.accept()
 
 
+SUBJECT_COLOR_PALETTE = (
+    "#0F766E", "#BE185D", "#1D4ED8", "#64748B", "#15803D", "#7C3AED",
+    "#92400E", "#0891B2", "#E11D48", "#A16207", "#0E7490", "#9333EA",
+    "#4D7C0F", "#B45309", "#4338CA", "#B91C1C",
+)
+
+
+def suggest_subject_color(subjects: list[dict[str, Any]]) -> str:
+    used = {str(item.get("color") or "").casefold() for item in subjects}
+    for color in SUBJECT_COLOR_PALETTE:
+        if color.casefold() not in used:
+            return color
+    for index in range(360):
+        color = QColor.fromHsv((index * 137) % 360, 190, 210).name()
+        if color.casefold() not in used:
+            return color
+    return "#2563eb"
+
+
 class ReferenceDialog(QDialog):
     def __init__(
         self,
@@ -524,7 +543,11 @@ class ReferenceDialog(QDialog):
         self.capacity = QSpinBox()
         self.capacity.setRange(1, 1000)
         self.capacity.setValue(int(self.item.get("capacity", 12)))
-        self.color_value = str(self.item.get("color", "#2563eb"))
+        default_color = (
+            suggest_subject_color(self.references.get("subjects", []))
+            if kind == "subjects" else "#2563eb"
+        )
+        self.color_value = str(self.item.get("color", default_color))
         self.color_button = QPushButton()
         self.color_button.setProperty("kind", "secondary")
         self.color_button.clicked.connect(self._choose_color)

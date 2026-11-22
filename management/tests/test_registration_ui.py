@@ -32,6 +32,7 @@ def test_registration_edit_and_delete_controls_are_superadmin_only() -> None:
         assert "Удалить выбранное" not in ordinary_labels
         assert {"Исправить выбранное", "Удалить выбранное"} <= elevated_labels
         assert all(table.wordWrap() for table in elevated.tables.values())
+        assert all(table.verticalHeader().isHidden() for table in elevated.tables.values())
     finally:
         ordinary.shutdown()
         elevated.shutdown()
@@ -103,6 +104,18 @@ def test_outgoing_creation_omits_automatic_date_placeholder() -> None:
         dialog.close()
 
 
+def test_incoming_date_and_executor_are_assigned_on_registration() -> None:
+    _app = QApplication.instance() or QApplication([])
+    dialog = RegistrationDialog("incoming", [])
+    try:
+        labels = {label.text() for label in dialog.findChildren(QLabel)}
+        assert "Дата получения и регистрации" not in labels
+        assert "Исполнитель" not in labels
+        assert "received_date" not in dialog.payload()["details"]
+    finally:
+        dialog.close()
+
+
 def test_year_archive_and_search_keep_correct_record_selection() -> None:
     _app = QApplication.instance() or QApplication([])
     page = RegistrationPage(object(), can_manage=False)
@@ -117,7 +130,7 @@ def test_year_archive_and_search_keep_correct_record_selection() -> None:
             },
             {
                 "id": 2,
-                "registration_number": "вх-2026/1",
+                "registration_number": "вх-2026/6",
                 "registration_date": "2026-01-02",
                 "counterparty": "Новый отправитель",
                 "subject": "Запрос",
@@ -133,6 +146,9 @@ def test_year_archive_and_search_keep_correct_record_selection() -> None:
         page._show("incoming", rows)
         assert page.year_filters["incoming"].currentData() is None
         assert [item["id"] for item in page.visible_records["incoming"]] == [1]
+        page.search_fields["incoming"].setText("6")
+        assert page.tables["incoming"].rowCount() == 1
+        assert [item["id"] for item in page.visible_records["incoming"]] == [2]
     finally:
         page.shutdown()
         page.close()
@@ -181,7 +197,11 @@ def test_contract_selects_multiple_subjects_and_finds_student_by_surname() -> No
     _app = QApplication.instance() or QApplication([])
     dialog = RegistrationDialog(
         "contract",
-        [{"id": 7, "full_name": "Акуляева Ирина", "roles": ["student"]}],
+        [
+            {"id": 7, "full_name": "Акуляева Ирина", "roles": ["student"],
+             "guardians": [{"id": 8, "full_name": "Акуляева Анна"}]},
+            {"id": 8, "full_name": "Акуляева Анна", "roles": ["parent"]},
+        ],
         subjects=[
             {"id": 2, "name": "Математика", "active": True},
             {"id": 3, "name": "Химия", "active": True},
@@ -194,8 +214,20 @@ def test_contract_selects_multiple_subjects_and_finds_student_by_surname() -> No
         assert not dialog.subject_list.item(1).isHidden()
         dialog.subject_list.item(0).setCheckState(Qt.CheckState.Checked)
         dialog.subject_list.item(1).setCheckState(Qt.CheckState.Checked)
-        dialog.person.setEditText("Аку")
-        assert dialog.person.completer().filterMode() == Qt.MatchFlag.MatchContains
+        assert "#1b63db" in dialog.subject_list.styleSheet()
+        dialog.person._search("Аку")
+        assert dialog.person._proxy.rowCount() == 1
+        assert "background: white" in dialog.person.completer().popup().styleSheet()
+        dialog.person.setCurrentIndex(1)
+        assert dialog.extra["student_name"].text() == "Акуляева Ирина"
+        parent_index = dialog.customer_choice.findData(8)
+        assert "Родитель ученика" in dialog.customer_choice.itemText(parent_index)
+        dialog.customer_choice.setCurrentIndex(parent_index)
+        assert dialog.counterparty.toPlainText() == "Акуляева Анна"
+        assert dialog.payload()["customer_person_id"] == 8
+        dialog.customer_choice.setCurrentIndex(dialog.customer_choice.findData(7))
+        assert dialog.counterparty.toPlainText() == "Акуляева Ирина"
+        assert dialog.payload()["customer_person_id"] == 7
         assert dialog.payload()["subject"] == "Математика, Химия"
         assert dialog.payload()["details"]["subject_ids"] == "2,3"
     finally:

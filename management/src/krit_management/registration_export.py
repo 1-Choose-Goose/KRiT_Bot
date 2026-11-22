@@ -15,12 +15,12 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
 
 HEADERS = {
-    "contract": ("Рег. №", "Дата договора и регистрации", "Заказчик (ФИО законного представителя)",
+    "contract": ("Рег. №", "Дата договора и регистрации", "Заказчик (ФИО)",
                  "Ученик (ФИО)", "Наименование услуги", "Срок оказания услуг",
                  "Стоимость услуг в месяц", "Соглашения об изменении цены"),
-    "incoming": ("Дата регистрации и входящий №", "Дата получения", "Дата письма отправителя",
+    "incoming": ("Входящий №", "Дата получения и регистрации", "Дата письма отправителя",
                  "Отправитель", "№ письма отправителя", "Краткое содержание",
-                 "Ответственный / срок", "Результат / исходящий ответ"),
+                 "Исполнитель / срок", "Результат / исходящий ответ"),
     "outgoing": ("Исходящий №", "Дата отправки и регистрации", "Дата подписания",
                  "Адресат", "Краткое содержание", "Подписал / исполнитель",
                  "Способ отправки", "Связь с входящим / примечание"),
@@ -44,8 +44,6 @@ def _date(value: str | None) -> str:
 def _values(kind: str, record: dict[str, Any]) -> tuple[str, ...]:
     d = record.get("details") or {}
     number = str(record.get("registration_number") or "")
-    registered = _date(record.get("registration_date"))
-    base = f"{registered} № {number}".strip()
     if kind == "contract":
         amendments = d.get("amendments") or ""
         additions = [f"Примечание: {d['notes']}"] if d.get("notes") else []
@@ -53,22 +51,26 @@ def _values(kind: str, record: dict[str, Any]) -> tuple[str, ...]:
             additions.append(f"№ в старом журнале: {d['source_number']}")
         if d.get("source_date"):
             additions.append(f"Дата в старом журнале: {d['source_date']}")
+        if d.get("executor"):
+            additions.append(f"Исполнитель: {d['executor']}")
         return (f"№ {number}", _date(record.get("document_date")), record.get("counterparty") or "",
                 d.get("student_name") or "", record.get("subject") or "",
                 d.get("service_period") or "", d.get("monthly_price") or "",
                 "\n".join(filter(None, (amendments, *additions))))
     if kind == "incoming":
-        return (base, d.get("received_date") or "", _date(record.get("document_date")),
+        return (f"№ {number}", d.get("received_date") or "", _date(record.get("document_date")),
                 record.get("counterparty") or "",
                 record.get("document_number") or "",
                 record.get("subject") or "",
-                " / ".join(filter(None, (d.get("responsible"), d.get("due_date")))),
+                " / ".join(filter(None, (
+                    d.get("executor") or d.get("responsible"), d.get("due_date")
+                ))),
                 "\n".join(filter(None, (d.get("result"), d.get("reply_number"),
                                           d.get("channel"), d.get("notes")))))
     return (f"№ {number}", _date(record.get("registration_date")),
             _date(record.get("document_date")),
             record.get("counterparty") or "", record.get("subject") or "",
-            " / ".join(filter(None, (d.get("signer"), d.get("responsible")))),
+            " / ".join(filter(None, (d.get("signer"), d.get("executor") or d.get("responsible")))),
             d.get("channel") or "",
             "\n".join(filter(None, (d.get("incoming_number"),
                                       d.get("incoming_document_number"),

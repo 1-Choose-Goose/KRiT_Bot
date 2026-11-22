@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .db import Base, Person, utcnow
+from .db import AdminUser, Base, Person, PersonRole, utcnow
 from .learning_models import Subject
 
 Kind = Literal["incoming", "outgoing", "contract"]
@@ -56,6 +56,9 @@ class RegistrationRecord(Base):
     counterparty: Mapped[str] = mapped_column(String(250), nullable=False)
     subject: Mapped[str] = mapped_column(String(500), nullable=False)
     person_id: Mapped[int | None] = mapped_column(ForeignKey("persons.id", ondelete="SET NULL"))
+    customer_person_id: Mapped[int | None] = mapped_column(
+        ForeignKey("persons.id", ondelete="SET NULL"), index=True
+    )
     details: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -69,6 +72,7 @@ class RecordInput(BaseModel):
     counterparty: str = Field(min_length=1, max_length=250)
     subject: str = Field(min_length=1, max_length=500)
     person_id: int | None = None
+    customer_person_id: int | None = None
     details: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -125,6 +129,28 @@ def create_registration_router(
     async def validate_person(session: AsyncSession, person_id: int | None) -> None:
         if person_id is not None and await session.get(Person, person_id) is None:
             raise HTTPException(422, "Ученик не найден")
+
+    async def resolve_customer(
+        session: AsyncSession, kind: Kind, values: dict[str, Any], *,
+        previous_id: int | None = None,
+    ) -> dict[str, Any]:
+        customer_id = values.get("customer_person_id")
+        if kind != "contract":
+            if customer_id is not None:
+                raise HTTPException(422, "Заказчик из базы указывается только для договора")
+            return values
+        if customer_id is None:
+            return values
+        customer = await session.get(Person, customer_id)
+        if customer is None:
+            raise HTTPException(422, "Заказчик не найден в базе")
+        if customer_id != values.get("person_id") and await session.get(
+            PersonRole, (customer_id, "parent")
+        ) is None:
+            raise HTTPException(422, "Заказчик должен быть учеником или родителем из базы")
+        if previous_id != customer_id:
+            values["counterparty"] = customer.full_name
+        return values
 
     async def resolve_incoming_reference(
         session: AsyncSession, details: dict[str, str]
@@ -195,7 +221,7 @@ def create_registration_router(
             raise HTTPException(422, "Дату договора присваивает программа")
         if creating and kind == "outgoing" and payload.details.get("sent_date"):
             raise HTTPException(422, "Дату отправки присваивает программа")
-        if kind == "incoming":
+        if kind == "incoming" and not creating:
             received = payload.details.get("received_date", "").strip()
             try:
                 datetime.strptime(received, "%d.%m.%Y")
@@ -203,16 +229,33 @@ def create_registration_router(
                 raise HTTPException(422, "Укажите дату получения как ДД.ММ.ГГГГ") from exc
 
     @router.get("/{kind}", response_model=list[RecordView])
-    async def list_records(kind: Kind) -> list[RegistrationRecord]:
+    async def list_records(kind: Kind) -> list[RecordView]:
         async with sessions() as session:
             result = await session.scalars(
                 select(RegistrationRecord)
                 .where(RegistrationRecord.kind == kind)
             )
-            return sorted(result, key=registration_sort_key)
+            records = sorted(result, key=registration_sort_key, reverse=True)
+            replies: dict[int, list[str]] = {}
+            if kind == "incoming":
+                outgoing = await session.scalars(
+                    select(RegistrationRecord).where(RegistrationRecord.kind == "outgoing")
+                )
+                for answer in sorted(outgoing, key=registration_sort_key):
+                    source_id = str(answer.details.get("incoming_record_id") or "")
+                    if source_id.isdigit():
+                        replies.setdefault(int(source_id), []).append(answer.registration_number)
+            views = [RecordView.model_validate(record) for record in records]
+            for view in views:
+                if view.id in replies:
+                    view.details = {**view.details, "reply_number": ", ".join(replies[view.id])}
+            return views
 
     @router.post("/{kind}", response_model=RecordView, status_code=201)
-    async def create_record(kind: Kind, payload: RecordInput) -> RegistrationRecord:
+    async def create_record(
+        kind: Kind, payload: RecordInput,
+        admin_id: int = Depends(require_management_token),  # noqa: B008
+    ) -> RegistrationRecord:
         validate_document(kind, payload, creating=True)
         registration_date = datetime.now(ZoneInfo(center_timezone)).date()
         year = registration_date.year
@@ -230,6 +273,16 @@ def create_registration_router(
                 {"kind": kind, "year": year},
             )
             values = payload.model_dump()
+            values = await resolve_customer(session, kind, values)
+            registrar = await session.get(AdminUser, admin_id)
+            if registrar is None:
+                raise HTTPException(403, "Сотрудник не найден")
+            values["details"] = {**values["details"], "executor": registrar.full_name}
+            if kind == "incoming":
+                values["details"] = {
+                    **values["details"], "received_date": registration_date.strftime("%d.%m.%Y"),
+                    "reply_number": "",
+                }
             if kind == "contract":
                 values["document_date"] = registration_date
                 values = await resolve_contract_subjects(session, values, creating=True)
@@ -265,8 +318,15 @@ def create_registration_router(
             validate_document(record.kind, payload, creating=False)
             await validate_person(session, payload.person_id)
             editable = payload.model_dump(exclude={"registration_number", "registration_date"})
+            if "executor" not in editable["details"] and record.details.get("executor"):
+                editable["details"]["executor"] = record.details["executor"]
+            editable = await resolve_customer(
+                session, record.kind, editable, previous_id=record.customer_person_id
+            )
             if record.kind == "contract":
                 editable = await resolve_contract_subjects(session, editable, creating=False)
+            if record.kind == "incoming":
+                editable["details"]["reply_number"] = record.details.get("reply_number", "")
             if record.kind == "outgoing":
                 editable["details"] = await resolve_incoming_reference(
                     session, editable["details"]
@@ -300,6 +360,10 @@ def create_registration_router(
                             counter.next_value = proposed
             if record.kind == "contract" and payload.document_date is not None:
                 record.registration_date = payload.document_date
+            elif record.kind == "incoming":
+                record.registration_date = datetime.strptime(
+                    payload.details["received_date"].strip(), "%d.%m.%Y"
+                ).date()
             elif record.kind == "outgoing":
                 sent_date = payload.details.get("sent_date", "").strip()
                 try:
@@ -327,6 +391,16 @@ def create_registration_router(
             record = await session.get(RegistrationRecord, record_id)
             if record is None:
                 raise HTTPException(404, "Запись не найдена")
+            if record.kind == "incoming":
+                outgoing = await session.scalars(
+                    select(RegistrationRecord).where(RegistrationRecord.kind == "outgoing")
+                )
+                for answer in outgoing:
+                    if answer.details.get("incoming_record_id") == str(record.id):
+                        answer.details = {
+                            **answer.details, "incoming_record_id": "", "incoming_number": "",
+                            "incoming_document_number": "", "incoming_document_date": "",
+                        }
             await session.delete(record)
             await session.commit()
 

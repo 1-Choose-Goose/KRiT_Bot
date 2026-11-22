@@ -20,7 +20,7 @@ def test_every_journal_exports_wrapped_rows_and_repeated_headers(tmp_path) -> No
         assert len(doc.tables[0].rows) == 3
         assert [cell.text for cell in doc.tables[0].rows[0].cells] == list(HEADERS[kind])
         assert doc.tables[0].rows[2].cells[0].text == (
-            "21.11.2026 № ТЕСТ-001" if kind == "incoming" else "№ ТЕСТ-001"
+            "№ ТЕСТ-001"
         )
         assert [paragraph.text for paragraph in doc.paragraphs[:4]] == list(
             ORGANIZATION_HEADER

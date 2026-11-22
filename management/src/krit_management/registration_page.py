@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
-    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from .api import ManagementApi
 from .registration_export import export_journal
+from .widgets import SearchableComboBox
 from .workers import Worker
 
 JOURNALS = (
@@ -53,21 +54,22 @@ def registration_year(record: dict[str, Any]) -> int | None:
 
 FIELDS = {
     "incoming": (
-        ("received_date", "Дата получения"),
+        ("received_date", "Дата получения и регистрации"),
         ("channel", "Способ получения"),
-        ("responsible", "Ответственный"),
+        ("executor", "Исполнитель"),
         ("due_date", "Срок исполнения"),
         ("result", "Результат исполнения"),
-        ("reply_number", "Ответ, исходящий №"),
+        ("reply_number", "Ответы, исходящие №"),
         ("notes", "Примечание"),
     ),
     "outgoing": (
         ("channel", "Способ отправки"),
         ("signer", "Подписал"),
-        ("responsible", "Исполнитель"),
+        ("executor", "Исполнитель"),
         ("notes", "Примечание"),
     ),
     "contract": (
+        ("executor", "Исполнитель"),
         ("student_name", "Ученик (ФИО)"),
         ("service_period", "Срок оказания услуг"),
         ("monthly_price", "Стоимость услуг в месяц"),
@@ -103,6 +105,7 @@ class RegistrationDialog(QDialog):
         self.resize(680, 600)
         self.kind = kind
         self.record = record or {}
+        self.people_by_id = {int(person["id"]): person for person in people}
         layout = QVBoxLayout(self)
         content = QWidget()
         content.setObjectName("registrationForm")
@@ -118,10 +121,6 @@ class RegistrationDialog(QDialog):
             if registered
             else "Программа присвоит при сохранении"
         )
-        if record and kind == "incoming":
-            self.registration_date = QLineEdit(date_label)
-            self.registration_date.setPlaceholderText("ДД.ММ.ГГГГ")
-            form.addRow("Дата регистрации", self.registration_date)
         if record:
             self.registration_number = QLineEdit(str(record["registration_number"]))
             form.addRow("Регистрационный №", self.registration_number)
@@ -168,6 +167,13 @@ class RegistrationDialog(QDialog):
             self.subject_search.setClearButtonEnabled(True)
             self.subject_list = QListWidget()
             self.subject_list.setMinimumHeight(135)
+            check_asset = Path(__file__).with_name("assets") / "checkbox_check.svg"
+            self.subject_list.setStyleSheet(
+                "QListWidget::indicator { width: 18px; height: 18px; "
+                "border: 1px solid #65758e; border-radius: 4px; background: white; }"
+                "QListWidget::indicator:checked { background: #1b63db; "
+                "border-color: #1b63db; image: url(\"" + check_asset.as_posix() + "\"); }"
+            )
             saved_ids = {
                 value.strip()
                 for value in str(details.get("subject_ids") or "").split(",")
@@ -198,12 +204,15 @@ class RegistrationDialog(QDialog):
             self.subject = QTextEdit(str(self.record.get("subject") or ""))
             self.subject.setFixedHeight(80)
             form.addRow("Краткое содержание", self.subject)
-        self.person = QComboBox()
-        self.person.setEditable(True)
-        self.person.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.person.completer().setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        self.person.completer().setFilterMode(Qt.MatchFlag.MatchContains)
-        self.person.completer().setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.person = SearchableComboBox(placeholder="Введите фамилию ученика")
+        popup_style = (
+            "QAbstractItemView { background: white; color: #172033; "
+            "border: 1px solid #ccd5e2; selection-background-color: #e6efff; "
+            "selection-color: #172033; }"
+            "QAbstractItemView::item:selected { background: #e6efff; color: #172033; }"
+        )
+        self.person.view().setStyleSheet(popup_style)
+        self.person.completer().popup().setStyleSheet(popup_style)
         self.person.addItem("Не связан с учеником", None)
         for person in people:
             if "student" in (person.get("roles") or []):
@@ -213,6 +222,12 @@ class RegistrationDialog(QDialog):
             self.person.setCurrentIndex(selected)
         if kind == "contract":
             form.addRow("Ученик в базе", self.person)
+            self.customer_choice = SearchableComboBox(placeholder="Выберите заказчика из базы")
+            self.customer_choice.view().setStyleSheet(popup_style)
+            self.customer_choice.completer().popup().setStyleSheet(popup_style)
+            self._populate_customer_choices(self.record.get("customer_person_id"))
+            self._last_student_id = self.person.currentData()
+            form.addRow("Заказчик в базе", self.customer_choice)
         self.extra: dict[str, QLineEdit | QTextEdit] = {}
         if kind == "outgoing" and read_only:
             form.addRow("Наш входящий №", QLineEdit(str(details.get("incoming_number") or "")))
@@ -224,7 +239,7 @@ class RegistrationDialog(QDialog):
         elif kind == "outgoing":
             self.incoming_records = {int(item["id"]): item for item in (incoming_records or [])}
             self.incoming_choice = QComboBox()
-            self.incoming_choice.addItem("Не связан с входящим документом", None)
+            self.incoming_choice.addItem("Без связи с входящим документом", None)
             for item in incoming_records or []:
                 self.incoming_choice.addItem(
                     f"№ {item['registration_number']} · {item.get('counterparty') or ''}",
@@ -236,7 +251,7 @@ class RegistrationDialog(QDialog):
             )
             if selected >= 0:
                 self.incoming_choice.setCurrentIndex(selected)
-            form.addRow("Наш входящий №", self.incoming_choice)
+            form.addRow("Ответ на входящий", self.incoming_choice)
             for key, label in (
                 ("incoming_document_number", "№ письма отправителя"),
                 ("incoming_document_date", "Дата письма отправителя"),
@@ -252,15 +267,23 @@ class RegistrationDialog(QDialog):
         if kind == "contract" and details.get("source_date"):
             form.addRow("Дата в старом журнале", QLabel(str(details["source_date"])))
         for key, label in FIELDS[kind]:
+            if key in {"received_date", "reply_number", "executor"} and not record:
+                continue
             if key in {"notes", "result", "amendments", "service_period"}:
                 field = QTextEdit(str(details.get(key) or ""))
                 field.setFixedHeight(68)
             else:
                 field = QLineEdit(str(details.get(key) or ""))
+            if key == "reply_number":
+                field.setReadOnly(True)
             if key in {"received_date", "sent_date", "incoming_document_date", "due_date"}:
                 field.setPlaceholderText("ДД.ММ.ГГГГ")
             form.addRow(label, field)
             self.extra[key] = field
+        if kind == "contract" and not read_only:
+            self._auto_student_name = ""
+            self.person.currentIndexChanged.connect(self._person_changed)
+            self.customer_choice.currentIndexChanged.connect(self._customer_changed)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(content)
@@ -317,16 +340,13 @@ class RegistrationDialog(QDialog):
             "counterparty": self._value(self.counterparty),
             "subject": self._subject_value(),
             "person_id": self.person.currentData() if self.kind == "contract" else None,
+            "customer_person_id": (
+                self.customer_choice.currentData() if self.kind == "contract" else None
+            ),
             "details": details,
         }
         if self.record:
             result["registration_number"] = self.registration_number.text().strip()
-            if self.kind == "incoming":
-                result["registration_date"] = (
-                    datetime.strptime(self.registration_date.text().strip(), "%d.%m.%Y")
-                    .date()
-                    .isoformat()
-                )
         return result
 
     @staticmethod
@@ -348,6 +368,57 @@ class RegistrationDialog(QDialog):
         for index in range(self.subject_list.count()):
             item = self.subject_list.item(index)
             item.setHidden(text.casefold() not in item.text().casefold())
+
+    def _person_changed(self, _index: int) -> None:
+        field = self.extra["student_name"]
+        student_id = self.person.currentData()
+        name = self.person.currentText() if student_id is not None else ""
+        if name:
+            field.setText(name)
+            self._auto_student_name = name
+        elif field.text().strip() == self._auto_student_name:
+            field.clear()
+            self._auto_student_name = ""
+        customer_id = self.customer_choice.currentData()
+        if customer_id is not None and customer_id == self._last_student_id:
+            customer_id = student_id
+        self._populate_customer_choices(customer_id)
+        self._last_student_id = student_id
+        if customer_id is not None and customer_id == student_id:
+            self._customer_changed(self.customer_choice.currentIndex())
+
+    def _populate_customer_choices(self, preferred_id: int | None) -> None:
+        student_id = self.person.currentData()
+        student = self.people_by_id.get(int(student_id)) if student_id else None
+        linked_ids = (
+            {int(person["id"]) for person in student.get("guardians", [])}
+            if student else set()
+        )
+        choice = self.customer_choice
+        choice.blockSignals(True)
+        choice.clear()
+        choice.addItem("Ввести заказчика вручную", None)
+        if student:
+            choice.addItem(f"Сам ученик — {student['full_name']}", int(student_id))
+        parents = sorted(
+            (person for person in self.people_by_id.values()
+             if "parent" in (person.get("roles") or [])),
+            key=lambda person: (
+                int(person["id"]) not in linked_ids, person["full_name"].casefold()
+            ),
+        )
+        for parent in parents:
+            label = "Родитель ученика" if int(parent["id"]) in linked_ids else "Родитель"
+            choice.addItem(f"{label} — {parent['full_name']}", int(parent["id"]))
+        index = choice.findData(preferred_id)
+        choice.setCurrentIndex(index if index >= 0 else 0)
+        choice.blockSignals(False)
+
+    def _customer_changed(self, _index: int) -> None:
+        customer_id = self.customer_choice.currentData()
+        customer = self.people_by_id.get(int(customer_id)) if customer_id else None
+        if customer:
+            self.counterparty.setPlainText(str(customer.get("full_name") or ""))
 
     def _selected_subjects(self) -> list[QListWidgetItem]:
         return [
@@ -381,7 +452,7 @@ class RegistrationDialog(QDialog):
         ):
             QMessageBox.warning(self, "Не заполнена дата", "Укажите дату подписания документа.")
             return
-        if self.kind == "incoming":
+        if self.kind == "incoming" and self.record:
             received = self._value(self.extra["received_date"])
             try:
                 datetime.strptime(received, "%d.%m.%Y")
@@ -471,7 +542,7 @@ class RegistrationPage(QWidget):
             table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
             table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             table.setWordWrap(True)
-            table.verticalHeader().setMinimumSectionSize(44)
+            table.verticalHeader().hide()
             table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
             table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
             table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
@@ -517,18 +588,27 @@ class RegistrationPage(QWidget):
     def _apply_filters(self, kind: str) -> None:
         year = self.year_filters[kind].currentData()
         query = self.search_fields[kind].text().strip().casefold()
+
+        def matches(record: dict[str, Any]) -> bool:
+            if not query:
+                return True
+            number = str(record.get("registration_number") or "")
+            if query.isdecimal():
+                sequence = number.rsplit("/", 1)[-1] if "/" in number else ""
+                return sequence.startswith(query)
+            details = record.get("details") or {}
+            return query in " ".join(
+                str(value or "") for value in (
+                    number, record.get("counterparty"), record.get("subject"),
+                    details.get("student_name"),
+                )
+            ).casefold()
+
         records = [
             record
             for record in self.records.get(kind, [])
             if (year is None or registration_year(record) == year)
-            and (
-                not query
-                or query
-                in " ".join(
-                    str(record.get(key) or "")
-                    for key in ("registration_number", "counterparty", "subject")
-                ).casefold()
-            )
+            and matches(record)
         ]
         self.visible_records[kind] = records
         table = self.tables[kind]
